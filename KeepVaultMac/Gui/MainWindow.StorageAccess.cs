@@ -55,6 +55,46 @@ public sealed partial class MainWindow
         return true;
     }
 
+    /// <summary>
+    /// Takes grants produced by the panel helper into the input list.
+    /// </summary>
+    /// <remarks>
+    /// The drop path keeps its own routine because it starts from Avalonia
+    /// storage items; here access already exists as a resolved lease, so the
+    /// only remaining questions are whether the path is still there and whether
+    /// the list accepted it. Anything rejected releases its grant immediately
+    /// rather than leaving a sandbox extension open for a file the app is not
+    /// working with.
+    /// </remarks>
+    private int AddInputAccessLeases(IReadOnlyList<MacStorageAccessLease> leases)
+    {
+        int added = 0;
+        foreach (MacStorageAccessLease lease in leases)
+        {
+            if (_disposed || (!File.Exists(lease.Path) && !Directory.Exists(lease.Path)))
+            {
+                lease.Dispose();
+                continue;
+            }
+
+            added += AddInputPaths([lease.Path]);
+            if (!InputList.Items.OfType<string>().Contains(lease.Path, StringComparer.Ordinal))
+            {
+                lease.Dispose();
+                continue;
+            }
+
+            if (_inputStorageAccess.Remove(lease.Path, out MacStorageAccessLease? previous))
+            {
+                previous.Dispose();
+            }
+
+            _inputStorageAccess[lease.Path] = lease;
+        }
+
+        return added;
+    }
+
     private int AddInputStorageItems(IEnumerable<IStorageItem> items)
     {
         int added = 0;
@@ -127,7 +167,7 @@ public sealed partial class MainWindow
 
     private bool ReplaceStorageAccess(ref MacStorageAccessLease? current, IStorageItem item)
     {
-        if (current is not null && ReferenceEquals(current.Item, item))
+        if (current?.Item is not null && ReferenceEquals(current.Item, item))
         {
             return true;
         }
@@ -153,7 +193,15 @@ public sealed partial class MainWindow
 
         try
         {
-            lease = MacStorageAccessLease.Acquire(item);
+            string? path = GetLocalPath(item);
+            if (path is null)
+            {
+                lease = null!;
+                item.Dispose();
+                return false;
+            }
+
+            lease = MacStorageAccessLease.Acquire(item, path);
             return true;
         }
         catch (Exception exception) when (exception is UnauthorizedAccessException
@@ -171,7 +219,7 @@ public sealed partial class MainWindow
     private MacSecurityScopedResourceLease? AcquireTransientExtractAccess(string archivePath)
     {
         MacStorageAccessLease? access = _extractArchiveAccess is not null
-            && StorageItemNamesPath(_extractArchiveAccess.Item, archivePath)
+            && StorageItemNamesPath(_extractArchiveAccess, archivePath)
                 ? _extractArchiveAccess
                 : StorageFolderIsParentOf(_extractArchiveParentAccess, archivePath)
                     ? _extractArchiveParentAccess
@@ -183,17 +231,10 @@ public sealed partial class MainWindow
             return null;
         }
 
-        try
-        {
-            return MacSecurityScopedResourceLease.Acquire(access.Item);
-        }
-        catch (Exception exception) when (exception is UnauthorizedAccessException
-            or InvalidOperationException
-            or NotSupportedException)
-        {
-            Log($"Transient security-scoped URL lease failed: {exception.Message}");
-            return null;
-        }
+        // The retained lease already holds the scope for the whole operation, so
+        // this borrows it rather than starting a second one: starting twice and
+        // stopping once would leak the sandbox extension.
+        return MacSecurityScopedResourceLease.Borrowed();
     }
 
     private MacSecurityScopedResourceLease AcquireTransientEraseAccess(string archivePath)
@@ -203,7 +244,7 @@ public sealed partial class MainWindow
             throw new UnauthorizedAccessException(T("sandboxFolderAccessRequired"));
         }
 
-        return MacSecurityScopedResourceLease.Acquire(_eraseArchiveParentAccess!.Item);
+        return MacSecurityScopedResourceLease.Borrowed();
     }
 
     private void ReleaseArchiveDestinationAccessIfMismatched(string archivePath)
@@ -219,7 +260,7 @@ public sealed partial class MainWindow
     private void ReleaseExtractAccessIfMismatched(string archivePath)
     {
         if (_extractArchiveAccess is not null
-            && !StorageItemNamesPath(_extractArchiveAccess.Item, archivePath))
+            && !StorageItemNamesPath(_extractArchiveAccess, archivePath))
         {
             _extractArchiveAccess.Dispose();
             _extractArchiveAccess = null;
@@ -246,7 +287,7 @@ public sealed partial class MainWindow
     private void ReleaseEraseAccessIfMismatched(string archivePath)
     {
         if (_eraseArchiveAccess is not null
-            && !StorageItemNamesPath(_eraseArchiveAccess.Item, archivePath))
+            && !StorageItemNamesPath(_eraseArchiveAccess, archivePath))
         {
             _eraseArchiveAccess.Dispose();
             _eraseArchiveAccess = null;
@@ -267,7 +308,7 @@ public sealed partial class MainWindow
             return true;
         }
 
-        IStorageFolder? folder = await RequestExactParentFolderAccessAsync(
+        MacStorageAccessLease? folder = await RequestExactParentFolderAccessAsync(
             archivePath,
             T("chooseArchiveDestinationFolderDialog"),
             _archiveDestinationAccess);
@@ -276,7 +317,9 @@ public sealed partial class MainWindow
             return false;
         }
 
-        return RetainArchiveDestinationAccess(folder);
+        _archiveDestinationAccess?.Dispose();
+        _archiveDestinationAccess = folder;
+        return true;
     }
 
     private async Task<bool> EnsureExtractArchiveParentAccessAsync(string archivePath)
@@ -287,7 +330,7 @@ public sealed partial class MainWindow
             return true;
         }
 
-        IStorageFolder? folder = await RequestExactParentFolderAccessAsync(
+        MacStorageAccessLease? folder = await RequestExactParentFolderAccessAsync(
             archivePath,
             T("chooseArchiveSidecarFolderDialog"),
             _extractArchiveAccess);
@@ -296,7 +339,9 @@ public sealed partial class MainWindow
             return false;
         }
 
-        return ReplaceStorageAccess(ref _extractArchiveParentAccess, folder);
+        _extractArchiveParentAccess?.Dispose();
+        _extractArchiveParentAccess = folder;
+        return true;
     }
 
     private async Task<bool> EnsureExtractOutputParentAccessAsync(string outputPath)
@@ -307,7 +352,7 @@ public sealed partial class MainWindow
             return true;
         }
 
-        IStorageFolder? folder = await RequestExactParentFolderAccessAsync(
+        MacStorageAccessLease? folder = await RequestExactParentFolderAccessAsync(
             outputPath,
             T("chooseOutputParentDialog"),
             _extractOutputParentAccess);
@@ -316,7 +361,9 @@ public sealed partial class MainWindow
             return false;
         }
 
-        return RetainExtractOutputParentAccess(folder);
+        _extractOutputParentAccess?.Dispose();
+        _extractOutputParentAccess = folder;
+        return true;
     }
 
     private async Task<bool> EnsureEraseArchiveParentAccessAsync(string archivePath)
@@ -326,7 +373,7 @@ public sealed partial class MainWindow
             return true;
         }
 
-        IStorageFolder? folder = await RequestExactParentFolderAccessAsync(
+        MacStorageAccessLease? folder = await RequestExactParentFolderAccessAsync(
             archivePath,
             T("chooseEraseSidecarFolderDialog"),
             _eraseArchiveAccess);
@@ -335,10 +382,12 @@ public sealed partial class MainWindow
             return false;
         }
 
-        return ReplaceStorageAccess(ref _eraseArchiveParentAccess, folder);
+        _eraseArchiveParentAccess?.Dispose();
+        _eraseArchiveParentAccess = folder;
+        return true;
     }
 
-    private async Task<IStorageFolder?> RequestExactParentFolderAccessAsync(
+    private async Task<MacStorageAccessLease?> RequestExactParentFolderAccessAsync(
         string childPath,
         string title,
         MacStorageAccessLease? suggestedAccess)
@@ -351,26 +400,20 @@ public sealed partial class MainWindow
             return null;
         }
 
-        IReadOnlyList<IStorageFolder> folders = await StorageProvider.OpenFolderPickerAsync(new FolderPickerOpenOptions
-        {
-            Title = title,
-            AllowMultiple = false,
-            SuggestedStartLocation = suggestedAccess?.Item as IStorageFolder,
-        });
-        IStorageFolder? selected = folders.FirstOrDefault();
-        foreach (IStorageFolder extra in folders.Skip(1))
-        {
-            extra.Dispose();
-        }
-
+        _ = suggestedAccess;
+        MacStorageAccessLease? selected = await RequestPanelAccessAsync(
+            MacPanelBroker.PanelKind.OpenFolder,
+            title,
+            suggestedName: string.Empty);
         if (selected is null)
         {
             await WarnAsync(T("sandboxFolderAccessRequired"));
             return null;
         }
 
-        string? selectedPath = GetLocalPath(selected);
-        if (!PathsNameSameDirectory(selectedPath, expectedParent))
+        // The user must grant the exact folder that holds the file, so a
+        // neighbouring or parent folder is refused rather than silently used.
+        if (!PathsNameSameDirectory(selected.Path, expectedParent))
         {
             selected.Dispose();
             await WarnAsync(string.Format(
@@ -381,6 +424,78 @@ public sealed partial class MainWindow
         }
 
         return selected;
+    }
+
+    /// <summary>
+    /// Raises one panel through the helper bundle and retains the access it
+    /// granted.
+    /// </summary>
+    private async Task<MacStorageAccessLease?> RequestPanelAccessAsync(
+        MacPanelBroker.PanelKind kind,
+        string title,
+        string suggestedName)
+    {
+        IReadOnlyList<MacPanelBroker.PanelSelection> selections;
+        try
+        {
+            selections = await MacPanelBroker.ShowAsync(kind, title, suggestedName, _lifetime.Token);
+        }
+        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested)
+        {
+            return null;
+        }
+        catch (Exception exception) when (exception is UnauthorizedAccessException
+            or InvalidOperationException
+            or InvalidDataException
+            or IOException
+            or NotSupportedException)
+        {
+            Log($"Panel request failed: {exception.Message}");
+            await ErrorAsync(T("sandboxLeaseFailed"));
+            return null;
+        }
+
+        if (selections.Count == 0)
+        {
+            return null;
+        }
+
+        foreach (MacPanelBroker.PanelSelection extra in selections.Skip(1))
+        {
+            extra.Dispose();
+        }
+
+        MacPanelBroker.PanelSelection first = selections[0];
+        return MacStorageAccessLease.FromResolvedSelection(first.Path, first.Lease);
+    }
+
+    /// <summary>Raises a multi-selection panel and retains every grant.</summary>
+    private async Task<IReadOnlyList<MacStorageAccessLease>> RequestPanelAccessManyAsync(
+        MacPanelBroker.PanelKind kind,
+        string title)
+    {
+        IReadOnlyList<MacPanelBroker.PanelSelection> selections;
+        try
+        {
+            selections = await MacPanelBroker.ShowAsync(kind, title, string.Empty, _lifetime.Token);
+        }
+        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested)
+        {
+            return [];
+        }
+        catch (Exception exception) when (exception is UnauthorizedAccessException
+            or InvalidOperationException
+            or InvalidDataException
+            or IOException
+            or NotSupportedException)
+        {
+            Log($"Panel request failed: {exception.Message}");
+            await ErrorAsync(T("sandboxLeaseFailed"));
+            return [];
+        }
+
+        return [.. selections.Select(selection =>
+            MacStorageAccessLease.FromResolvedSelection(selection.Path, selection.Lease))];
     }
 
     private void DisposeStorageAccess()
@@ -422,17 +537,30 @@ public sealed partial class MainWindow
         }
     }
 
-    private static bool StorageItemNamesPath(IStorageItem? item, string path)
+    /// <summary>
+    /// Whether a retained lease grants access to exactly this path.
+    /// </summary>
+    /// <remarks>
+    /// Compared on the lease's canonical path rather than on a storage item,
+    /// because a lease obtained through the panel helper has no storage item
+    /// behind it — only a resolved security-scoped URL.
+    /// </remarks>
+    /// <summary>Whether a dropped storage item names exactly this path.</summary>
+    private static bool StorageItemHasPath(IStorageItem? item, string path)
     {
         return item is not null && PathsNameSameItem(GetLocalPath(item), NormalizeLocalPath(path));
+    }
+
+    private static bool StorageItemNamesPath(MacStorageAccessLease? access, string path)
+    {
+        return access is not null && PathsNameSameItem(access.Path, NormalizeLocalPath(path));
     }
 
     private static bool StorageFolderIsParentOf(MacStorageAccessLease? access, string childPath)
     {
         string? normalizedChild = NormalizeLocalPath(childPath);
         string? parent = normalizedChild is null ? null : Path.GetDirectoryName(normalizedChild);
-        return access?.Item is IStorageFolder folder
-            && PathsNameSameDirectory(GetLocalPath(folder), parent);
+        return access is not null && PathsNameSameDirectory(access.Path, parent);
     }
 
     private static bool PathsNameSameDirectory(string? left, string? right)

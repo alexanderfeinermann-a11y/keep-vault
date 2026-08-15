@@ -702,7 +702,7 @@ codesign \
   --options runtime \
   ${timestamp_arguments[@]} \
   --entitlements ${packaging_dir}/PanelHelper.entitlements \
-  --identifier ${bundle_identifier}.panels \
+  --identifier ${bundle_identifier}.filepanels \
   ${helper_app}
 codesign --verify --strict ${helper_app}
 

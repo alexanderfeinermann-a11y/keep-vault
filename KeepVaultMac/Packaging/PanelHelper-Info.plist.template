@@ -9,7 +9,7 @@
     <key>CFBundleExecutable</key>
     <string>Keep Vault Panels</string>
     <key>CFBundleIdentifier</key>
-    <string>de.michael-feinermann.keep-vault.panels</string>
+    <string>de.michael-feinermann.keep-vault.filepanels</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>

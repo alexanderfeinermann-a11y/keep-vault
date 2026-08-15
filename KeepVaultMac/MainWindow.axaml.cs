@@ -257,24 +257,16 @@ public sealed partial class MainWindow : Window, IDisposable
 
     private async void AddFiles_Click(object? sender, RoutedEventArgs e)
     {
-        IReadOnlyList<IStorageFile> files = await StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
-        {
-            Title = T("chooseFilesDialog"),
-            AllowMultiple = true,
-        });
-        AddInputStorageItems(files);
-        DisposeUnretainedStorageItems(files);
+        AddInputAccessLeases(await RequestPanelAccessManyAsync(
+            MacPanelBroker.PanelKind.OpenFiles,
+            T("chooseFilesDialog")));
     }
 
     private async void AddFolder_Click(object? sender, RoutedEventArgs e)
     {
-        IReadOnlyList<IStorageFolder> folders = await StorageProvider.OpenFolderPickerAsync(new FolderPickerOpenOptions
-        {
-            Title = T("chooseFolderDialog"),
-            AllowMultiple = false,
-        });
-        AddInputStorageItems(folders);
-        DisposeUnretainedStorageItems(folders);
+        AddInputAccessLeases(await RequestPanelAccessManyAsync(
+            MacPanelBroker.PanelKind.OpenFolder,
+            T("chooseFolderDialog")));
     }
 
     private void ClearInputs_Click(object? sender, RoutedEventArgs e)
@@ -286,101 +278,51 @@ public sealed partial class MainWindow : Window, IDisposable
     private async void ChooseArchive_Click(object? sender, RoutedEventArgs e)
     {
         bool encrypted = EncryptBox.IsChecked == true;
-        IReadOnlyList<IStorageFolder> folders = await StorageProvider.OpenFolderPickerAsync(new FolderPickerOpenOptions
-        {
-            Title = T("saveArchiveDialog"),
-            AllowMultiple = false,
-            SuggestedStartLocation = _archiveDestinationAccess?.Item as IStorageFolder,
-        });
-        IStorageFolder? folder = folders.FirstOrDefault();
-        foreach (IStorageFolder extra in folders.Skip(1))
-        {
-            extra.Dispose();
-        }
-
+        MacStorageAccessLease? folder = await RequestPanelAccessAsync(
+            MacPanelBroker.PanelKind.OpenFolder,
+            T("saveArchiveDialog"),
+            suggestedName: string.Empty);
         if (folder is null)
         {
             return;
         }
 
-        if (GetLocalPath(folder) is { } path)
-        {
-            if (!RetainArchiveDestinationAccess(folder))
-            {
-                return;
-            }
-
-            ArchivePathBox.Text = SuggestTargetArchivePath(path, encrypted);
-            ResetKeySheetStatus();
-            return;
-        }
-
-        folder.Dispose();
+        _archiveDestinationAccess?.Dispose();
+        _archiveDestinationAccess = folder;
+        ArchivePathBox.Text = SuggestTargetArchivePath(folder.Path, encrypted);
+        ResetKeySheetStatus();
     }
 
     private async void ChooseExtractArchive_Click(object? sender, RoutedEventArgs e)
     {
-        IReadOnlyList<IStorageFile> files = await StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
-        {
-            Title = T("chooseArchiveDialog"),
-            AllowMultiple = false,
-            FileTypeFilter = new[] { AnyArchiveType },
-        });
-        IStorageFile? file = files.FirstOrDefault();
-        foreach (IStorageFile extra in files.Skip(1))
-        {
-            extra.Dispose();
-        }
-
+        MacStorageAccessLease? file = await RequestPanelAccessAsync(
+            MacPanelBroker.PanelKind.OpenFile,
+            T("chooseArchiveDialog"),
+            suggestedName: string.Empty);
         if (file is null)
         {
             return;
         }
 
-        if (GetLocalPath(file) is { } path)
-        {
-            if (!RetainExtractArchiveAccess(file))
-            {
-                return;
-            }
-
-            SetExtractArchivePath(path);
-            return;
-        }
-
-        file.Dispose();
+        _extractArchiveAccess?.Dispose();
+        _extractArchiveAccess = file;
+        SetExtractArchivePath(file.Path);
     }
 
     private async void ChooseOutputFolder_Click(object? sender, RoutedEventArgs e)
     {
-        IReadOnlyList<IStorageFolder> folders = await StorageProvider.OpenFolderPickerAsync(new FolderPickerOpenOptions
-        {
-            Title = T("chooseOutputDialog"),
-            AllowMultiple = false,
-        });
-        IStorageFolder? folder = folders.FirstOrDefault();
-        foreach (IStorageFolder extra in folders.Skip(1))
-        {
-            extra.Dispose();
-        }
-
+        MacStorageAccessLease? folder = await RequestPanelAccessAsync(
+            MacPanelBroker.PanelKind.OpenFolder,
+            T("chooseOutputDialog"),
+            suggestedName: string.Empty);
         if (folder is null)
         {
             return;
         }
 
-        if (GetLocalPath(folder) is { } path)
-        {
-            if (!RetainExtractOutputParentAccess(folder))
-            {
-                return;
-            }
-
-            OutputFolderBox.Text = SuggestOutputFolderPath(ExtractArchiveBox.Text ?? string.Empty, path);
-            return;
-        }
-
-        folder.Dispose();
+        _extractOutputParentAccess?.Dispose();
+        _extractOutputParentAccess = folder;
+        OutputFolderBox.Text = SuggestOutputFolderPath(ExtractArchiveBox.Text ?? string.Empty, folder.Path);
     }
 
     private void EncryptBox_PropertyChanged(object? sender, AvaloniaPropertyChangedEventArgs e)
@@ -919,24 +861,16 @@ public sealed partial class MainWindow : Window, IDisposable
             }
 
             MacKeySheetData data = BuildKeySheetData();
-            using IStorageFile? file = await StorageProvider.SaveFilePickerAsync(new FilePickerSaveOptions
-            {
-                Title = T("saveTestKeySheetDialog"),
-                DefaultExtension = "pdf",
-                SuggestedFileName = $"{Path.GetFileNameWithoutExtension(data.ArchivePath)}-key-sheets-test-export.pdf",
-                FileTypeChoices = new[] { PdfType },
-            });
-            if (file?.TryGetLocalPath() is not { } path)
+            using MacStorageAccessLease? file = await RequestPanelAccessAsync(
+                MacPanelBroker.PanelKind.SaveFile,
+                T("saveTestKeySheetDialog"),
+                $"{Path.GetFileNameWithoutExtension(data.ArchivePath)}-key-sheets-test-export.pdf");
+            if (file is null || _disposed)
             {
                 return;
             }
 
-            if (_disposed)
-            {
-                return;
-            }
-
-            using MacSecurityScopedResourceLease fileAccess = MacSecurityScopedResourceLease.Acquire(file);
+            string path = file.Path;
 
             bool confirmed = await ConfirmAsync(T("testPdfWarning"));
             if (!confirmed)
@@ -1004,35 +938,18 @@ public sealed partial class MainWindow : Window, IDisposable
 
     private async void ChooseEraseFile_Click(object? sender, RoutedEventArgs e)
     {
-        IReadOnlyList<IStorageFile> files = await StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
-        {
-            Title = T("chooseEraseDialog"),
-            AllowMultiple = false,
-            FileTypeFilter = new[] { EncryptedArchiveType },
-        });
-        IStorageFile? file = files.FirstOrDefault();
-        foreach (IStorageFile extra in files.Skip(1))
-        {
-            extra.Dispose();
-        }
-
+        MacStorageAccessLease? file = await RequestPanelAccessAsync(
+            MacPanelBroker.PanelKind.OpenFile,
+            T("chooseEraseDialog"),
+            suggestedName: string.Empty);
         if (file is null)
         {
             return;
         }
 
-        if (GetLocalPath(file) is { } path)
-        {
-            if (!RetainEraseArchiveAccess(file))
-            {
-                return;
-            }
-
-            SetErasePath(path);
-            return;
-        }
-
-        file.Dispose();
+        _eraseArchiveAccess?.Dispose();
+        _eraseArchiveAccess = file;
+        SetErasePath(file.Path);
     }
 
     private async void AnalyzeErase_Click(object? sender, RoutedEventArgs e) => await AnalyzeEraseAsync();

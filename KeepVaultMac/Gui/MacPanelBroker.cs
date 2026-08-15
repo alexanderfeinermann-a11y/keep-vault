@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Security.Cryptography;
 using System.Runtime.InteropServices;
 using System.Text;
 using KalynaArchiver.Services;
@@ -78,6 +79,84 @@ internal static partial class MacPanelBroker
         return helper;
     }
 
+    /// <summary>Path of the helper's app bundle, which is what LaunchServices opens.</summary>
+    private static string ResolveHelperBundlePath()
+    {
+        string executable = ResolveHelperPath();
+        string bundle = Path.GetFullPath(Path.Combine(executable, "..", "..", ".."));
+        if (!string.Equals(Path.GetExtension(bundle), ".app", StringComparison.Ordinal) || !Directory.Exists(bundle))
+        {
+            throw new InvalidOperationException("The panel helper bundle could not be located.");
+        }
+
+        return bundle;
+    }
+
+    /// <summary>
+    /// The directory in the shared application group where the helper leaves
+    /// its answer. Created private to the user.
+    /// </summary>
+    private static string ResolveReplyDirectory()
+    {
+        string home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        string directory = Path.Combine(
+            home,
+            "Library",
+            "Group Containers",
+            "2T6K9PGS55.de.michael-feinermann.keep-vault",
+            "PanelReplies");
+        Directory.CreateDirectory(directory);
+        File.SetUnixFileMode(
+            directory,
+            UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        return directory;
+    }
+
+    /// <summary>
+    /// Waits for the helper's reply, which appears only once the user has
+    /// dismissed the panel — hence the generous ceiling.
+    /// </summary>
+    private static async Task<string> AwaitReplyAsync(string replyPath, CancellationToken cancellationToken)
+    {
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(HelperTimeout);
+        while (true)
+        {
+            timeout.Token.ThrowIfCancellationRequested();
+            if (File.Exists(replyPath))
+            {
+                var info = new FileInfo(replyPath);
+                if (info.Length > MaxResponseBytes)
+                {
+                    throw new InvalidDataException("The panel helper returned an oversized reply.");
+                }
+
+                if (info.LinkTarget is not null)
+                {
+                    throw new InvalidDataException("The panel reply is a symbolic link.");
+                }
+
+                return await File.ReadAllTextAsync(replyPath, Encoding.UTF8, timeout.Token).ConfigureAwait(false);
+            }
+
+            await Task.Delay(TimeSpan.FromMilliseconds(120), timeout.Token).ConfigureAwait(false);
+        }
+    }
+
+    private static void TryDeleteReply(string replyPath)
+    {
+        try
+        {
+            File.Delete(replyPath);
+            File.Delete(replyPath + ".partial");
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            // A leftover reply is inert: it is named by a spent nonce and is
+            // overwritten before the next request of the same name could exist.
+        }
+    }
+
     internal static async Task<IReadOnlyList<PanelSelection>> ShowAsync(
         PanelKind kind,
         string title,
@@ -85,6 +164,7 @@ internal static partial class MacPanelBroker
         CancellationToken cancellationToken)
     {
         string helper = ResolveHelperPath();
+        string helperBundle = ResolveHelperBundlePath();
 
         // The helper is executable code inside the bundle, so it passes the same
         // Apple signature and Team ID gate as everything else this app runs.
@@ -94,13 +174,30 @@ internal static partial class MacPanelBroker
             throw new InvalidOperationException($"The panel helper failed Apple signature validation: {signature.Message}");
         }
 
+        // The helper is started through LaunchServices rather than spawned. A
+        // sandboxed process cannot create a child that establishes a sandbox of
+        // its own: such a child hangs inside libsecinit before reaching main,
+        // which is exactly what happened when this went through posix_spawn.
+        // LaunchServices gives the helper the independent sandbox that lets it
+        // raise a panel at all.
+        //
+        // That also removes the inherited pipe, so the answer comes back through
+        // the application group both bundles share, in a file named by a nonce
+        // this request generates. The nonce means a reply can only satisfy the
+        // request that asked for it.
+        string nonce = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
+        string replyPath = Path.Combine(ResolveReplyDirectory(), nonce);
+
         var startInfo = new ProcessStartInfo
         {
-            FileName = helper,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
+            FileName = "/usr/bin/open",
             UseShellExecute = false,
+            RedirectStandardError = true,
         };
+        startInfo.ArgumentList.Add("-n");
+        startInfo.ArgumentList.Add("-a");
+        startInfo.ArgumentList.Add(helperBundle);
+        startInfo.ArgumentList.Add("--args");
         startInfo.ArgumentList.Add(kind switch
         {
             PanelKind.OpenFile => "open-file",
@@ -109,51 +206,55 @@ internal static partial class MacPanelBroker
             PanelKind.SaveFile => "save-file",
             _ => throw new ArgumentOutOfRangeException(nameof(kind)),
         });
+        startInfo.ArgumentList.Add(nonce);
         startInfo.ArgumentList.Add(title);
         if (kind == PanelKind.SaveFile)
         {
             startInfo.ArgumentList.Add(Path.GetFileName(suggestedName));
         }
 
-        using var process = Process.Start(startInfo)
-            ?? throw new InvalidOperationException("The panel helper could not be started.");
-        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeout.CancelAfter(HelperTimeout);
-
         string response;
         try
         {
-            Task<string> readOutput = process.StandardOutput.ReadToEndAsync(timeout.Token);
-            await process.WaitForExitAsync(timeout.Token).ConfigureAwait(false);
-            response = await readOutput.ConfigureAwait(false);
+            using (Process launcher = Process.Start(startInfo)
+                ?? throw new InvalidOperationException("The panel helper could not be started."))
+            {
+                await launcher.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
+                if (launcher.ExitCode != 0)
+                {
+                    string error = await launcher.StandardError.ReadToEndAsync(CancellationToken.None).ConfigureAwait(false);
+                    throw new InvalidOperationException($"The panel helper could not be launched: {error.Trim()}");
+                }
+            }
+
+            response = await AwaitReplyAsync(replyPath, cancellationToken).ConfigureAwait(false);
         }
-        catch (OperationCanceledException)
+        finally
         {
-            TryKill(process);
-            throw;
+            TryDeleteReply(replyPath);
         }
 
-        if (response.Length > MaxResponseBytes)
+        string[] lines = response.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (lines.Length == 0)
         {
-            throw new InvalidDataException("The panel helper returned an oversized response.");
+            throw new InvalidDataException("The panel helper returned an empty reply.");
         }
 
-        // Exit code 2 means the user cancelled, which is not a failure.
-        if (process.ExitCode == 2)
+        if (string.Equals(lines[0], "CANCELLED", StringComparison.Ordinal))
         {
             return [];
         }
 
-        if (process.ExitCode != 0)
+        if (!string.Equals(lines[0], "OK", StringComparison.Ordinal))
         {
-            string error = await process.StandardError.ReadToEndAsync(CancellationToken.None).ConfigureAwait(false);
-            throw new InvalidOperationException($"The panel helper failed: {error.Trim()}");
+            throw new InvalidOperationException(
+                $"The panel helper reported a failure: {string.Join(' ', lines.Skip(1)).Trim()}");
         }
 
         var selections = new List<PanelSelection>();
         try
         {
-            foreach (string line in response.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            foreach (string line in lines.Skip(1))
             {
                 selections.Add(ResolveBookmark(line));
             }
