@@ -527,9 +527,17 @@ private enum KeepVaultLauncher {
                 cdHashes: KeepVaultSupervisorApplePins.cdHashes)
             try validateStaticCode(at: supervisorURL, requirement: supervisorStaticRequirement, nested: false)
 
+            // Contents/MacOS may only hold Mach-O executables; codesign refuses
+            // to seal a bundle carrying other payload there. The detached
+            // hybrid signatures therefore live under Contents/Resources,
+            // mirroring the layout below Contents/MacOS.
+            let coreSignatureURL = bundleURL.appendingPathComponent(
+                "Contents/Resources/HybridSignatures/\(coreName).khsig",
+                isDirectory: false)
+
             let openedCore = try openAndHashCore(at: coreURL.path)
             do {
-                try verifyHybridCore(openedCore, signaturePath: coreURL.path + ".khsig")
+                try verifyHybridCore(openedCore, signaturePath: coreSignatureURL.path)
                 let (supervisorProcess, readyDescriptor) = try spawnSuspendedSupervisor(at: supervisorURL.path)
                 do {
                     try validateDynamicCode(

@@ -153,8 +153,14 @@ for macho in ${macho_files[@]}; do
     print -u2 "Mach-O architecture set differs from the launcher: ${macho}"
     exit 1
   }
+  # Enumerate real load-time dependencies straight from the Mach-O load
+  # commands instead of parsing "otool -L". That listing repeats an unindented
+  # header for every universal slice, and for a library its first entry is the
+  # file's own LC_ID_DYLIB install name rather than a dependency — Avalonia's
+  # native library, for instance, is named /usr/local/lib/... without ever
+  # loading from there. Selecting the LC_LOAD_* commands covers every slice and
+  # every load kind while excluding the install name by construction.
   while IFS= read -r dependency; do
-    dependency=$(print -r -- ${dependency} | sed -E 's/^[[:space:]]+//; s/[[:space:]]+\(.*$//')
     [[ -z ${dependency} ]] && continue
     case ${dependency} in
       /System/Library/*|/usr/lib/*|@rpath/*|@loader_path/*|@executable_path/*) ;;
@@ -163,7 +169,10 @@ for macho in ${macho_files[@]}; do
         exit 1
         ;;
     esac
-  done < <(otool -L ${macho} | tail -n +2)
+  done < <(otool -l ${macho} | awk '
+    /^ *cmd LC_(LOAD_DYLIB|LOAD_WEAK_DYLIB|REEXPORT_DYLIB|LAZY_LOAD_DYLIB|LOAD_UPWARD_DYLIB)$/ { want = 1; next }
+    /^ *cmd / { want = 0 }
+    want && /^ *name / { print $2; want = 0 }')
 done
 
 core_details=$(codesign -dvvv ${core} 2>&1)
@@ -241,16 +250,29 @@ for entitlement_file in ${core_entitlements} ${launcher_entitlements} ${zpaq_ent
   done
 done
 
+# Contents/MacOS is reserved for Mach-O executables, so the detached hash and
+# hybrid-signature sidecars live under Contents/Resources/HybridSignatures,
+# mirroring the layout below Contents/MacOS.
+macos_root=${app_path}/Contents/MacOS
+signature_root=${app_path}/Contents/Resources/HybridSignatures
 hybrid_targets=(${core} ${required_native[@]/#/${native_dir}/})
 for target in ${hybrid_targets[@]}; do
+  sidecar_base=${signature_root}/${target#${macos_root}/}
   for suffix in .sha3 .skein .khsig .sha3.khsig .skein.khsig; do
-    sidecar=${target}${suffix}
+    sidecar=${sidecar_base}${suffix}
     if [[ ! -f ${sidecar} || -L ${sidecar} ]]; then
       print -u2 "Required hybrid integrity sidecar is missing or a symbolic link: ${sidecar}"
       exit 1
     fi
   done
 done
+
+# Nothing but Mach-O payload may remain in Contents/MacOS, otherwise codesign
+# cannot seal the bundle and the relocation step silently regressed.
+if find ${macos_root} -type f \( -name '*.sha3' -o -name '*.skein' -o -name '*.khsig' \) -print -quit | grep -q .; then
+  print -u2 'Hybrid-signature sidecars are present in Contents/MacOS; the bundle layout is invalid.'
+  exit 1
+fi
 
 if [[ -x ${dotnet_command} && ! -L ${dotnet_command} && -f ${mldsa_public_key} ]]; then
   signer_lock=${repo_root}/KeepVaultMac/Packaging/HybridSigner/packages.lock.json
@@ -274,6 +296,8 @@ if [[ -x ${dotnet_command} && ! -L ${dotnet_command} && -f ${mldsa_public_key} ]
     verify
     --mldsa-public-key ${mldsa_public_key}
     --policy ${repo_root}/KeepVaultMac/Directory.Build.props
+    --payload-root ${macos_root}
+    --signature-root ${signature_root}
   )
   for target in ${hybrid_targets[@]}; do
     verify_arguments+=(--target ${target})

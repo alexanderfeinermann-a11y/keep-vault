@@ -1,5 +1,6 @@
 using System.Buffers.Binary;
 using System.Diagnostics;
+using System.Reflection;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -12,11 +13,24 @@ using Org.BouncyCastle.Crypto.Parameters;
 
 internal static partial class MacComprehensiveTests
 {
+    /// <summary>
+    /// The Apple Team ID compiled into the app assembly, which every Apple
+    /// code-signature check is pinned to. Read from assembly metadata so the
+    /// test cannot drift away from the value the build actually signs with.
+    /// </summary>
+    private static readonly string ExpectedAppleTeamIdentifier =
+        typeof(IntegrityService).Assembly
+            .GetCustomAttributes<AssemblyMetadataAttribute>()
+            .FirstOrDefault(attribute => string.Equals(attribute.Key, "KeepVaultAppleTeamIdentifier", StringComparison.Ordinal))
+            ?.Value
+        ?? throw new InvalidOperationException("The pinned Apple Team ID is not compiled into the app assembly.");
+
     private const string UserPassword = "N!r7$Vq2#Lm8%Tx3&Jd9*Wp4+Kg5=Zu6?Ce";
     private const string WrongPassword = "Q!m8$Ls2#Vx7%Tp4&Jd9*Wr5+Kn6=Zu3?Ce";
 
     internal static async Task RunAsync()
     {
+        StageSignedNativeComponents();
         var tests = new (string Name, Func<Task> Run)[]
         {
             ("macOS process hardening", TestProcessHardeningAsync),
@@ -51,16 +65,66 @@ internal static partial class MacComprehensiveTests
         return Task.CompletedTask;
     }
 
+    private static readonly string[] NativeLogicalNames =
+    [
+        "zpaq.exe",
+        "argon2.exe",
+        "argon2_ref.dll",
+        "kalyna_ref.dll",
+        "threefish_ref.dll",
+    ];
+
+    private static readonly string[] SidecarSuffixes =
+        [".sha3", ".skein", ".khsig", ".sha3.khsig", ".skein.khsig"];
+
+    /// <summary>
+    /// Copies the release bundle's signed native components, together with
+    /// their detached manifests and hybrid signatures, into this test's own
+    /// sealed Native directory.
+    /// </summary>
+    /// <remarks>
+    /// The point of this group is to exercise the artifacts the build actually
+    /// signs; the development copies otherwise present in the test output
+    /// carry no signatures and would prove nothing. Staging them locally
+    /// rather than reading across into the bundle keeps
+    /// <see cref="NativeToolIntegrity"/>'s rule that a native tool may only be
+    /// loaded from the running image's own directories fully in force — that
+    /// control is deliberately not relaxed for tests. Inside the bundle the
+    /// sidecars live under Contents/Resources; here they sit adjacent, which is
+    /// exactly what the resolver reports for a location outside a bundle.
+    /// </remarks>
+    private static void StageSignedNativeComponents()
+    {
+        string? bundle = Environment.GetEnvironmentVariable("KEEPVAULT_SIGNED_BUNDLE");
+        if (string.IsNullOrEmpty(bundle))
+        {
+            return;
+        }
+
+        string bundleRoot = Path.Combine(bundle, "Contents", "MacOS");
+        string stageDirectory = Path.Combine(AppContext.BaseDirectory, "Native");
+        Directory.CreateDirectory(stageDirectory);
+        foreach (string logicalName in NativeLogicalNames)
+        {
+            string source = NativeToolIntegrity.ResolveKnownTool(logicalName, bundleRoot)
+                ?? throw new FileNotFoundException($"Signed native component is unavailable in the bundle: {logicalName}");
+            string sourceSidecarBase = IntegrityService.ResolveSidecarBasePath(source);
+            string destination = Path.Combine(stageDirectory, Path.GetFileName(source));
+            File.Copy(source, destination, overwrite: true);
+            foreach (string suffix in SidecarSuffixes)
+            {
+                File.Copy(sourceSidecarBase + suffix, destination + suffix, overwrite: true);
+            }
+        }
+    }
+
+    private static string ResolveSignedComponent(string logicalName)
+        => NativeToolIntegrity.ResolveKnownTool(logicalName)
+            ?? throw new FileNotFoundException($"Signed native component is unavailable: {logicalName}");
+
     private static Task TestNativeTrustAsync()
     {
-        string[] logicalNames =
-        [
-            "zpaq.exe",
-            "argon2.exe",
-            "argon2_ref.dll",
-            "kalyna_ref.dll",
-            "threefish_ref.dll",
-        ];
+        string[] logicalNames = NativeLogicalNames;
 
         Require(SigningTrustPolicy.IsConfigured, "Compiled hybrid-signature policy is not configured.");
         HybridSignaturePolicy policy = SigningTrustPolicy.HybridPolicy
@@ -68,12 +132,12 @@ internal static partial class MacComprehensiveTests
 
         foreach (string logicalName in logicalNames)
         {
-            string path = NativeToolIntegrity.ResolveKnownTool(logicalName)
-                ?? throw new FileNotFoundException($"Signed native component is unavailable: {logicalName}");
+            string path = ResolveSignedComponent(logicalName);
             Require(File.ResolveLinkTarget(path, returnFinalTarget: false) is null, $"Native component is a symbolic link: {logicalName}");
-            foreach (string suffix in new[] { ".sha3", ".skein", ".khsig", ".sha3.khsig", ".skein.khsig" })
+            string sidecarBase = IntegrityService.ResolveSidecarBasePath(path);
+            foreach (string suffix in SidecarSuffixes)
             {
-                Require(File.Exists(path + suffix), $"Native component sidecar is missing: {logicalName}{suffix}");
+                Require(File.Exists(sidecarBase + suffix), $"Native component sidecar is missing: {logicalName}{suffix}");
             }
 
             ToolIntegrityStatus status = IntegrityService.CheckFile(path, requireManifest: true);
@@ -81,19 +145,44 @@ internal static partial class MacComprehensiveTests
             Require(status.HashMatches, $"Dual manifest failed for {logicalName}.");
             Require(status.HybridSignatureMatches, $"Hybrid RSA-PSS/ML-DSA signature failed for {logicalName}.");
             Require(IntegrityService.IsAcceptedSignatureState(status.SignatureState), $"Apple signature failed for {logicalName}.");
-            Require(SigningTrustPolicy.Matches(status.SignerSha256, status.SignerSha3_512, status.SignerSkein1024), $"RSA SPKI pin mismatch for {logicalName}.");
+
+            // Windows pins the Authenticode signer certificate by hash. macOS
+            // exposes no equivalent certificate through the Security
+            // framework, so ToolIntegrityStatus deliberately reports no signer
+            // hashes here. The identical RSA-SPKI and ML-DSA-87 pins are
+            // enforced one assertion earlier, inside the hybrid signature
+            // check, and the Apple signature is separately bound to the pinned
+            // Team ID through a strict designated requirement.
+            Require(
+                status.SignerSha256 is null && status.SignerSha3_512 is null && status.SignerSkein1024 is null,
+                $"macOS reported Authenticode-style signer hashes for {logicalName}; the trust model changed.");
+            Require(
+                string.Equals(status.Signer, ExpectedAppleTeamIdentifier, StringComparison.Ordinal),
+                $"Apple Team ID pin mismatch for {logicalName}: {status.Signer}");
+
+            // Assert both halves of the hybrid signature by name. The
+            // post-quantum ML-DSA-87 branch must hold on its own, so a future
+            // regression that silently degraded verification to the classical
+            // RSA-PSS signature alone would fail here rather than pass.
+            HybridSignatureVerificationResult componentSignature = HybridSignatureService.VerifyFile(
+                path,
+                sidecarBase + HybridSignatureService.SidecarExtension,
+                policy);
+            Require(componentSignature.RsaPssValid, $"RSA-PSS/SHA-512 signature failed for {logicalName}.");
+            Require(componentSignature.Mldsa87Valid, $"Post-quantum ML-DSA-87 signature failed for {logicalName}.");
+            Require(componentSignature.IsTrusted, $"Hybrid signature is not trusted for {logicalName}.");
             using TrustedNativeFileLease lease = NativeToolIntegrity.AcquireTrustedFile(path);
             Require(File.Exists(lease.Path), $"Authenticated private snapshot missing for {logicalName}.");
         }
 
-        string signedTarget = NativeToolIntegrity.ResolveKnownTool("zpaq.exe")!;
+        string signedTarget = ResolveSignedComponent("zpaq.exe");
         string root = CreateTempRoot("keep-vault-hybrid-tamper-");
         try
         {
             string targetCopy = Path.Combine(root, "zpaq");
             string sidecarCopy = targetCopy + ".khsig";
             File.Copy(signedTarget, targetCopy);
-            File.Copy(signedTarget + ".khsig", sidecarCopy);
+            File.Copy(IntegrityService.ResolveSidecarBasePath(signedTarget) + ".khsig", sidecarCopy);
             HybridSignatureVerificationResult intact = HybridSignatureService.VerifyFile(targetCopy, sidecarCopy, policy);
             Require(intact.IsTrusted && intact.RsaPssValid && intact.Mldsa87Valid, "Copied signed bytes failed hybrid verification.");
 
@@ -354,6 +443,11 @@ internal static partial class MacComprehensiveTests
         long lockedBaseline = SecureMemory.LockedBytesForTests;
         try
         {
+            // The PHC adapter runs with ARGON2_FLAG_CLEAR_PASSWORD, so the
+            // reference wipes the password buffer it was handed. Keep a copy
+            // for the independent implementation, and assert the wipe happened
+            // rather than quietly working around it.
+            byte[] passwordCopy = password.ToArray();
             NativeArgon2id.HashRaw(
                 Argon2Profile.DefaultIterations,
                 Argon2Profile.DefaultMemoryKiB,
@@ -361,8 +455,18 @@ internal static partial class MacComprehensiveTests
                 password,
                 salt,
                 native);
-            independent = BouncyArgon2(password, salt, native.Length);
-            Require(FixedEqual(native, independent), "Fixed 1 GiB Argon2id output differs from independent Bouncy Castle.");
+            Require(
+                password.All(value => value == 0),
+                "Argon2id did not wipe the password buffer it was given.");
+            try
+            {
+                independent = BouncyArgon2(passwordCopy, salt, native.Length);
+                Require(FixedEqual(native, independent), "Fixed 1 GiB Argon2id output differs from independent Bouncy Castle.");
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(passwordCopy);
+            }
             Require(SecureMemory.LockedBytesForTests == lockedBaseline, "Argon2id left secure-memory lock accounting behind.");
 
             bool reducedRejected = false;
@@ -474,7 +578,7 @@ internal static partial class MacComprehensiveTests
         string sub = Path.Combine(build, "sub");
         Directory.CreateDirectory(sub);
         await File.WriteAllTextAsync(Path.Combine(build, "payload.txt"), "must not escape").ConfigureAwait(false);
-        string executable = NativeToolIntegrity.ResolveKnownTool("zpaq.exe")!;
+        string executable = ResolveSignedComponent("zpaq.exe");
         using TrustedNativeFileLease lease = NativeToolIntegrity.AcquireTrustedFile(executable);
         ProcessResult add = await RunProcessAsync(lease.Path, new[] { "add", "evil.zpaq", "../payload.txt", "-m0" }, sub).ConfigureAwait(false);
         Require(add.Succeeded, $"Could not construct traversal regression archive: {add.StandardError}");
@@ -517,7 +621,7 @@ internal static partial class MacComprehensiveTests
         }
 #pragma warning restore CA5394
 
-        string executable = NativeToolIntegrity.ResolveKnownTool("zpaq.exe")!;
+        string executable = ResolveSignedComponent("zpaq.exe");
         using TrustedNativeFileLease lease = NativeToolIntegrity.AcquireTrustedFile(executable);
         try
         {

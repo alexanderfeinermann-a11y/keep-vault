@@ -124,7 +124,10 @@ static async Task<int> SignAsync(Dictionary<string, string> options, IReadOnlyLi
                 }
             }
 
-            VerifyManifests(target);
+            // Signing always writes the sidecars adjacent to the payload; the
+            // relocation into Contents/Resources happens afterwards in the
+            // packaging step.
+            VerifyManifests(target, target);
             Console.WriteLine($"hybrid_signed={target}");
         }
 
@@ -206,15 +209,29 @@ static int Verify(Dictionary<string, string> options, IReadOnlyList<string> targ
     try
     {
         HybridSignaturePolicy policy = LoadPolicy(Require(options, "policy"), publicKey);
+        options.TryGetValue("payload-root", out string? payloadRoot);
+        options.TryGetValue("signature-root", out string? signatureRoot);
+        if (payloadRoot is null != (signatureRoot is null))
+        {
+            throw new ArgumentException("--payload-root and --signature-root must be supplied together.");
+        }
+
         foreach (string targetValue in targets)
         {
             string target = RequireRegularFile(targetValue, "hybrid-verification target");
-            VerifyManifests(target);
-            foreach (string signedPath in new[] { target, target + ".sha3", target + ".skein" })
+            string sidecarBase = ResolveSidecarBase(target, payloadRoot, signatureRoot);
+            VerifyManifests(target, sidecarBase);
+            (string Payload, string Sidecar)[] signedPairs =
+            [
+                (target, sidecarBase + HybridSignatureService.SidecarExtension),
+                (sidecarBase + ".sha3", sidecarBase + ".sha3" + HybridSignatureService.SidecarExtension),
+                (sidecarBase + ".skein", sidecarBase + ".skein" + HybridSignatureService.SidecarExtension),
+            ];
+            foreach ((string signedPath, string sidecarPath) in signedPairs)
             {
                 HybridSignatureVerificationResult result = HybridSignatureService.VerifyFile(
                     signedPath,
-                    signedPath + HybridSignatureService.SidecarExtension,
+                    sidecarPath,
                     policy);
                 if (!result.IsTrusted)
                 {
@@ -260,13 +277,37 @@ static (byte[] Sha256, byte[] Sha3, byte[] Skein) Fingerprint(string path)
     return HybridSignatureService.Fingerprint(stream);
 }
 
-static void VerifyManifests(string target)
+/// <summary>
+/// Maps a payload file to the base path of its detached sidecars. Inside a
+/// signed app bundle the sidecars are relocated out of Contents/MacOS, which
+/// Apple reserves for Mach-O executables, into Contents/Resources.
+/// </summary>
+static string ResolveSidecarBase(string target, string? payloadRoot, string? signatureRoot)
+{
+    if (payloadRoot is null || signatureRoot is null)
+    {
+        return target;
+    }
+
+    string fullPayloadRoot = Path.TrimEndingDirectorySeparator(Path.GetFullPath(payloadRoot));
+    string fullTarget = Path.GetFullPath(target);
+    if (!fullTarget.StartsWith(fullPayloadRoot + Path.DirectorySeparatorChar, StringComparison.Ordinal))
+    {
+        throw new CryptographicException(
+            $"Hybrid-verification target lies outside the payload root: {target}");
+    }
+
+    string relative = fullTarget[(fullPayloadRoot.Length + 1)..];
+    return Path.Combine(Path.GetFullPath(signatureRoot), relative);
+}
+
+static void VerifyManifests(string target, string sidecarBase)
 {
     (byte[] sha256, byte[] sha3, byte[] skein) = Fingerprint(target);
     try
     {
-        string expectedSha3 = ReadHexManifest(target + ".sha3", 128);
-        string expectedSkein = ReadHexManifest(target + ".skein", 256);
+        string expectedSha3 = ReadHexManifest(sidecarBase + ".sha3", 128);
+        string expectedSkein = ReadHexManifest(sidecarBase + ".skein", 256);
         byte[] expectedSha3Bytes = Convert.FromHexString(expectedSha3);
         byte[] expectedSkeinBytes = Convert.FromHexString(expectedSkein);
         try

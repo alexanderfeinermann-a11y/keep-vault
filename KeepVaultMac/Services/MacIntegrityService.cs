@@ -165,8 +165,9 @@ public sealed class IntegrityService : IDisposable
     {
         try
         {
-            string? sha3Text = ReadManifest(path + ".sha3");
-            string? skeinText = ReadManifest(path + ".skein");
+            string sidecarBase = ResolveSidecarBasePath(path);
+            string? sha3Text = ReadManifest(sidecarBase + ".sha3");
+            string? skeinText = ReadManifest(sidecarBase + ".skein");
             string actualSha3 = Convert.ToHexString(sha3);
             string actualSkein = Convert.ToHexString(skein);
             string actualSha512 = Convert.ToHexString(sha512);
@@ -248,10 +249,11 @@ public sealed class IntegrityService : IDisposable
             return new HybridArtifactStatus(false, "Compiled ML-DSA-87 verification policy is missing or invalid.");
         }
 
+        string sidecarBase = ResolveSidecarBasePath(path);
         HybridSignatureVerificationResult target = HybridSignatureService.VerifyDigest(
             length,
             sha512,
-            path + HybridSignatureService.SidecarExtension,
+            sidecarBase + HybridSignatureService.SidecarExtension,
             policy);
         if (!target.IsTrusted)
         {
@@ -263,8 +265,8 @@ public sealed class IntegrityService : IDisposable
             return new HybridArtifactStatus(true, target.Message);
         }
 
-        string sha3Path = path + ".sha3";
-        string skeinPath = path + ".skein";
+        string sha3Path = sidecarBase + ".sha3";
+        string skeinPath = sidecarBase + ".skein";
         HybridSignatureVerificationResult sha3Result = File.Exists(sha3Path)
             ? HybridSignatureService.VerifyFile(sha3Path, sha3Path + HybridSignatureService.SidecarExtension, policy)
             : HybridSignatureVerificationResult.Invalid("SHA3-512 manifest is missing.");
@@ -275,6 +277,52 @@ public sealed class IntegrityService : IDisposable
         return trusted
             ? new HybridArtifactStatus(true, "Target and both hash manifests have valid RSA-PSS/SHA-512 and ML-DSA-87 signatures.")
             : new HybridArtifactStatus(false, $"Hybrid signature failure: target={target.Message}; SHA3={sha3Result.Message}; Skein={skeinResult.Message}");
+    }
+
+    private const string HybridSignatureDirectoryName = "HybridSignatures";
+
+    /// <summary>
+    /// Maps a sealed binary to the base path of its detached hash and hybrid
+    /// signature sidecars.
+    /// </summary>
+    /// <remarks>
+    /// Apple's bundle format reserves Contents/MacOS for Mach-O executables:
+    /// codesign treats every other file there as an unsigned nested code
+    /// object and refuses to seal the bundle. The sidecars therefore live in
+    /// Contents/Resources/HybridSignatures, mirroring the directory layout
+    /// under Contents/MacOS. That location is additionally covered by the
+    /// bundle's own CodeResources seal, so tampering with a manifest now
+    /// breaks the Apple signature as well as the hybrid one.
+    /// Outside a real app bundle — notably the private re-verification
+    /// snapshot in a temporary directory — sidecars stay adjacent to the file.
+    /// </remarks>
+    internal static string ResolveSidecarBasePath(string path)
+    {
+        string full = Path.GetFullPath(path);
+
+        // The rule is a property of where the file sits, not of the running
+        // process, so a verifier inspecting a bundle other than its own
+        // resolves the same way the app itself does.
+        for (string? directory = Path.GetDirectoryName(full);
+            directory is not null;
+            directory = Path.GetDirectoryName(directory))
+        {
+            if (!string.Equals(Path.GetFileName(directory), "MacOS", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            string? contents = Path.GetDirectoryName(directory);
+            if (contents is null || !string.Equals(Path.GetFileName(contents), "Contents", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            string relative = full[(Path.TrimEndingDirectorySeparator(directory).Length + 1)..];
+            return Path.Combine(contents, "Resources", HybridSignatureDirectoryName, relative);
+        }
+
+        return full;
     }
 
     private static string? ReadManifest(string path)
@@ -533,9 +581,17 @@ internal static class NativeToolIntegrity
     }
 
     internal static string? ResolveKnownTool(string fileName)
+        => ResolveKnownTool(fileName, AppContext.BaseDirectory);
+
+    /// <summary>
+    /// Resolves a Windows-reference component name to its macOS counterpart
+    /// below <paramref name="searchRoot"/>. The explicit root lets a verifier
+    /// inspect the components of a signed bundle other than its own.
+    /// </summary>
+    internal static string? ResolveKnownTool(string fileName, string searchRoot)
     {
         string mapped = MacNames.TryGetValue(fileName, out string? actual) ? actual : fileName;
-        string baseDirectory = Path.GetFullPath(AppContext.BaseDirectory);
+        string baseDirectory = Path.GetFullPath(searchRoot);
         string[] candidates =
         [
             Path.Combine(baseDirectory, "Native", mapped),
@@ -576,9 +632,10 @@ internal static class NativeToolIntegrity
             }
 
             File.SetUnixFileMode(target, UnixFileMode.UserRead | UnixFileMode.UserExecute);
+            string sourceSidecarBase = IntegrityService.ResolveSidecarBasePath(sourcePath);
             foreach (string extension in new[] { ".sha3", ".skein", ".khsig", ".sha3.khsig", ".skein.khsig" })
             {
-                CopySidecarNoFollow(sourcePath + extension, target + extension);
+                CopySidecarNoFollow(sourceSidecarBase + extension, target + extension);
             }
 
             targetStream = MacSafeFileSystem.OpenReadNoSymlinks(target);

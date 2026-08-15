@@ -19,8 +19,13 @@
 #endif
 
 #define KALYNA_BLOCK_BYTES 64
-#define KALYNA_MAX_THREADS 4
+/* CTR mode splits into independent block ranges, so the ciphertext is
+   identical no matter how many workers process it. The cap therefore only
+   bounds the stack-allocated job tables and lets the counter mode scale across
+   every logical processor, hyperthreads included. */
+#define KALYNA_MAX_THREADS 64
 #define KALYNA_PARALLEL_THRESHOLD_BYTES (8 * 1024 * 1024)
+#define KALYNA_MIN_BYTES_PER_THREAD (1024 * 1024)
 
 static int increment_counter(uint8_t counter[64])
 {
@@ -210,6 +215,17 @@ static size_t choose_thread_count(size_t length, size_t total_blocks)
     size_t threads = configured_thread_limit();
     if (threads < 1) {
         threads = 1;
+    }
+
+    /* Keep every worker on a substantial contiguous range so that a wide
+       machine does not spend more on thread setup and cache traffic than the
+       split saves. */
+    size_t useful_threads = length / KALYNA_MIN_BYTES_PER_THREAD;
+    if (useful_threads < 1) {
+        useful_threads = 1;
+    }
+    if (threads > useful_threads) {
+        threads = useful_threads;
     }
 
     if (threads > total_blocks) {

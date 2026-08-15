@@ -312,6 +312,11 @@ if [[ ${architecture} == universal ]]; then
   while IFS= read -r -d '' arm_file; do
     relative=${arm_file#${arm_publish}/}
     [[ ${relative} == Native/* ]] && continue
+    # Debug-symbol bundles are architecture-specific by construction (the
+    # relocation directory is named after the slice, aarch64 versus x86_64),
+    # so they have no cross-architecture counterpart. They are stripped from
+    # the staged bundle below and never ship, so skip them here.
+    [[ ${relative} == *.dSYM/* ]] && continue
     x64_file=${x64_publish}/${relative}
     merged_file=${merged_publish}/${relative}
     if [[ ! -f ${x64_file} || -L ${x64_file} ]]; then
@@ -357,6 +362,7 @@ if [[ ${architecture} == universal ]]; then
   while IFS= read -r -d '' x64_file; do
     relative=${x64_file#${x64_publish}/}
     [[ ${relative} == Native/* ]] && continue
+    [[ ${relative} == *.dSYM/* ]] && continue
     [[ -f ${arm_publish}/${relative} ]] || {
       print -u2 "Unexpected x86_64-only publish output: ${relative}"
       exit 1
@@ -365,6 +371,7 @@ if [[ ${architecture} == universal ]]; then
 else
   while IFS= read -r -d '' merged_file; do
     [[ ${merged_file#${merged_publish}/} == Native/* ]] && continue
+    [[ ${merged_file#${merged_publish}/} == *.dSYM/* ]] && continue
     file -b ${merged_file} | grep -q 'Mach-O' || continue
     published_architectures=$(xcrun lipo ${merged_file} -archs)
     [[ " ${published_architectures} " == *' arm64 '* ]] || {
@@ -379,6 +386,21 @@ else
       xcrun lipo ${merged_file} -verify_arch arm64
     fi
   done < <(find ${merged_publish} -type f -print0)
+fi
+
+# Debug symbols must not ship inside the signed bundle: they would add
+# unsigned Mach-O payload under Contents/MacOS and hand a reverse engineer a
+# full symbol map of the security core. Move them next to the release instead.
+symbols_dir=${build_root}/symbols
+mkdir -p ${symbols_dir}
+while IFS= read -r -d '' dsym_path; do
+  [[ ${dsym_path} == ${merged_publish}/* ]] || continue
+  ditto ${dsym_path} ${symbols_dir}/${dsym_path:t}
+  rm -rf -- ${dsym_path}
+done < <(find ${merged_publish} -type d -name '*.dSYM' -print0)
+if find ${merged_publish} -name '*.dSYM' -print -quit | grep -q .; then
+  print -u2 'Debug-symbol bundles survived removal from the staged payload.'
+  exit 1
 fi
 
 native_dir=${merged_publish}/Native
@@ -597,6 +619,35 @@ else
   ditto ${launcher_thin[1]} ${launcher_path}
 fi
 chmod 0755 ${launcher_path}
+
+# Apple's bundle format reserves Contents/MacOS for Mach-O executables. The
+# detached hash and hybrid-signature sidecars written next to each binary above
+# are not code, and codesign refuses to seal a bundle that carries them there.
+# Relocate them under Contents/Resources, mirroring the layout below
+# Contents/MacOS, which also brings them under the bundle's CodeResources seal.
+# This must precede signing the launcher: codesign resolves the path of a
+# bundle's main executable to the enclosing bundle, so that step already seals
+# the whole app.
+signature_dir=${resources_dir}/HybridSignatures
+mkdir -p ${signature_dir}
+relocated_sidecars=0
+while IFS= read -r -d '' sidecar_path; do
+  relative=${sidecar_path#${macos_dir}/}
+  destination=${signature_dir}/${relative}
+  mkdir -p ${destination:h}
+  mv -- ${sidecar_path} ${destination}
+  relocated_sidecars=$(( relocated_sidecars + 1 ))
+done < <(find ${macos_dir} -type f \( -name '*.sha3' -o -name '*.skein' -o -name '*.khsig' \) -print0)
+if (( relocated_sidecars == 0 )); then
+  print -u2 'No hybrid-signature sidecars were found to relocate; the signing chain is incomplete.'
+  exit 1
+fi
+if find ${macos_dir} -type f \( -name '*.sha3' -o -name '*.skein' -o -name '*.khsig' \) -print -quit | grep -q .; then
+  print -u2 'Hybrid-signature sidecars survived relocation out of Contents/MacOS.'
+  exit 1
+fi
+print "relocated_sidecars=${relocated_sidecars}"
+
 sign_macho ${launcher_path} ${bundle_identifier}.launcher ${packaging_dir}/Launcher.entitlements
 
 codesign \
@@ -631,6 +682,9 @@ for final_path in \
   fi
 done
 ditto ${app_stage} ${final_app}
+final_symbols=${dist_dir}/Keep\ Vault-macOS-${architecture}.dSYMs
+rm -rf -- ${final_symbols}
+ditto ${symbols_dir} ${final_symbols}
 ditto -c -k --sequesterRsrc --keepParent ${final_app} ${final_zip}
 
 archive_common=(

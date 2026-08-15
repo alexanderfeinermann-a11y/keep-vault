@@ -26,8 +26,13 @@
 #endif
 #define THREEFISH_BLOCK_BYTES 128
 #define THREEFISH_TWEAK_BYTES 16
-#define THREEFISH_MAX_THREADS 4
+/* CTR mode splits into independent block ranges, so the ciphertext is
+   identical no matter how many workers process it. The cap therefore only
+   bounds the stack-allocated job tables and lets the counter mode scale across
+   every logical processor, hyperthreads included. */
+#define THREEFISH_MAX_THREADS 64
 #define THREEFISH_PARALLEL_THRESHOLD_BYTES (8 * 1024 * 1024)
+#define THREEFISH_MIN_BYTES_PER_THREAD (1024 * 1024)
 #define SKEIN1024_DIGEST_BYTES 128
 #define SKEIN1024_MAC_KEY_BYTES 128
 
@@ -431,6 +436,17 @@ static size_t choose_thread_count(size_t length, size_t total_blocks)
     size_t threads = configured_thread_limit();
     if (threads < 1) {
         threads = 1;
+    }
+
+    /* Keep every worker on a substantial contiguous range so that a wide
+       machine does not spend more on thread setup and cache traffic than the
+       split saves. */
+    size_t useful_threads = length / THREEFISH_MIN_BYTES_PER_THREAD;
+    if (useful_threads < 1) {
+        useful_threads = 1;
+    }
+    if (threads > useful_threads) {
+        threads = useful_threads;
     }
 
     if (threads > total_blocks) {
