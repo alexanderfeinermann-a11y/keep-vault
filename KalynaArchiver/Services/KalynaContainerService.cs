@@ -21,6 +21,8 @@ public sealed partial class KalynaContainerService
 
     public bool IsNativeKalynaAvailable => NativeKalyna.IsAvailable();
     public bool IsNativeThreefishAvailable => NativeThreefish.IsAvailable();
+    public static string? NativeKalynaLoadError => NativeKalyna.LastLoadError;
+    public static string? NativeThreefishLoadError => NativeThreefish.LastLoadError;
 
     public bool IsNativeSuiteAvailable(EncryptionSuite suite)
     {
@@ -1218,15 +1220,25 @@ internal static unsafe class NativeKalyna
     private static nint _libraryHandle;
     private static delegate* unmanaged[Cdecl]<byte*, byte*, byte*, byte*, nuint, int> _xcryptCtr;
 
+    /// <summary>
+    /// Why the last <see cref="IsAvailable"/> probe failed, or null when the
+    /// library is loaded. A security tool that reports a reference library as
+    /// unavailable has to be able to say why, otherwise a signing, integrity
+    /// or platform fault is indistinguishable from a missing file.
+    /// </summary>
+    public static string? LastLoadError { get; private set; }
+
     public static bool IsAvailable()
     {
         try
         {
             EnsureLoaded();
+            LastLoadError = null;
             return true;
         }
-        catch
+        catch (Exception ex)
         {
+            LastLoadError = $"{ex.GetType().Name}: {ex.Message}";
             return false;
         }
     }
@@ -1304,15 +1316,25 @@ internal static unsafe class NativeThreefish
     private static delegate* unmanaged[Cdecl]<byte*, nuint, byte*, int> _skeinHash;
     private static delegate* unmanaged[Cdecl]<byte*, nuint, byte*, nuint, byte*, int> _skeinMac;
 
+    /// <summary>
+    /// Why the last <see cref="IsAvailable"/> probe failed, or null when the
+    /// library is loaded. A security tool that reports a reference library as
+    /// unavailable has to be able to say why, otherwise a signing, integrity
+    /// or platform fault is indistinguishable from a missing file.
+    /// </summary>
+    public static string? LastLoadError { get; private set; }
+
     public static bool IsAvailable()
     {
         try
         {
             EnsureLoaded();
+            LastLoadError = null;
             return true;
         }
-        catch
+        catch (Exception ex)
         {
+            LastLoadError = $"{ex.GetType().Name}: {ex.Message}";
             return false;
         }
     }

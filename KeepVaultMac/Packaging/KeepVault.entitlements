@@ -1,12 +1,28 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+    Entitlements for the NativeAOT core.
+
+    The core is not the bundle's main executable: the launcher is, and it
+    establishes the sandbox with the actual capabilities (see
+    Launcher.entitlements) before replacing itself with the core through
+    posix_spawn with POSIX_SPAWN_SETEXEC. By the time the core image runs, a
+    sandbox already exists for the process, so the core must inherit it.
+
+    Declaring com.apple.security.app-sandbox here without inherit makes
+    libsystem_secinit try to create a fresh container for a process that is not
+    a bundle main executable; that fails and aborts the process on SIGTRAP
+    inside _libsecinit_appsandbox before any of our code runs.
+
+    An inheriting process receives exactly the parent's sandbox, so the
+    user-selected file access and printing granted to the launcher remain in
+    effect and must not be repeated here.
+-->
 <plist version="1.0">
 <dict>
     <key>com.apple.security.app-sandbox</key>
     <true/>
-    <key>com.apple.security.files.user-selected.read-write</key>
-    <true/>
-    <key>com.apple.security.print</key>
+    <key>com.apple.security.inherit</key>
     <true/>
 </dict>
 </plist>

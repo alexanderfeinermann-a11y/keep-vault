@@ -185,7 +185,10 @@ APPLESCRIPT
   resolved_alias=$(ALIAS_PATH=${alias_path} osascript <<'APPLESCRIPT'
 set aliasPath to system attribute "ALIAS_PATH"
 tell application "Finder"
-  return POSIX path of (original item of (POSIX file aliasPath as alias))
+  -- "original item" yields a Finder object reference, and POSIX path cannot be
+  -- read from one directly; coerce it to an alias first.
+  set originalItem to original item of (POSIX file aliasPath as alias)
+  return POSIX path of (originalItem as alias)
 end tell
 APPLESCRIPT
 )

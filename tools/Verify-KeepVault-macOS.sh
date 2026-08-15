@@ -217,14 +217,25 @@ extract_entitlements ${native_dir}/zpaq ${zpaq_entitlements}
 extract_entitlements ${native_dir}/argon2 ${argon_entitlements}
 extract_entitlements ${supervisor} ${supervisor_entitlements}
 
-for app_entitlements in ${core_entitlements} ${launcher_entitlements}; do
+# The launcher is the bundle's main executable and the only image that may
+# establish the sandbox, so it alone carries the capabilities.
+for app_entitlements in ${launcher_entitlements}; do
   [[ $(/usr/libexec/PlistBuddy -c 'Print :com.apple.security.app-sandbox' ${app_entitlements}) == true ]]
   [[ $(/usr/libexec/PlistBuddy -c 'Print :com.apple.security.files.user-selected.read-write' ${app_entitlements}) == true ]]
   [[ $(/usr/libexec/PlistBuddy -c 'Print :com.apple.security.print' ${app_entitlements}) == true ]]
 done
-for helper_entitlements in ${zpaq_entitlements} ${argon_entitlements} ${supervisor_entitlements}; do
+# The core replaces the launcher through POSIX_SPAWN_SETEXEC and the helpers are
+# spawned beneath it, so all of them inherit the launcher's sandbox. Declaring
+# capabilities on an inheriting image is invalid and aborts it at startup.
+for helper_entitlements in ${core_entitlements} ${zpaq_entitlements} ${argon_entitlements} ${supervisor_entitlements}; do
   [[ $(/usr/libexec/PlistBuddy -c 'Print :com.apple.security.app-sandbox' ${helper_entitlements}) == true ]]
   [[ $(/usr/libexec/PlistBuddy -c 'Print :com.apple.security.inherit' ${helper_entitlements}) == true ]]
+  for capability in com.apple.security.files.user-selected.read-write com.apple.security.print; do
+    if /usr/libexec/PlistBuddy -c "Print :${capability}" ${helper_entitlements} >/dev/null 2>&1; then
+      print -u2 "An inheriting image must not declare its own sandbox capability: ${capability}"
+      exit 1
+    fi
+  done
 done
 
 disallowed_entitlements=(

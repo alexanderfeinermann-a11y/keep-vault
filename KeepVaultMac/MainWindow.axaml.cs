@@ -106,8 +106,12 @@ public sealed partial class MainWindow : Window, IDisposable
         Log($"ZPAQ: {_zpaq.ResolveExecutable() ?? T("notFound")}");
         if (_integrityTrusted)
         {
-            Log(_containers.IsNativeKalynaAvailable ? T("kalynaAvailable") : T("kalynaMissing"));
-            Log(_containers.IsNativeThreefishAvailable ? T("threefishAvailable") : T("threefishMissing"));
+            Log(_containers.IsNativeKalynaAvailable
+                ? T("kalynaAvailable")
+                : $"{T("kalynaMissing")} — {KalynaContainerService.NativeKalynaLoadError ?? T("notFound")}");
+            Log(_containers.IsNativeThreefishAvailable
+                ? T("threefishAvailable")
+                : $"{T("threefishMissing")} — {KalynaContainerService.NativeThreefishLoadError ?? T("notFound")}");
         }
     }
 

@@ -299,10 +299,24 @@ public sealed class IntegrityService : IDisposable
     internal static string ResolveSidecarBasePath(string path)
     {
         string full = Path.GetFullPath(path);
+        return TryGetSealedBundleLayout(full, out string contents, out string relative)
+            ? Path.Combine(contents, "Resources", HybridSignatureDirectoryName, relative)
+            : full;
+    }
 
-        // The rule is a property of where the file sits, not of the running
-        // process, so a verifier inspecting a bundle other than its own
-        // resolves the same way the app itself does.
+    /// <summary>
+    /// Determines whether <paramref name="path"/> lies under an app bundle's
+    /// Contents/MacOS directory, reporting that bundle's Contents directory and
+    /// the path relative to Contents/MacOS.
+    /// </summary>
+    /// <remarks>
+    /// The decision is a property of where the file sits, not of the running
+    /// process, so a verifier inspecting a bundle other than its own reaches the
+    /// same answer the app itself does.
+    /// </remarks>
+    internal static bool TryGetSealedBundleLayout(string path, out string contents, out string relative)
+    {
+        string full = Path.GetFullPath(path);
         for (string? directory = Path.GetDirectoryName(full);
             directory is not null;
             directory = Path.GetDirectoryName(directory))
@@ -312,17 +326,20 @@ public sealed class IntegrityService : IDisposable
                 continue;
             }
 
-            string? contents = Path.GetDirectoryName(directory);
-            if (contents is null || !string.Equals(Path.GetFileName(contents), "Contents", StringComparison.Ordinal))
+            string? parent = Path.GetDirectoryName(directory);
+            if (parent is null || !string.Equals(Path.GetFileName(parent), "Contents", StringComparison.Ordinal))
             {
                 continue;
             }
 
-            string relative = full[(Path.TrimEndingDirectorySeparator(directory).Length + 1)..];
-            return Path.Combine(contents, "Resources", HybridSignatureDirectoryName, relative);
+            contents = parent;
+            relative = full[(Path.TrimEndingDirectorySeparator(directory).Length + 1)..];
+            return true;
         }
 
-        return full;
+        contents = string.Empty;
+        relative = string.Empty;
+        return false;
     }
 
     private static string? ReadManifest(string path)
@@ -559,6 +576,31 @@ internal static class NativeToolIntegrity
             }
 
             MacSafeFileSystem.RequirePathStillNamesHandle(stream.SafeFileHandle, canonical);
+
+            // A component that already lives inside the sealed app bundle is
+            // used where it is, rather than through a private copy.
+            //
+            // The copy exists to close the window between verifying a file and
+            // using it. Inside the bundle macOS closes that window itself and
+            // more strongly than a copy could: the file is covered by the
+            // bundle's CodeResources seal, and the kernel validates its
+            // signature against the pinned Team ID on every dlopen and exec
+            // under the hardened runtime, so a swapped file fails to load at
+            // all. The verified descriptor stays open for the lifetime of the
+            // lease, and the path was just confirmed to still name it.
+            //
+            // A copy would also be strictly worse here. It lands in a directory
+            // this process can write, which is exactly the provenance Gatekeeper
+            // refuses: loading an unnotarized library from a writable location
+            // raises a malware-verification prompt on every launch, because each
+            // launch produces a file identity the user has never approved.
+            if (IntegrityService.TryGetSealedBundleLayout(canonical, out _, out _))
+            {
+                var sealedLease = new TrustedNativeFileLease(canonical, stream);
+                stream = null;
+                return sealedLease;
+            }
+
             TrustedNativeFileLease snapshot = CreateAuthenticatedSnapshot(canonical, stream);
             stream.Dispose();
             stream = null;
