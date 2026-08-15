@@ -3,6 +3,21 @@
     <BaseIntermediateOutputPath>$(MSBuildProjectDirectory)/obj/</BaseIntermediateOutputPath>
     <RuntimeIdentifiers>osx-arm64</RuntimeIdentifiers>
     <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+
+    <!--
+      Locked restore stays on here as well, so this harness cannot silently
+      acquire a different package set than the one that was reviewed.
+
+      Relaxing it is a deliberate, visible act reserved for changing this test
+      project's own dependencies: run "dotnet restore" from KeepVaultMac.Tests
+      with the force-evaluate switch, which rewrites this project's lockfile.
+
+      That switch belongs to the test harness alone. The shipped app is a
+      separate project with its own lockfile, and Build-KeepVault-macOS.sh and
+      Verify-KeepVault-macOS.sh both refuse to proceed unless that lockfile
+      still hashes to the pinned SHA-256, so a release can never be produced
+      from an unreviewed package set no matter what happens in this directory.
+    -->
     <RestoreLockedMode Condition="'$(RestoreLockedMode)' == ''">true</RestoreLockedMode>
   </PropertyGroup>
 </Project>

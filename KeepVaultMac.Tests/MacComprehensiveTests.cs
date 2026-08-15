@@ -30,8 +30,8 @@ internal static partial class MacComprehensiveTests
 
     internal static async Task RunAsync()
     {
-        var tests = new (string Name, Func<Task> Run)[]
-        {
+        (string Name, Func<Task> Run)[] tests =
+        [
             ("macOS process hardening", TestProcessHardeningAsync),
             ("signed native trust and tamper rejection", TestNativeTrustAsync),
             ("SHA3, Skein, Kalyna and Threefish reference vectors", TestPrimitiveVectorsAsync),
@@ -41,7 +41,12 @@ internal static partial class MacComprehensiveTests
             ("v7 dual-suite roundtrip and manipulation rejection", TestContainersAsync),
             ("KPAR2-v2 repair, authentication and transplantation rejection", TestRecoveryAsync),
             ("cryptographic erase ordering and hard-link refusal", TestCryptographicEraseAsync),
-        };
+            // The GUI groups run last: they drive the real window through
+            // Avalonia's headless backend and feed the shared entropy pools
+            // thousands of pointer samples, which the earlier groups should not
+            // inherit.
+            .. MacGuiTests.Tests,
+        ];
 
         foreach ((string name, Func<Task> run) in tests)
         {
@@ -1423,7 +1428,7 @@ internal static partial class MacComprehensiveTests
         foreach (byte[] array in arrays) CryptographicOperations.ZeroMemory(array);
     }
 
-    private static void Require(bool condition, string message)
+    internal static void Require(bool condition, string message)
     {
         if (!condition) throw new InvalidOperationException(message);
     }

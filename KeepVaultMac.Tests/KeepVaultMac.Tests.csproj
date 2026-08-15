@@ -11,5 +11,9 @@
   <ItemGroup>
     <ProjectReference Include="../KeepVaultMac/KeepVaultMac.csproj" />
     <Compile Include="../KalynaArchiver.Signing/Mldsa87Reference.cs" Link="Signing/Mldsa87Reference.cs" />
+    <!-- Test-only windowing backend so the real MainWindow can be driven without
+         a display. It is referenced by this harness alone and never reaches the
+         signed app, whose package set stays pinned by its own lockfile hash. -->
+    <PackageReference Include="Avalonia.Headless" Version="12.1.1" />
   </ItemGroup>
 </Project>

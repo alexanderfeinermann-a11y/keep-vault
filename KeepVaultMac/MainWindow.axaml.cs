@@ -51,7 +51,7 @@ public sealed partial class MainWindow : Window, IDisposable
     private bool _disposed;
     private int _operationActive;
     private int _hintLoadVersion;
-    private int _lastEntropyUiMinimum = -1;
+    private long _lastEntropyUiMinimum = -1;
     private string _language = "de";
 
     public MainWindow()
@@ -1189,15 +1189,22 @@ public sealed partial class MainWindow : Window, IDisposable
         }
 
         EntropyPoolStatus status = EntropyMixer.GetPoolStatus();
-        int minimum = checked((int)Math.Min(status.Minimum, EntropyMixer.RequiredMouseSamplesPerPurpose));
-        if (!force && minimum == _lastEntropyUiMinimum)
+
+        // 512 samples per pool is the minimum that unlocks generation, not a
+        // ceiling: collection continues for as long as the pointer moves, and
+        // the reported counts must keep rising so that the extra entropy stays
+        // visible. Throttle on the true pool minimum, never on the value
+        // clamped for the progress bar — clamping the throttle input froze the
+        // whole display at 512.
+        long poolMinimum = status.Minimum;
+        if (!force && poolMinimum == _lastEntropyUiMinimum)
         {
             return;
         }
 
-        _lastEntropyUiMinimum = minimum;
-        EntropyProgress.Value = minimum;
-        bool ready = status.Minimum >= EntropyMixer.RequiredMouseSamplesPerPurpose;
+        _lastEntropyUiMinimum = poolMinimum;
+        EntropyProgress.Value = Math.Min(poolMinimum, EntropyMixer.RequiredMouseSamplesPerPurpose);
+        bool ready = poolMinimum >= EntropyMixer.RequiredMouseSamplesPerPurpose;
         GeneratePasswordButton.IsEnabled = ready && Volatile.Read(ref _operationActive) == 0;
         GeneratePasswordButton.Content = T(_generatedPairReady ? "regeneratePassword" : "generatePassword");
         string key = !_generatedPairReady
