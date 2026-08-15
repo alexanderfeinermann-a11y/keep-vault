@@ -115,9 +115,44 @@ public sealed partial class MainWindow : Window, IDisposable
         }
     }
 
-    private void Window_Activated(object? sender, EventArgs e) => PrivacyShield.IsVisible = false;
+    private void Window_Activated(object? sender, EventArgs e) => UpdatePrivacyShield();
 
-    private void Window_Deactivated(object? sender, EventArgs e) => PrivacyShield.IsVisible = true;
+    private void Window_Deactivated(object? sender, EventArgs e) => UpdatePrivacyShield();
+
+    /// <summary>
+    /// Conceals secret views while the window is not on screen.
+    /// </summary>
+    /// <remarks>
+    /// The trigger is the window being minimized or hidden, not merely losing
+    /// focus. Concealing on deactivation made the app unusable for its own
+    /// workflow: dragging files in from the Finder necessarily deactivates the
+    /// window, so the shield covered the very drop target the user was aiming
+    /// at. A window the user can still see is one they chose to leave open, and
+    /// its contents are no more exposed than any other visible window.
+    ///
+    /// This does not weaken the capture boundary that is already reported in
+    /// the security log: macOS offers no enforceable exclusion from screenshots
+    /// or screen recording, so the shield was never a capture control to begin
+    /// with. It hides secrets from the window preview that macOS renders in
+    /// Mission Control and the Dock while the window is put away.
+    /// </remarks>
+    private void UpdatePrivacyShield()
+    {
+        PrivacyShield.IsVisible = WindowState == Avalonia.Controls.WindowState.Minimized || !IsVisible;
+    }
+
+    protected override void OnPropertyChanged(AvaloniaPropertyChangedEventArgs change)
+    {
+        base.OnPropertyChanged(change);
+
+        // Minimizing and hiding do not raise Deactivated on their own, so track
+        // the properties that actually decide whether the window is on screen.
+        if (_componentsReady
+            && (change.Property == WindowStateProperty || change.Property == IsVisibleProperty))
+        {
+            UpdatePrivacyShield();
+        }
+    }
 
     public void Dispose()
     {

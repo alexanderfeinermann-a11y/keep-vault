@@ -58,9 +58,21 @@ internal sealed partial class MacSecurityScopedResourceLease : IDisposable
                 throw new InvalidOperationException("Foundation could not create the security-scoped file URL.");
             }
 
+            // startAccessingSecurityScopedResource reports NO both when access is
+            // refused and when the URL simply is not security-scoped. The latter
+            // is the ordinary case here: a drop and an in-process open panel
+            // hand over plain file URLs for which the sandbox has already
+            // extended access to this process, and only URLs resolved from a
+            // security-scoped bookmark ever answer YES. Treating NO as a denial
+            // rejected every file the user picked or dropped.
+            //
+            // Whether access truly exists is therefore established by reading
+            // the item, not by this call, and the caller fails closed when the
+            // path cannot be reached. Access must also not be stopped for a URL
+            // that never started, so an unscoped lease holds no URL to release.
             if (!ObjcMessageSendBool(url, StartAccessSelector))
             {
-                throw new UnauthorizedAccessException("macOS denied the security-scoped resource lease.");
+                return new MacSecurityScopedResourceLease(0);
             }
 
             nint ownedUrl = url;
@@ -84,7 +96,11 @@ internal sealed partial class MacSecurityScopedResourceLease : IDisposable
 
     public void Dispose()
     {
+        GC.SuppressFinalize(this);
         nint url = Interlocked.Exchange(ref _url, 0);
+
+        // An unscoped lease holds nothing: stopping access for a URL that never
+        // started is an unbalanced call.
         if (url == 0)
         {
             return;
@@ -92,7 +108,6 @@ internal sealed partial class MacSecurityScopedResourceLease : IDisposable
 
         ObjcMessageSendVoid(url, StopAccessSelector);
         CFRelease(url);
-        GC.SuppressFinalize(this);
     }
 
     ~MacSecurityScopedResourceLease()
