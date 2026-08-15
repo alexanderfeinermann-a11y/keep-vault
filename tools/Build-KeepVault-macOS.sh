@@ -620,6 +620,43 @@ for launcher_arch in ${launcher_architectures[@]}; do
   launcher_thin+=(${thin_launcher})
 done
 
+# File-selection helper. macOS serves an open or save panel only to a process
+# that owns its sandbox, and the core does not: the launcher establishes the
+# sandbox and replaces itself with the core, which runs with
+# com.apple.security.inherit so that the launcher can verify it before a single
+# instruction of it runs. Rather than give that up, panels are delegated to this
+# helper, which is a bundle of its own and is therefore served normally. It
+# returns security-scoped bookmarks the core resolves through their shared
+# application group.
+helper_thin=()
+for helper_arch in ${launcher_architectures[@]}; do
+  thin_helper=${build_root}/Keep\ Vault\ Panels-${helper_arch}
+  xcrun swiftc \
+    -target ${helper_arch}-apple-macos14.0 \
+    -O -whole-module-optimization -parse-as-library \
+    ${packaging_dir}/PanelHelper.swift \
+    -framework AppKit \
+    -o ${thin_helper}
+  helper_thin+=(${thin_helper})
+done
+
+helper_app=${contents}/Library/Helpers/Keep\ Vault\ Panels.app
+helper_macos=${helper_app}/Contents/MacOS
+mkdir -p ${helper_macos}
+helper_path=${helper_macos}/Keep\ Vault\ Panels
+if (( ${#helper_thin} > 1 )); then
+  xcrun lipo -create ${helper_thin[@]} -output ${helper_path}
+  xcrun lipo ${helper_path} -verify_arch arm64 x86_64
+else
+  ditto ${helper_thin[1]} ${helper_path}
+fi
+chmod 0755 ${helper_path}
+sed \
+  -e "s/@@MARKETING_VERSION@@/${marketing_version}/g" \
+  -e "s/@@BUILD_VERSION@@/${build_version}/g" \
+  ${packaging_dir}/PanelHelper-Info.plist.template > ${helper_app}/Contents/Info.plist
+plutil -lint ${helper_app}/Contents/Info.plist
+
 launcher_path=${macos_dir}/Keep\ Vault\ Launcher
 if [[ ${architecture} == universal ]]; then
   xcrun lipo -create ${launcher_thin[@]} -output ${launcher_path}
@@ -656,6 +693,18 @@ if find ${macos_dir} -type f \( -name '*.sha3' -o -name '*.skein' -o -name '*.kh
   exit 1
 fi
 print "relocated_sidecars=${relocated_sidecars}"
+
+# The helper is a nested bundle, so it is sealed as one and must be signed
+# before the app that encloses it.
+codesign \
+  --force \
+  --sign ${identity} \
+  --options runtime \
+  ${timestamp_arguments[@]} \
+  --entitlements ${packaging_dir}/PanelHelper.entitlements \
+  --identifier ${bundle_identifier}.panels \
+  ${helper_app}
+codesign --verify --strict ${helper_app}
 
 sign_macho ${launcher_path} ${bundle_identifier}.launcher ${packaging_dir}/Launcher.entitlements
 

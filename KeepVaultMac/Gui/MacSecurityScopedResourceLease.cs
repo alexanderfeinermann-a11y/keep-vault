@@ -23,6 +23,39 @@ internal sealed partial class MacSecurityScopedResourceLease : IDisposable
         return Acquire(item.Path);
     }
 
+    /// <summary>
+    /// Takes ownership of an NSURL that was resolved from a security-scoped
+    /// bookmark and starts access on it.
+    /// </summary>
+    /// <remarks>
+    /// Unlike a plain file URL, a bookmark-resolved one genuinely is
+    /// security-scoped, so a NO here is a real denial and fails closed. The URL
+    /// is retained for the lifetime of the lease because the autorelease pool
+    /// that produced it is not under this code's control.
+    /// </remarks>
+    internal static MacSecurityScopedResourceLease AdoptResolvedUrl(nint url)
+    {
+        if (url == 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(url), "A resolved security-scoped URL is required.");
+        }
+
+        nint retained = CFRetain(url);
+        if (retained == 0)
+        {
+            throw new InvalidOperationException("The resolved security-scoped URL could not be retained.");
+        }
+
+        if (!ObjcMessageSendBool(retained, StartAccessSelector))
+        {
+            CFRelease(retained);
+            throw new UnauthorizedAccessException(
+                "macOS denied access to the resource the panel helper reported as selected.");
+        }
+
+        return new MacSecurityScopedResourceLease(retained);
+    }
+
     internal static MacSecurityScopedResourceLease Acquire(Uri itemUri)
     {
         ArgumentNullException.ThrowIfNull(itemUri);
@@ -128,6 +161,9 @@ internal sealed partial class MacSecurityScopedResourceLease : IDisposable
 
     [LibraryImport("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation", EntryPoint = "CFRelease")]
     private static partial void CFRelease(nint value);
+
+    [LibraryImport("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation", EntryPoint = "CFRetain")]
+    private static partial nint CFRetain(nint value);
 
     [LibraryImport("/usr/lib/libobjc.A.dylib", EntryPoint = "sel_registerName", StringMarshalling = StringMarshalling.Utf8)]
     private static partial nint SelRegisterName(string name);
