@@ -15,6 +15,9 @@ marketing_version='1.0.0'
 build_version='1'
 preflight_only=0
 identity=${KEEPVAULT_CODESIGN_IDENTITY:-}
+# Name of an "xcrun notarytool store-credentials" keychain profile. Empty means
+# the build stops short of notarization; the secrets never live here.
+notary_profile=${KEEPVAULT_NOTARY_PROFILE:-}
 pfx_path=${KEEPVAULT_HYBRID_PFX:-${HOME}/Library/Application Support/Keep Vault/ReleaseKeys/hybrid-rsa4096.pfx}
 mldsa_private_key=${KEEPVAULT_MLDSA_PRIVATE_KEY:-${HOME}/Library/Application Support/Keep Vault/ReleaseKeys/mldsa87-private.key}
 mldsa_public_key=${KEEPVAULT_MLDSA_PUBLIC_KEY:-${packaging_dir}/Keys/mldsa87-public.key}
@@ -29,7 +32,8 @@ usage() {
   print -u2 'Usage: Build-KeepVault-macOS.sh [--architecture universal|arm64] [--identity HASH_OR_NAME]'
   print -u2 '       [--pfx FILE] [--mldsa-private-key FILE] [--mldsa-public-key FILE]'
   print -u2 '       [--pfx-password-keychain-service NAME] [--pfx-keychain-account NAME]'
-  print -u2 '       [--dotnet /path/to/official/dotnet] [--version X.Y.Z] [--build-number N] [--preflight]'
+  print -u2 '       [--dotnet /path/to/official/dotnet] [--version X.Y.Z] [--build-number N]'
+  print -u2 '       [--notary-profile NOTARYTOOL_KEYCHAIN_PROFILE] [--preflight]'
   exit 64
 }
 
@@ -83,6 +87,11 @@ while (( $# != 0 )); do
     --build-number)
       (( $# >= 2 )) || usage
       build_version=$2
+      shift 2
+      ;;
+    --notary-profile)
+      (( $# >= 2 )) || usage
+      notary_profile=$2
       shift 2
       ;;
     --preflight)
@@ -727,4 +736,38 @@ ${script_dir}/Verify-KeepVault-macOS.sh \
   --mldsa-public-key ${mldsa_public_key}
 print "app=${final_app}"
 print "archive=${final_zip}"
-print 'notarization=not_performed (Developer ID and notary credentials are a separate release gate)'
+
+# Notarization. Apple must see the build before Gatekeeper will accept it on
+# another Mac. Credentials are never passed on the command line or stored in
+# this repository: create a keychain profile once with
+#
+#     xcrun notarytool store-credentials "Keep Vault" \
+#       --apple-id <your-apple-id> --team-id <your-team-id> \
+#       --password <app-specific-password>
+#
+# and then pass --notary-profile "Keep Vault". The profile name is all this
+# script ever sees; the secrets stay in the login keychain.
+if [[ -z ${notary_profile} ]]; then
+  print 'notarization=not_performed (pass --notary-profile NAME once a Developer ID certificate and a notarytool profile exist)'
+else
+  if [[ ${identity_details} != *'Developer ID Application'* ]]; then
+    print -u2 'Notarization requires a Developer ID Application identity; an Apple Development certificate is rejected by the notary service.'
+    exit 1
+  fi
+
+  xcrun notarytool submit ${final_zip} --keychain-profile ${notary_profile} --wait
+  xcrun stapler staple ${final_app}
+  xcrun stapler validate ${final_app}
+
+  # The stapled ticket changes the bundle, so the distribution archive and its
+  # signed manifests have to be rebuilt from the stapled app.
+  rm -f -- ${final_zip} ${final_zip}.sha3 ${final_zip}.skein \
+    ${final_zip}.khsig ${final_zip}.sha3.khsig ${final_zip}.skein.khsig
+  ditto -c -k --sequesterRsrc --keepParent ${final_app} ${final_zip}
+  (
+    cd ${mac_project}
+    run_hybrid_signer ${archive_common[@]}
+  )
+  spctl --assess --type execute -vv ${final_app}
+  print "notarization=stapled (${notary_profile})"
+fi

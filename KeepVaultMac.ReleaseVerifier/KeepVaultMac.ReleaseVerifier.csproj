@@ -1,0 +1,80 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <TargetPlatformMinVersion>14.0</TargetPlatformMinVersion>
+    <RuntimeIdentifier>osx-arm64</RuntimeIdentifier>
+    <AssemblyName>Keep Vault Release Verifier</AssemblyName>
+    <RootNamespace>KalynaArchiver.ReleaseVerifier</RootNamespace>
+    <Product>Keep Vault</Product>
+    <AssemblyTitle>Keep Vault Release Verifier</AssemblyTitle>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <DefineConstants>$(DefineConstants);KEEPVAULT_MACOS</DefineConstants>
+    <RestoreLockedMode>true</RestoreLockedMode>
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+    <PublishAot>true</PublishAot>
+    <PublishTrimmed>true</PublishTrimmed>
+    <TrimMode>full</TrimMode>
+    <InvariantGlobalization>false</InvariantGlobalization>
+    <IlcGenerateStackTraceData>false</IlcGenerateStackTraceData>
+    <StripSymbols>true</StripSymbols>
+    <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
+  </PropertyGroup>
+
+  <!--
+    The same pins the app compiles in. They are read from the shared property
+    file imported by Directory.Build.props, so app and verifier cannot drift.
+  -->
+  <ItemGroup>
+    <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+      <_Parameter1>KeepVaultAppleTeamIdentifier</_Parameter1>
+      <_Parameter2>2T6K9PGS55</_Parameter2>
+    </AssemblyAttribute>
+    <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+      <_Parameter1>KalynaExpectedSignerSha256</_Parameter1>
+      <_Parameter2>$(KalynaExpectedSignerSha256)</_Parameter2>
+    </AssemblyAttribute>
+    <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+      <_Parameter1>KalynaExpectedSignerSha3_512</_Parameter1>
+      <_Parameter2>$(KalynaExpectedSignerSha3_512)</_Parameter2>
+    </AssemblyAttribute>
+    <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+      <_Parameter1>KalynaExpectedSignerSkein1024</_Parameter1>
+      <_Parameter2>$(KalynaExpectedSignerSkein1024)</_Parameter2>
+    </AssemblyAttribute>
+    <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+      <_Parameter1>KalynaExpectedMldsa87Sha256</_Parameter1>
+      <_Parameter2>$(KalynaExpectedMldsa87Sha256)</_Parameter2>
+    </AssemblyAttribute>
+    <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+      <_Parameter1>KalynaExpectedMldsa87Sha3_512</_Parameter1>
+      <_Parameter2>$(KalynaExpectedMldsa87Sha3_512)</_Parameter2>
+    </AssemblyAttribute>
+    <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+      <_Parameter1>KalynaExpectedMldsa87Skein1024</_Parameter1>
+      <_Parameter2>$(KalynaExpectedMldsa87Skein1024)</_Parameter2>
+    </AssemblyAttribute>
+  </ItemGroup>
+
+  <ItemGroup>
+    <!--
+      Compiled from the shared sources rather than through a project reference
+      to the app, so the verifier stays a small standalone tool without pulling
+      in the GUI framework.
+    -->
+    <Compile Include="../KalynaArchiver.Signing/HybridSignatureService.cs" Link="Signing/HybridSignatureService.cs" />
+    <Compile Include="../KalynaArchiver.Signing/Mldsa87.cs" Link="Signing/Mldsa87.cs" />
+    <Compile Include="../KalynaArchiver.Signing/Sha3_512Compat.cs" Link="Signing/Sha3_512Compat.cs" />
+    <Compile Include="../KalynaArchiver/Services/SigningTrustPolicy.cs" Link="Services/SigningTrustPolicy.cs" />
+    <EmbeddedResource Include="../KeepVaultMac/Packaging/Keys/mldsa87-public.key" LogicalName="KeepVault.MLDsa87.PublicKey" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="BouncyCastle.Cryptography" Version="2.6.2" />
+  </ItemGroup>
+
+</Project>

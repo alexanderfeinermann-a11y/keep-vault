@@ -1,0 +1,18 @@
+<Project>
+  <!--
+    Import the app's property file so the signing pins have exactly one source
+    of truth. A verifier that trusted different keys than the app it checks
+    would be worse than no verifier at all.
+
+    BaseIntermediateOutputPath in the imported file is written in terms of
+    MSBuildProjectDirectory, which resolves to the project being built rather
+    than to the file that declares it, so this project still gets its own obj
+    directory.
+  -->
+  <Import Project="../KeepVaultMac/Directory.Build.props" />
+
+  <PropertyGroup>
+    <!-- The verifier ships as a universal binary, so both slices are built. -->
+    <RuntimeIdentifiers>osx-arm64;osx-x64</RuntimeIdentifiers>
+  </PropertyGroup>
+</Project>

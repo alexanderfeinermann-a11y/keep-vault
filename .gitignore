@@ -21,3 +21,7 @@ dist/
 # macOS
 .DS_Store
 **/.DS_Store
+
+# Portable/verifier build outputs
+KeepVaultMac.ReleaseVerifier/bin/
+KeepVaultMac.ReleaseVerifier/obj/
