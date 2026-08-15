@@ -1,0 +1,32 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net9.0-windows</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <UseWPF>true</UseWPF>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\KalynaArchiver\KalynaArchiver.csproj" />
+    <ProjectReference Include="..\KalynaArchiver.Signing\KalynaArchiver.Signing.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="BouncyCastle.Cryptography" Version="2.6.2" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="..\tools\zpaq.exe" Link="zpaq.exe" CopyToOutputDirectory="Always" />
+    <None Include="..\tools\argon2.exe" Link="argon2.exe" CopyToOutputDirectory="Always" />
+    <None Include="..\tools\kalyna_ref.dll" Link="kalyna_ref.dll" CopyToOutputDirectory="Always" />
+    <None Include="..\tools\threefish_ref.dll" Link="threefish_ref.dll" CopyToOutputDirectory="Always" />
+    <None Include="..\tools\argon2_ref.dll" Link="argon2_ref.dll" CopyToOutputDirectory="Always" />
+    <None Include="..\tools\*.sha3" Link="%(Filename)%(Extension)" CopyToOutputDirectory="Always" />
+    <None Include="..\tools\*.skein" Link="%(Filename)%(Extension)" CopyToOutputDirectory="Always" />
+    <None Include="..\tools\*.khsig" Link="%(Filename)%(Extension)" CopyToOutputDirectory="Always" />
+    <None Include="..\tools\mldsa87_ref.dll" Link="mldsa87_ref.dll" CopyToOutputDirectory="Always" />
+  </ItemGroup>
+
+</Project>

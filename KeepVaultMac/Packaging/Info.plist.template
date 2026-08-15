@@ -1,0 +1,126 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>de</string>
+    <key>CFBundleDisplayName</key>
+    <string>Keep Vault</string>
+    <key>CFBundleDocumentTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleTypeExtensions</key>
+            <array>
+                <string>kzpaq</string>
+            </array>
+            <key>CFBundleTypeIconFile</key>
+            <string>KeepVault.icns</string>
+            <key>CFBundleTypeName</key>
+            <string>Keep Vault verschluesseltes Archiv</string>
+            <key>CFBundleTypeRole</key>
+            <string>Editor</string>
+            <key>LSHandlerRank</key>
+            <string>Owner</string>
+            <key>LSItemContentTypes</key>
+            <array>
+                <string>de.michael-feinermann.keep-vault.kzpaq</string>
+            </array>
+        </dict>
+        <dict>
+            <key>CFBundleTypeExtensions</key>
+            <array>
+                <string>zpaq</string>
+            </array>
+            <key>CFBundleTypeIconFile</key>
+            <string>KeepVault.icns</string>
+            <key>CFBundleTypeName</key>
+            <string>ZPAQ Archiv</string>
+            <key>CFBundleTypeRole</key>
+            <string>Editor</string>
+            <key>LSHandlerRank</key>
+            <string>Alternate</string>
+            <key>LSItemContentTypes</key>
+            <array>
+                <string>de.michael-feinermann.keep-vault.zpaq</string>
+            </array>
+        </dict>
+    </array>
+    <key>CFBundleExecutable</key>
+    <string>Keep Vault Launcher</string>
+    <key>CFBundleIconFile</key>
+    <string>KeepVault</string>
+    <key>CFBundleIdentifier</key>
+    <string>de.michael-feinermann.keep-vault</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>Keep Vault</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>@@MARKETING_VERSION@@</string>
+    <key>CFBundleVersion</key>
+    <string>@@BUILD_VERSION@@</string>
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.utilities</string>
+    <key>LSFileQuarantineEnabled</key>
+    <true/>
+    <key>LSMinimumSystemVersion</key>
+    <string>14.0</string>
+    <key>LSMultipleInstancesProhibited</key>
+    <true/>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>NSHumanReadableCopyright</key>
+    <string>Copyright © 2026 Michael Alexander Feinermann. Alle Rechte vorbehalten.</string>
+    <key>NSSupportsAutomaticGraphicsSwitching</key>
+    <true/>
+    <key>UTExportedTypeDeclarations</key>
+    <array>
+        <dict>
+            <key>UTTypeConformsTo</key>
+            <array>
+                <string>public.archive</string>
+                <string>public.data</string>
+            </array>
+            <key>UTTypeDescription</key>
+            <string>Keep Vault verschluesseltes Archiv</string>
+            <key>UTTypeIconFile</key>
+            <string>KeepVault.icns</string>
+            <key>UTTypeIdentifier</key>
+            <string>de.michael-feinermann.keep-vault.kzpaq</string>
+            <key>UTTypeTagSpecification</key>
+            <dict>
+                <key>public.filename-extension</key>
+                <array>
+                    <string>kzpaq</string>
+                </array>
+                <key>public.mime-type</key>
+                <string>application/vnd.keep-vault.kzpaq</string>
+            </dict>
+        </dict>
+        <dict>
+            <key>UTTypeConformsTo</key>
+            <array>
+                <string>public.archive</string>
+                <string>public.data</string>
+            </array>
+            <key>UTTypeDescription</key>
+            <string>ZPAQ Archiv</string>
+            <key>UTTypeIconFile</key>
+            <string>KeepVault.icns</string>
+            <key>UTTypeIdentifier</key>
+            <string>de.michael-feinermann.keep-vault.zpaq</string>
+            <key>UTTypeTagSpecification</key>
+            <dict>
+                <key>public.filename-extension</key>
+                <array>
+                    <string>zpaq</string>
+                </array>
+                <key>public.mime-type</key>
+                <string>application/zpaq</string>
+            </dict>
+        </dict>
+    </array>
+</dict>
+</plist>

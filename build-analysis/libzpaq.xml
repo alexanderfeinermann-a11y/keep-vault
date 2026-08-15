@@ -1,0 +1,87 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<DEFECTS>
+  <DEFECT>
+    <SFA>
+      <FILEPATH>C:\Dev\Codex\Kalyna\external\zpaq\</FILEPATH>
+      <FILENAME>libzpaq.cpp</FILENAME>
+      <LINE>2953</LINE>
+      <COLUMN>17</COLUMN>
+    </SFA>
+    <DEFECTCODE>6262</DEFECTCODE>
+    <DESCRIPTION>Die Funktion verwendet „16416“ Bytes Stapel.  Erwägen Sie, einige Daten in einen Heap zu verschieben.</DESCRIPTION>
+    <FUNCTION>libzpaq::Compressor::compress</FUNCTION>
+    <DECORATED>?compress@Compressor@libzpaq@@QEAA_NH@Z</DECORATED>
+    <FUNCLINE>2953</FUNCLINE>
+    <PATH></PATH>
+  </DEFECT>
+  <DEFECT>
+    <SFA>
+      <FILEPATH>C:\Dev\Codex\Kalyna\external\zpaq\</FILEPATH>
+      <FILENAME>libzpaq.cpp</FILENAME>
+      <LINE>5038</LINE>
+      <COLUMN>59</COLUMN>
+    </SFA>
+    <DEFECTCODE>6297</DEFECTCODE>
+    <DESCRIPTION>Arithmetischer Überlauf.  Die Ergebnisse sind möglicherweise kein erwarteter Wert.</DESCRIPTION>
+    <FUNCTION>libzpaq::ss_pivot</FUNCTION>
+    <DECORATED>?ss_pivot@libzpaq@@YAPEAHPEBEPEBHPEAH2@Z</DECORATED>
+    <FUNCLINE>5022</FUNCLINE>
+    <PATH></PATH>
+  </DEFECT>
+  <DEFECT>
+    <SFA>
+      <FILEPATH>C:\Dev\Codex\Kalyna\external\zpaq\</FILEPATH>
+      <FILENAME>libzpaq.cpp</FILENAME>
+      <LINE>5040</LINE>
+      <COLUMN>44</COLUMN>
+    </SFA>
+    <DEFECTCODE>6297</DEFECTCODE>
+    <DESCRIPTION>Arithmetischer Überlauf.  Die Ergebnisse sind möglicherweise kein erwarteter Wert.</DESCRIPTION>
+    <FUNCTION>libzpaq::ss_pivot</FUNCTION>
+    <DECORATED>?ss_pivot@libzpaq@@YAPEAHPEBEPEBHPEAH2@Z</DECORATED>
+    <FUNCLINE>5022</FUNCLINE>
+    <PATH></PATH>
+  </DEFECT>
+  <DEFECT>
+    <SFA>
+      <FILEPATH>C:\Dev\Codex\Kalyna\external\zpaq\</FILEPATH>
+      <FILENAME>libzpaq.cpp</FILENAME>
+      <LINE>5700</LINE>
+      <COLUMN>57</COLUMN>
+    </SFA>
+    <DEFECTCODE>6297</DEFECTCODE>
+    <DESCRIPTION>Arithmetischer Überlauf.  Die Ergebnisse sind möglicherweise kein erwarteter Wert.</DESCRIPTION>
+    <FUNCTION>libzpaq::tr_pivot</FUNCTION>
+    <DECORATED>?tr_pivot@libzpaq@@YAPEAHPEBHPEAH1@Z</DECORATED>
+    <FUNCLINE>5684</FUNCLINE>
+    <PATH></PATH>
+  </DEFECT>
+  <DEFECT>
+    <SFA>
+      <FILEPATH>C:\Dev\Codex\Kalyna\external\zpaq\</FILEPATH>
+      <FILENAME>libzpaq.cpp</FILENAME>
+      <LINE>5702</LINE>
+      <COLUMN>42</COLUMN>
+    </SFA>
+    <DEFECTCODE>6297</DEFECTCODE>
+    <DESCRIPTION>Arithmetischer Überlauf.  Die Ergebnisse sind möglicherweise kein erwarteter Wert.</DESCRIPTION>
+    <FUNCTION>libzpaq::tr_pivot</FUNCTION>
+    <DECORATED>?tr_pivot@libzpaq@@YAPEAHPEBHPEAH1@Z</DECORATED>
+    <FUNCLINE>5684</FUNCLINE>
+    <PATH></PATH>
+  </DEFECT>
+  <DEFECT>
+    <SFA>
+      <FILEPATH>C:\Dev\Codex\Kalyna\external\zpaq\</FILEPATH>
+      <FILENAME>libzpaq.cpp</FILENAME>
+      <LINE>7576</LINE>
+      <COLUMN>5</COLUMN>
+    </SFA>
+    <DEFECTCODE>6262</DEFECTCODE>
+    <DESCRIPTION>Die Funktion verwendet „34468“ Bytes Stapel.  Erwägen Sie, einige Daten in einen Heap zu verschieben.</DESCRIPTION>
+    <FUNCTION>libzpaq::compressBlock</FUNCTION>
+    <DECORATED>?compressBlock@libzpaq@@YAXPEAVStringBuffer@1@PEAVWriter@1@PEBD22_N@Z</DECORATED>
+    <FUNCLINE>7576</FUNCLINE>
+    <PATH></PATH>
+  </DEFECT>
+</DEFECTS>

@@ -1,0 +1,494 @@
+using System.Diagnostics;
+using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
+using System.Text;
+using System.Xml.Linq;
+using KalynaArchiver.Signing;
+
+return await RunAsync(args).ConfigureAwait(false);
+
+static async Task<int> RunAsync(string[] args)
+{
+    try
+    {
+        if (args.Length == 0)
+        {
+            return Usage("A command is required.");
+        }
+
+        (Dictionary<string, string> options, List<string> targets) = ParseOptions(args[1..]);
+        if (targets.Count == 0)
+        {
+            return Usage("At least one --target is required.");
+        }
+
+        return args[0].ToUpperInvariant() switch
+        {
+            "SIGN" => await SignAsync(options, targets).ConfigureAwait(false),
+            "VERIFY" => Verify(options, targets),
+            _ => Usage($"Unknown command: {args[0]}"),
+        };
+    }
+    catch (Exception ex) when (ex is ArgumentException or IOException or InvalidDataException or CryptographicException
+        or InvalidOperationException or PlatformNotSupportedException or UnauthorizedAccessException)
+    {
+        await Console.Error.WriteLineAsync(ex.Message).ConfigureAwait(false);
+        return 2;
+    }
+}
+
+static async Task<int> SignAsync(Dictionary<string, string> options, IReadOnlyList<string> targets)
+{
+    string pfxPath = Require(options, "pfx");
+    string privateKeyPath = Require(options, "mldsa-private-key");
+    string publicKeyPath = Require(options, "mldsa-public-key");
+    string referencePath = Require(options, "reference-library");
+    string policyPath = Require(options, "policy");
+    string launcherPinsPath = Require(options, "launcher-pins");
+
+    RequirePrivateFileProtection(pfxPath, "RSA PFX");
+    RequirePrivateFileProtection(privateKeyPath, "ML-DSA-87 private key");
+    byte[] privateKey = ReadExactFile(privateKeyPath, Mldsa87.PrivateKeyBytes, "ML-DSA-87 private key");
+    byte[] publicKey = ReadExactFile(publicKeyPath, Mldsa87.PublicKeyBytes, "ML-DSA-87 public key");
+    string password = ReadPfxPassword(options);
+    string? macTemporaryKeychainDirectory = OperatingSystem.IsMacOS()
+        ? PrepareMacTemporaryKeychainDirectory()
+        : null;
+    X509Certificate2? certificate = null;
+    try
+    {
+        X509KeyStorageFlags storageFlags = OperatingSystem.IsMacOS()
+            ? X509KeyStorageFlags.DefaultKeySet
+            : X509KeyStorageFlags.EphemeralKeySet;
+        certificate = X509CertificateLoader.LoadPkcs12FromFile(
+            pfxPath,
+            password,
+            storageFlags);
+        HybridSignaturePolicy policy = LoadPolicy(policyPath, publicKey);
+        if (!policy.MatchesRsaCertificate(certificate, out string pinError))
+        {
+            throw new CryptographicException(pinError);
+        }
+
+        byte[] derivedPublicKey = Mldsa87.DerivePublicKey(privateKey);
+        try
+        {
+            if (!CryptographicOperations.FixedTimeEquals(derivedPublicKey, publicKey))
+            {
+                throw new CryptographicException("The ML-DSA-87 private key does not match the pinned public key.");
+            }
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(derivedPublicKey);
+        }
+
+        using var reference = new Mldsa87Reference(referencePath);
+        CrossCheckMldsa(reference, privateKey, publicKey);
+
+        foreach (string targetValue in targets)
+        {
+            string target = RequireRegularFile(targetValue, "hybrid-signing target");
+            (byte[] sha256, byte[] sha3, byte[] skein) = Fingerprint(target);
+            try
+            {
+                WriteTextAtomically(target + ".sha3", Convert.ToHexString(sha3) + "\n");
+                WriteTextAtomically(target + ".skein", Convert.ToHexString(skein) + "\n");
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(sha256);
+                CryptographicOperations.ZeroMemory(sha3);
+                CryptographicOperations.ZeroMemory(skein);
+            }
+
+            foreach (string signedPath in new[] { target, target + ".sha3", target + ".skein" })
+            {
+                using HybridSignatureCreationResult creation = await HybridSignatureService.CreateAsync(
+                    signedPath,
+                    signedPath + HybridSignatureService.SidecarExtension,
+                    certificate,
+                    privateKey,
+                    publicKey).ConfigureAwait(false);
+                if (!reference.Verify(creation.Payload, creation.MldsaSignature, publicKey))
+                {
+                    throw new CryptographicException($"The pinned ML-DSA reference implementation rejected {Path.GetFileName(signedPath)}.");
+                }
+                HybridSignatureVerificationResult verification = HybridSignatureService.VerifyFile(
+                    signedPath,
+                    signedPath + HybridSignatureService.SidecarExtension,
+                    policy);
+                if (!verification.IsTrusted)
+                {
+                    throw new CryptographicException($"Hybrid signature verification failed for {Path.GetFileName(signedPath)}: {verification.Message}");
+                }
+            }
+
+            VerifyManifests(target);
+            Console.WriteLine($"hybrid_signed={target}");
+        }
+
+        WriteLauncherPins(launcherPinsPath, certificate.RawData, publicKey);
+        Console.WriteLine($"launcher_pins={Path.GetFullPath(launcherPinsPath)}");
+        return 0;
+    }
+    finally
+    {
+        try
+        {
+            certificate?.Dispose();
+            if (macTemporaryKeychainDirectory is not null)
+            {
+                // Apple private keys require a temporary on-disk keychain. Dispose
+                // every Security.framework handle before checking that .NET removed it.
+                GC.Collect();
+                GC.WaitForPendingFinalizers();
+            }
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(privateKey);
+            CryptographicOperations.ZeroMemory(publicKey);
+        }
+        if (macTemporaryKeychainDirectory is not null)
+        {
+            RequireDirectoryEmpty(macTemporaryKeychainDirectory, "temporary macOS keychain directory");
+        }
+    }
+}
+
+static string PrepareMacTemporaryKeychainDirectory()
+{
+    string configured = Environment.GetEnvironmentVariable("KEEPVAULT_KEYCHAIN_TEMP_ROOT")
+        ?? throw new CryptographicException(
+            "KEEPVAULT_KEYCHAIN_TEMP_ROOT is required for isolated macOS PFX loading. Use the release build script.");
+    string fullPath = Path.TrimEndingDirectorySeparator(Path.GetFullPath(configured));
+    var directory = new DirectoryInfo(fullPath);
+    if (!directory.Exists
+        || directory.LinkTarget is not null
+        || (directory.Attributes & FileAttributes.ReparsePoint) != 0)
+    {
+        throw new CryptographicException("The temporary macOS keychain directory is missing or is a symbolic link.");
+    }
+
+    UnixFileMode mode = File.GetUnixFileMode(fullPath);
+    UnixFileMode forbidden = UnixFileMode.GroupRead | UnixFileMode.GroupWrite | UnixFileMode.GroupExecute
+        | UnixFileMode.OtherRead | UnixFileMode.OtherWrite | UnixFileMode.OtherExecute;
+    if ((mode & forbidden) != 0)
+    {
+        throw new CryptographicException("The temporary macOS keychain directory must be private to the release user.");
+    }
+
+    string runtimeTemporaryPath = Path.TrimEndingDirectorySeparator(Path.GetFullPath(Path.GetTempPath()));
+    if (!string.Equals(runtimeTemporaryPath, fullPath, StringComparison.Ordinal))
+    {
+        throw new CryptographicException("TMPDIR does not resolve to KEEPVAULT_KEYCHAIN_TEMP_ROOT.");
+    }
+
+    RequireDirectoryEmpty(fullPath, "temporary macOS keychain directory");
+    return fullPath;
+}
+
+static void RequireDirectoryEmpty(string path, string description)
+{
+    string? unexpected = Directory.EnumerateFileSystemEntries(path).FirstOrDefault();
+    if (unexpected is not null)
+    {
+        throw new CryptographicException(
+            $"The {description} contains a residual object: {Path.GetFileName(unexpected)}");
+    }
+}
+
+static int Verify(Dictionary<string, string> options, IReadOnlyList<string> targets)
+{
+    string publicKeyPath = Require(options, "mldsa-public-key");
+    byte[] publicKey = ReadExactFile(publicKeyPath, Mldsa87.PublicKeyBytes, "ML-DSA-87 public key");
+    try
+    {
+        HybridSignaturePolicy policy = LoadPolicy(Require(options, "policy"), publicKey);
+        foreach (string targetValue in targets)
+        {
+            string target = RequireRegularFile(targetValue, "hybrid-verification target");
+            VerifyManifests(target);
+            foreach (string signedPath in new[] { target, target + ".sha3", target + ".skein" })
+            {
+                HybridSignatureVerificationResult result = HybridSignatureService.VerifyFile(
+                    signedPath,
+                    signedPath + HybridSignatureService.SidecarExtension,
+                    policy);
+                if (!result.IsTrusted)
+                {
+                    throw new CryptographicException($"Hybrid signature verification failed for {Path.GetFileName(signedPath)}: {result.Message}");
+                }
+            }
+            Console.WriteLine($"hybrid_verified={target}");
+        }
+        return 0;
+    }
+    finally
+    {
+        CryptographicOperations.ZeroMemory(publicKey);
+    }
+}
+
+static void CrossCheckMldsa(Mldsa87Reference reference, ReadOnlySpan<byte> privateKey, ReadOnlySpan<byte> publicKey)
+{
+    byte[] message = SHA512.HashData("Keep Vault macOS hybrid signing reference cross-check v1"u8);
+    byte[]? managedSignature = null;
+    byte[]? referenceSignature = null;
+    try
+    {
+        managedSignature = Mldsa87.Sign(message, privateKey);
+        referenceSignature = reference.Sign(message, privateKey);
+        if (!reference.Verify(message, managedSignature, publicKey)
+            || !Mldsa87.Verify(message, referenceSignature, publicKey))
+        {
+            throw new CryptographicException("Managed and pinned reference ML-DSA-87 implementations do not agree.");
+        }
+    }
+    finally
+    {
+        CryptographicOperations.ZeroMemory(message);
+        if (managedSignature is not null) CryptographicOperations.ZeroMemory(managedSignature);
+        if (referenceSignature is not null) CryptographicOperations.ZeroMemory(referenceSignature);
+    }
+}
+
+static (byte[] Sha256, byte[] Sha3, byte[] Skein) Fingerprint(string path)
+{
+    using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 1024 * 1024, FileOptions.SequentialScan);
+    return HybridSignatureService.Fingerprint(stream);
+}
+
+static void VerifyManifests(string target)
+{
+    (byte[] sha256, byte[] sha3, byte[] skein) = Fingerprint(target);
+    try
+    {
+        string expectedSha3 = ReadHexManifest(target + ".sha3", 128);
+        string expectedSkein = ReadHexManifest(target + ".skein", 256);
+        byte[] expectedSha3Bytes = Convert.FromHexString(expectedSha3);
+        byte[] expectedSkeinBytes = Convert.FromHexString(expectedSkein);
+        try
+        {
+            if (!(CryptographicOperations.FixedTimeEquals(sha3, expectedSha3Bytes)
+                & CryptographicOperations.FixedTimeEquals(skein, expectedSkeinBytes)))
+            {
+                throw new CryptographicException($"Dual manifest mismatch: {Path.GetFileName(target)}");
+            }
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(expectedSha3Bytes);
+            CryptographicOperations.ZeroMemory(expectedSkeinBytes);
+        }
+    }
+    finally
+    {
+        CryptographicOperations.ZeroMemory(sha256);
+        CryptographicOperations.ZeroMemory(sha3);
+        CryptographicOperations.ZeroMemory(skein);
+    }
+}
+
+static string ReadHexManifest(string path, int expectedCharacters)
+{
+    string text = File.ReadAllText(RequireRegularFile(path, "integrity manifest"), Encoding.ASCII);
+    string normalized = new(text.Where(character => !char.IsWhiteSpace(character)).ToArray());
+    if (normalized.Length != expectedCharacters || normalized.Any(character => !Uri.IsHexDigit(character)))
+    {
+        throw new InvalidDataException($"Invalid integrity manifest: {Path.GetFileName(path)}");
+    }
+    return normalized;
+}
+
+static HybridSignaturePolicy LoadPolicy(string path, byte[] publicKey)
+{
+    XDocument document = XDocument.Load(RequireRegularFile(path, "compiled signing policy"), LoadOptions.None);
+    string Property(string name) => document.Descendants(name).Select(element => element.Value.Trim()).FirstOrDefault()
+        ?? throw new InvalidDataException($"Signing policy property is missing: {name}");
+    return new HybridSignaturePolicy(
+        Property("KalynaExpectedSignerSha256"),
+        Property("KalynaExpectedSignerSha3_512"),
+        Property("KalynaExpectedSignerSkein1024"),
+        Property("KalynaExpectedMldsa87Sha256"),
+        Property("KalynaExpectedMldsa87Sha3_512"),
+        Property("KalynaExpectedMldsa87Skein1024"),
+        publicKey);
+}
+
+static string ReadPfxPassword(Dictionary<string, string> options)
+{
+    if (options.TryGetValue("pfx-password-keychain-service", out string? service))
+    {
+        string account = options.GetValueOrDefault("pfx-keychain-account") ?? Environment.UserName;
+        var start = new ProcessStartInfo("/usr/bin/security")
+        {
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+        };
+        start.ArgumentList.Add("find-generic-password");
+        start.ArgumentList.Add("-s");
+        start.ArgumentList.Add(service);
+        start.ArgumentList.Add("-a");
+        start.ArgumentList.Add(account);
+        start.ArgumentList.Add("-w");
+        using Process process = Process.Start(start)
+            ?? throw new InvalidOperationException("Unable to start macOS Keychain lookup.");
+        string password = process.StandardOutput.ReadToEnd().TrimEnd('\r', '\n');
+        string error = process.StandardError.ReadToEnd();
+        process.WaitForExit();
+        if (process.ExitCode != 0 || password.Length == 0)
+        {
+            throw new CryptographicException($"macOS Keychain did not provide the PFX password: {error.Trim()}");
+        }
+        return password;
+    }
+
+    string variable = options.GetValueOrDefault("pfx-password-env") ?? "KEEPVAULT_HYBRID_PFX_PASSWORD";
+    return Environment.GetEnvironmentVariable(variable)
+        ?? throw new CryptographicException($"PFX password is unavailable. Prefer --pfx-password-keychain-service or set {variable}.");
+}
+
+static void RequirePrivateFileProtection(string path, string description)
+{
+    string fullPath = RequireRegularFile(path, description);
+    if (!OperatingSystem.IsMacOS()) return;
+    UnixFileMode mode = File.GetUnixFileMode(fullPath);
+    UnixFileMode forbidden = UnixFileMode.GroupRead | UnixFileMode.GroupWrite | UnixFileMode.GroupExecute
+        | UnixFileMode.OtherRead | UnixFileMode.OtherWrite | UnixFileMode.OtherExecute;
+    if ((mode & forbidden) != 0)
+    {
+        throw new CryptographicException($"{description} must not be accessible to group or other users: {fullPath}");
+    }
+}
+
+static byte[] ReadExactFile(string path, int expectedBytes, string description)
+{
+    string fullPath = RequireRegularFile(path, description);
+    using var stream = new FileStream(fullPath, FileMode.Open, FileAccess.Read, FileShare.Read, 4096, FileOptions.SequentialScan);
+    if (stream.Length != expectedBytes)
+    {
+        throw new InvalidDataException($"{description} must contain exactly {expectedBytes} bytes.");
+    }
+    byte[] result = new byte[expectedBytes];
+    stream.ReadExactly(result);
+    return result;
+}
+
+static string RequireRegularFile(string path, string description)
+{
+    string fullPath = Path.GetFullPath(path);
+    var info = new FileInfo(fullPath);
+    if (!info.Exists || info.LinkTarget is not null || (info.Attributes & FileAttributes.ReparsePoint) != 0)
+    {
+        throw new FileNotFoundException($"{description} is missing, not regular, or a symbolic link.", fullPath);
+    }
+    return fullPath;
+}
+
+static void WriteTextAtomically(string path, string contents)
+{
+    WriteBytesAtomically(path, Encoding.ASCII.GetBytes(contents));
+}
+
+static void WriteLauncherPins(string path, byte[] certificate, byte[] publicKey)
+{
+    byte[] certificateSha256 = SHA256.HashData(certificate);
+    try
+    {
+        string source = "// Generated by KeepVaultMac.HybridSigner. Do not edit.\n"
+            + "enum KeepVaultHybridPins {\n"
+            + "    static let rsaCertificateSha256: [UInt8] = [\n"
+            + FormatSwiftBytes(certificateSha256, 8)
+            + "    ]\n"
+            + "    static let mldsaPublicKey: [UInt8] = [\n"
+            + FormatSwiftBytes(publicKey, 8)
+            + "    ]\n"
+            + "}\n";
+        WriteBytesAtomically(path, Encoding.UTF8.GetBytes(source));
+    }
+    finally
+    {
+        CryptographicOperations.ZeroMemory(certificateSha256);
+    }
+}
+
+static string FormatSwiftBytes(ReadOnlySpan<byte> bytes, int indentation)
+{
+    var builder = new StringBuilder();
+    string prefix = new(' ', indentation);
+    for (int offset = 0; offset < bytes.Length; offset += 16)
+    {
+        builder.Append(prefix);
+        int count = Math.Min(16, bytes.Length - offset);
+        for (int index = 0; index < count; index++)
+        {
+            if (index != 0) builder.Append(' ');
+            builder.Append("0x");
+            builder.Append(bytes[offset + index].ToString("X2"));
+            builder.Append(',');
+        }
+        builder.AppendLine();
+    }
+    return builder.ToString();
+}
+
+static void WriteBytesAtomically(string path, byte[] contents)
+{
+    string fullPath = Path.GetFullPath(path);
+    string directory = Path.GetDirectoryName(fullPath)
+        ?? throw new InvalidOperationException("Output path has no parent directory.");
+    Directory.CreateDirectory(directory);
+    string temporary = Path.Combine(directory, $".{Path.GetFileName(fullPath)}.{Guid.NewGuid():N}.tmp");
+    try
+    {
+        using (var stream = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None, 4096, FileOptions.WriteThrough))
+        {
+            stream.Write(contents);
+            stream.Flush(flushToDisk: true);
+        }
+        File.Move(temporary, fullPath, overwrite: true);
+    }
+    finally
+    {
+        File.Delete(temporary);
+        CryptographicOperations.ZeroMemory(contents);
+    }
+}
+
+static (Dictionary<string, string> Options, List<string> Targets) ParseOptions(string[] args)
+{
+    var options = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+    var targets = new List<string>();
+    for (int index = 0; index < args.Length; index += 2)
+    {
+        if (index + 1 >= args.Length || !args[index].StartsWith("--", StringComparison.Ordinal))
+        {
+            throw new ArgumentException($"Invalid option near '{args[index]}'.");
+        }
+        string name = args[index][2..];
+        if (string.Equals(name, "target", StringComparison.OrdinalIgnoreCase))
+        {
+            targets.Add(args[index + 1]);
+        }
+        else if (!options.TryAdd(name, args[index + 1]))
+        {
+            throw new ArgumentException($"Duplicate option: --{name}");
+        }
+    }
+    return (options, targets);
+}
+
+static string Require(Dictionary<string, string> options, string name) =>
+    options.TryGetValue(name, out string? value) && !string.IsNullOrWhiteSpace(value)
+        ? value
+        : throw new ArgumentException($"Missing required option --{name}.");
+
+static int Usage(string error)
+{
+    Console.Error.WriteLine(error);
+    Console.Error.WriteLine("Usage: sign|verify --target FILE [...] --mldsa-public-key FILE --policy Directory.Build.props");
+    return 64;
+}

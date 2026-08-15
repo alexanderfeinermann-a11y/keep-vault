@@ -1,0 +1,103 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <TargetPlatformMinVersion>14.0</TargetPlatformMinVersion>
+    <RuntimeIdentifier>osx-arm64</RuntimeIdentifier>
+    <RuntimeIdentifiers>osx-arm64;osx-x64</RuntimeIdentifiers>
+    <AssemblyName>Keep Vault</AssemblyName>
+    <RootNamespace>KalynaArchiver</RootNamespace>
+    <Product>Keep Vault</Product>
+    <AssemblyTitle>Keep Vault</AssemblyTitle>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <DefineConstants>$(DefineConstants);KEEPVAULT_MACOS</DefineConstants>
+    <AvaloniaUseCompiledBindingsByDefault>true</AvaloniaUseCompiledBindingsByDefault>
+    <BuiltInComInteropSupport>true</BuiltInComInteropSupport>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <RestoreLockedMode>true</RestoreLockedMode>
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+    <PublishAot>true</PublishAot>
+    <PublishTrimmed>true</PublishTrimmed>
+    <TrimMode>full</TrimMode>
+    <InvariantGlobalization>false</InvariantGlobalization>
+    <IlcGenerateStackTraceData>false</IlcGenerateStackTraceData>
+    <StripSymbols>true</StripSymbols>
+    <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+      <_Parameter1>KeepVaultAppleTeamIdentifier</_Parameter1>
+      <_Parameter2>2T6K9PGS55</_Parameter2>
+    </AssemblyAttribute>
+    <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+      <_Parameter1>KalynaExpectedSignerSha256</_Parameter1>
+      <_Parameter2>$(KalynaExpectedSignerSha256)</_Parameter2>
+    </AssemblyAttribute>
+    <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+      <_Parameter1>KalynaExpectedSignerSha3_512</_Parameter1>
+      <_Parameter2>$(KalynaExpectedSignerSha3_512)</_Parameter2>
+    </AssemblyAttribute>
+    <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+      <_Parameter1>KalynaExpectedSignerSkein1024</_Parameter1>
+      <_Parameter2>$(KalynaExpectedSignerSkein1024)</_Parameter2>
+    </AssemblyAttribute>
+    <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+      <_Parameter1>KalynaExpectedMldsa87Sha256</_Parameter1>
+      <_Parameter2>$(KalynaExpectedMldsa87Sha256)</_Parameter2>
+    </AssemblyAttribute>
+    <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+      <_Parameter1>KalynaExpectedMldsa87Sha3_512</_Parameter1>
+      <_Parameter2>$(KalynaExpectedMldsa87Sha3_512)</_Parameter2>
+    </AssemblyAttribute>
+    <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+      <_Parameter1>KalynaExpectedMldsa87Skein1024</_Parameter1>
+      <_Parameter2>$(KalynaExpectedMldsa87Skein1024)</_Parameter2>
+    </AssemblyAttribute>
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Avalonia" Version="12.1.1" />
+    <PackageReference Include="Avalonia.Desktop" Version="12.1.1" />
+    <PackageReference Include="Avalonia.Fonts.Inter" Version="12.1.1" />
+    <PackageReference Include="Avalonia.Themes.Fluent" Version="12.1.1" />
+    <PackageReference Include="BouncyCastle.Cryptography" Version="2.6.2" />
+    <PackageReference Include="PDFsharp" Version="6.2.4" />
+    <PackageReference Include="QRCoder" Version="1.8.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Remove="Packaging/**" />
+    <Compile Include="../KalynaArchiver/Services/AppSettingsStore.cs" Link="Services/AppSettingsStore.cs" />
+    <Compile Include="../KalynaArchiver/Services/ArchiveIntegrityService.cs" Link="Services/ArchiveIntegrityService.cs" />
+    <Compile Include="../KalynaArchiver/Services/CryptographicEraseService.cs" Link="Services/CryptographicEraseService.cs" />
+    <Compile Include="../KalynaArchiver/Services/EntropyMixer.cs" Link="Services/EntropyMixer.cs" />
+    <Compile Include="../KalynaArchiver/Services/EncryptionSuite.cs" Link="Services/EncryptionSuite.cs" />
+    <Compile Include="../KalynaArchiver/Services/KalynaContainerService.cs" Link="Services/KalynaContainerService.cs" />
+    <Compile Include="../KalynaArchiver/Services/NativeArgon2id.cs" Link="Services/NativeArgon2id.cs" />
+    <Compile Include="../KalynaArchiver/Services/PasswordKeyService.cs" Link="Services/PasswordKeyService.cs" />
+    <Compile Include="../KalynaArchiver/Services/ProcessResult.cs" Link="Services/ProcessResult.cs" />
+    <Compile Include="../KalynaArchiver/Services/RecoveryService.cs" Link="Services/RecoveryService.cs" />
+    <Compile Include="../KalynaArchiver/Services/SecureMemory.cs" Link="Services/SecureMemory.cs" />
+    <Compile Include="../KalynaArchiver/Services/Skein1024Service.cs" Link="Services/Skein1024Service.cs" />
+    <Compile Include="../KalynaArchiver/Services/ZpaqService.cs" Link="Services/ZpaqService.cs" />
+    <Compile Include="../KalynaArchiver/Services/SigningTrustPolicy.cs" Link="Services/SigningTrustPolicy.cs" />
+    <Compile Include="../KalynaArchiver.Signing/HybridSignatureService.cs" Link="Signing/HybridSignatureService.cs" />
+    <Compile Include="../KalynaArchiver.Signing/Mldsa87.cs" Link="Signing/Mldsa87.cs" />
+    <Compile Include="../KalynaArchiver.Signing/Sha3_512Compat.cs" Link="Signing/Sha3_512Compat.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="Packaging/Keys/mldsa87-public.key" LogicalName="KeepVault.MLDsa87.PublicKey" />
+    <Content Include="Native/osx-arm64/zpaq" CopyToOutputDirectory="PreserveNewest" TargetPath="Native/zpaq" />
+    <Content Include="Native/osx-arm64/argon2" CopyToOutputDirectory="PreserveNewest" TargetPath="Native/argon2" />
+    <Content Include="Native/osx-arm64/libargon2_ref.dylib" CopyToOutputDirectory="PreserveNewest" TargetPath="Native/libargon2_ref.dylib" />
+    <Content Include="Native/osx-arm64/libkalyna_ref.dylib" CopyToOutputDirectory="PreserveNewest" TargetPath="Native/libkalyna_ref.dylib" />
+    <Content Include="Native/osx-arm64/libthreefish_ref.dylib" CopyToOutputDirectory="PreserveNewest" TargetPath="Native/libthreefish_ref.dylib" />
+  </ItemGroup>
+
+</Project>

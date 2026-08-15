@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>KeepVaultMac.HybridSigner</AssemblyName>
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+    <RestoreLockedMode>true</RestoreLockedMode>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="BouncyCastle.Cryptography" Version="2.6.2" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="../../../KalynaArchiver.Signing/HybridSignatureService.cs" Link="Signing/HybridSignatureService.cs" />
+    <Compile Include="../../../KalynaArchiver.Signing/Mldsa87.cs" Link="Signing/Mldsa87.cs" />
+    <Compile Include="../../../KalynaArchiver.Signing/Mldsa87Reference.cs" Link="Signing/Mldsa87Reference.cs" />
+    <Compile Include="../../../KalynaArchiver.Signing/Sha3_512Compat.cs" Link="Signing/Sha3_512Compat.cs" />
+  </ItemGroup>
+</Project>

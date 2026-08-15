@@ -1,0 +1,18 @@
+Drag-and-drop and key sheet tests passed.
+Two generated 512-bit password factors and entropy mixer tests passed.
+Native tool integrity and signature checks passed.
+ZPAQ path-traversal and extraction-directory tests passed.
+Process hardening smoke test passed.
+SHA3-512 reference-vector tests passed.
+Argon2id PHC reference-CLI comparison passed.
+Kalyna-512/512 reference-vector test passed.
+Kalyna-512/512 parallel CTR equivalence test passed.
+Threefish-1024 official-vector and independent Bouncy Castle tests passed.
+Threefish-1024 parallel CTR equivalence test passed.
+Sample PDF under test: C:\Users\Michael\OneDrive - tu-dortmund.de\Desktop\Aushang_Studienassistenz_2 - Kopie.pdf
+PDF ZPAQ and dual-suite encrypted-container tests passed.
+Mixed text, empty, compressible, and random sample-data tests passed.
+Short-read Kalyna stream test passed.
+KPAR2 SHA3 recovery tests passed.
+Large streaming container test passed.
+Cryptographic erase tests passed.

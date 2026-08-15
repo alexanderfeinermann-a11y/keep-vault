@@ -1,0 +1,405 @@
+<Window x:Class="KalynaArchiver.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Keep Vault"
+        Height="800"
+        Width="1120"
+        MinHeight="700"
+        MinWidth="940"
+        WindowStartupLocation="CenterScreen"
+        Background="#0F172A"
+        AllowDrop="True"
+        PreviewDragOver="Global_PreviewDragOver"
+        PreviewDrop="Global_PreviewDrop"
+        DragOver="Window_DragOver"
+        Drop="Window_Drop">
+    <Window.Resources>
+        <Style TargetType="TextBlock">
+            <Setter Property="Foreground" Value="#E5E7EB" />
+            <Setter Property="FontFamily" Value="Segoe UI" />
+        </Style>
+        <Style TargetType="Button">
+            <Setter Property="MinHeight" Value="38" />
+            <Setter Property="Padding" Value="16,8" />
+            <Setter Property="Margin" Value="0,0,8,0" />
+            <Setter Property="BorderThickness" Value="0" />
+            <Setter Property="Foreground" Value="#0B1120" />
+            <Setter Property="Background" Value="#67E8F9" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="Cursor" Value="Hand" />
+        </Style>
+        <Style TargetType="TextBox">
+            <Setter Property="MinHeight" Value="36" />
+            <Setter Property="Padding" Value="10,7" />
+            <Setter Property="Background" Value="#111827" />
+            <Setter Property="Foreground" Value="#F8FAFC" />
+            <Setter Property="BorderBrush" Value="#334155" />
+            <Setter Property="CaretBrush" Value="#67E8F9" />
+        </Style>
+        <Style TargetType="PasswordBox">
+            <Setter Property="MinHeight" Value="36" />
+            <Setter Property="Padding" Value="10,7" />
+            <Setter Property="Background" Value="#111827" />
+            <Setter Property="Foreground" Value="#F8FAFC" />
+            <Setter Property="BorderBrush" Value="#334155" />
+            <Setter Property="CaretBrush" Value="#67E8F9" />
+        </Style>
+        <Style TargetType="CheckBox">
+            <Setter Property="Foreground" Value="#E5E7EB" />
+            <Setter Property="Margin" Value="0,8,0,8" />
+        </Style>
+        <Style TargetType="ComboBox">
+            <Setter Property="MinHeight" Value="36" />
+            <Setter Property="Background" Value="#111827" />
+            <Setter Property="Foreground" Value="#0F172A" />
+        </Style>
+        <Style TargetType="TabControl">
+            <Setter Property="Background" Value="#0F172A" />
+            <Setter Property="BorderThickness" Value="0" />
+        </Style>
+        <Style TargetType="TabItem">
+            <Setter Property="Padding" Value="16,9" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+        </Style>
+    </Window.Resources>
+
+    <Grid Margin="24">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="190" />
+        </Grid.RowDefinitions>
+
+        <Border Grid.Row="0" Padding="22" Background="#111827" CornerRadius="8" BorderBrush="#1F2937" BorderThickness="1">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <StackPanel>
+                    <TextBlock x:Name="TitleText" Text="Keep Vault" FontSize="30" FontWeight="Bold" />
+                    <TextBlock x:Name="SubtitleText"
+                               Text="Create, extract, and cryptographically erase encrypted ZPAQ archives."
+                               Foreground="#94A3B8"
+                               Margin="0,8,0,0" />
+                </StackPanel>
+                <StackPanel Grid.Column="1" VerticalAlignment="Center" HorizontalAlignment="Right">
+                    <DockPanel Margin="0,0,0,8" HorizontalAlignment="Right">
+                        <TextBlock x:Name="LanguageLabel" Text="Language" VerticalAlignment="Center" Margin="0,0,8,0" Foreground="#94A3B8" />
+                        <ComboBox x:Name="LanguageBox" Width="130" SelectionChanged="LanguageBox_SelectionChanged">
+                            <ComboBoxItem Content="Deutsch" Tag="de" />
+                            <ComboBoxItem Content="English" Tag="en" />
+                        </ComboBox>
+                    </DockPanel>
+                    <TextBlock x:Name="IntegrityText" Text="Checking integrity ..." Foreground="#FBBF24" TextAlignment="Right" />
+                    <TextBlock x:Name="CaptureText" Text="Screen capture protection: enabling ..." Foreground="#94A3B8" TextAlignment="Right" Margin="0,6,0,0" />
+                </StackPanel>
+            </Grid>
+        </Border>
+
+        <TabControl x:Name="MainTabs" Grid.Row="1" Margin="0,18,0,18">
+            <TabItem x:Name="ArchiveTab" Header="Archive">
+                <Border x:Name="CreatePanel" Padding="18" Background="#111827" CornerRadius="8" BorderBrush="#1F2937" BorderThickness="1" AllowDrop="True">
+                    <ScrollViewer VerticalScrollBarVisibility="Auto"
+                                  AllowDrop="True"
+                                  PreviewDragOver="Global_PreviewDragOver"
+                                  PreviewDrop="Global_PreviewDrop">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="1.05*" />
+                                <ColumnDefinition Width="20" />
+                                <ColumnDefinition Width="0.95*" />
+                            </Grid.ColumnDefinitions>
+
+                            <StackPanel Grid.Column="0">
+                                <TextBlock x:Name="CreateTitleText" Text="Create Archive" FontSize="20" FontWeight="SemiBold" />
+                                <TextBlock x:Name="CreateSubtitleText"
+                                           Text="Select files or folders and choose the target archive."
+                                           Foreground="#94A3B8"
+                                           Margin="0,4,0,14" />
+                                <WrapPanel>
+                                    <Button x:Name="AddFilesButton" Content="Add files" Click="AddFiles_Click" />
+                                    <Button x:Name="AddFolderButton" Content="Add folder" Click="AddFolder_Click" />
+                                    <Button x:Name="ClearInputsButton" Content="Clear selection" Background="#334155" Foreground="#E5E7EB" Click="ClearInputs_Click" />
+                                </WrapPanel>
+                                <ListBox x:Name="InputList"
+                                         Height="230"
+                                         Margin="0,16,0,12"
+                                         Background="#0B1120"
+                                         Foreground="#E5E7EB"
+                                         BorderBrush="#334155"
+                                         AllowDrop="True"
+                                         DragOver="InputList_DragOver"
+                                         Drop="InputList_Drop" />
+                                <TextBlock x:Name="InputDropHintText"
+                                           Text="Drop files or folders anywhere in this panel to add them."
+                                           Foreground="#67E8F9"
+                                           Margin="0,0,0,12"
+                                           TextWrapping="Wrap" />
+                                <TextBlock x:Name="TargetArchiveLabel" Text="Target archive" FontWeight="SemiBold" Margin="0,0,0,6" />
+                                <TextBlock x:Name="TargetArchiveDropHintText"
+                                           Text="Drop a folder here to create archive(1).kzpaq there, or drop any file to derive name(1).kzpaq."
+                                           Foreground="#94A3B8"
+                                           Margin="0,0,0,6"
+                                           TextWrapping="Wrap" />
+                                <DockPanel LastChildFill="True">
+                                    <Button x:Name="BrowseArchiveButton" Content="Browse" DockPanel.Dock="Right" Margin="8,0,0,0" Click="ChooseArchive_Click" />
+                                    <TextBox x:Name="ArchivePathBox" AllowDrop="True" DragOver="ArchivePathBox_DragOver" Drop="ArchivePathBox_Drop" />
+                                </DockPanel>
+
+                                <Grid Margin="0,14,0,0">
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="Auto" />
+                                    </Grid.RowDefinitions>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="130" />
+                                        <ColumnDefinition Width="24" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock x:Name="CompressionLabel" Text="Compression" VerticalAlignment="Center" />
+                                    <ComboBox x:Name="CompressionBox" Grid.Column="1" Margin="10,0,0,0" SelectedIndex="1" SelectionChanged="CompressionBox_SelectionChanged">
+                                        <ComboBoxItem Content="0" />
+                                        <ComboBoxItem Content="1" />
+                                        <ComboBoxItem Content="2" />
+                                        <ComboBoxItem Content="3" />
+                                        <ComboBoxItem Content="4" />
+                                        <ComboBoxItem Content="5" />
+                                    </ComboBox>
+                                    <CheckBox x:Name="EncryptBox" Grid.Column="3" Content="Encrypt archive" IsChecked="True" Checked="EncryptBox_Changed" Unchecked="EncryptBox_Changed" />
+                                    <TextBlock x:Name="CipherSuiteLabel" Grid.Row="1" Grid.Column="0" Text="Cipher suite" VerticalAlignment="Center" Margin="0,10,0,0" />
+                                    <ComboBox x:Name="CipherSuiteBox"
+                                              Grid.Row="1"
+                                              Grid.Column="1"
+                                              Grid.ColumnSpan="3"
+                                              Margin="10,10,0,0"
+                                              SelectedIndex="0"
+                                              SelectionChanged="CipherSuiteBox_SelectionChanged">
+                                        <ComboBoxItem Content="Threefish 1024" Tag="Threefish1024" />
+                                        <ComboBoxItem Content="Kalyna 512/512" Tag="Kalyna512_512" />
+                                    </ComboBox>
+                                    <TextBlock x:Name="Argon2ProfileText"
+                                               Grid.Row="2"
+                                               Grid.Column="0"
+                                               Grid.ColumnSpan="4"
+                                               Text="Argon2id: 1 GiB memory, 4 iterations, parallelism 4"
+                                               Foreground="#94A3B8"
+                                               TextWrapping="Wrap"
+                                               Margin="0,10,0,0" />
+                                </Grid>
+                                <Button x:Name="CreateArchiveButton" Content="Save archive" Margin="0,18,0,0" HorizontalAlignment="Left" Click="CreateArchive_Click" />
+                            </StackPanel>
+
+                            <Border Grid.Column="2" Padding="14" Background="#0B1120" CornerRadius="8" BorderBrush="#334155" BorderThickness="1">
+                                <StackPanel x:Name="CreatePasswordPanel">
+                                    <TextBlock x:Name="CreatePasswordSetupTitle" Text="Three-part password for encrypted archives" FontSize="16" FontWeight="SemiBold" />
+                                    <TextBlock x:Name="CreatePasswordSetupHelpText"
+                                               Text="The user password and two independent generated 512-bit hexadecimal passwords are required for extraction."
+                                               Foreground="#94A3B8"
+                                               TextWrapping="Wrap"
+                                               Margin="0,6,0,0" />
+                                    <TextBlock x:Name="CreatePasswordLabel" Text="User password" FontWeight="SemiBold" Margin="0,12,0,6" />
+                                    <PasswordBox x:Name="CreatePasswordBox" MaxLength="128" PasswordChanged="CreatePasswordBox_PasswordChanged" />
+                                    <TextBlock x:Name="CreatePasswordConfirmLabel" Text="Repeat user password" FontWeight="SemiBold" Margin="0,12,0,6" />
+                                    <PasswordBox x:Name="CreatePasswordConfirmBox" MaxLength="128" PasswordChanged="CreatePasswordBox_PasswordChanged" />
+                                    <TextBlock x:Name="PasswordHelpText"
+                                               Text="24 to 128 characters. The policy requires 128 conservative entropy bits and rejects generated-password copies."
+                                               TextWrapping="Wrap"
+                                               Foreground="#94A3B8"
+                                               Margin="0,10,0,0" />
+                                    <TextBlock x:Name="PasswordEntropyStatusText" Text="Conservative entropy: 0 / 128 bits" Foreground="#FBBF24" TextWrapping="Wrap" Margin="0,8,0,0" />
+                                    <TextBlock x:Name="PasswordPolicyStatusText" Text="Enter a user password to see the active requirements." Foreground="#FCA5A5" TextWrapping="Wrap" Margin="0,6,0,0" />
+
+                                    <Border Margin="0,14,0,12" Padding="12" Background="#111827" CornerRadius="8" BorderBrush="#334155" BorderThickness="1">
+                                        <StackPanel>
+                                            <TextBlock x:Name="PasswordGeneratorTitle" Text="Two independent generated 512-bit passwords" FontWeight="SemiBold" />
+                                            <TextBlock x:Name="PasswordGeneratorHelpText"
+                                                       Text="Move the mouse over the window. Five independent pools are filled evenly; 512 samples per pool is the minimum. Generate creates A, B, salt, and both nonce parts atomically, then marks their reset pools as consumed. Key = Argon2id(SHA3-512(UserPassword, A) || SHA3-512(UserPassword, B), Salt). Inputs are length-prefixed and domain-separated."
+                                                       Foreground="#94A3B8"
+                                                       TextWrapping="Wrap"
+                                                       Margin="0,6,0,6" />
+                                            <TextBlock x:Name="EntropyStatusText" Text="Collecting archive entropy: 0 current mouse samples" Foreground="#67E8F9" TextWrapping="Wrap" />
+                                            <WrapPanel Margin="0,10,0,8">
+                                                <Button x:Name="GeneratePasswordButton" Content="Regenerate" Click="GeneratePassword_Click" />
+                                            </WrapPanel>
+                                            <TextBlock x:Name="GeneratedPasswordFirstLabel" Text="Generated password A" FontWeight="SemiBold" Margin="0,0,0,6" />
+                                            <TextBox x:Name="GeneratedPasswordFirstBox"
+                                                     IsReadOnly="True"
+                                                     TextWrapping="Wrap"
+                                                     FontFamily="Consolas"
+                                                     FontSize="12"
+                                                     MinHeight="72" />
+                                            <TextBlock x:Name="GeneratedPasswordSecondLabel" Text="Generated password B" FontWeight="SemiBold" Margin="0,10,0,6" />
+                                            <TextBox x:Name="GeneratedPasswordSecondBox"
+                                                     IsReadOnly="True"
+                                                     TextWrapping="Wrap"
+                                                     FontFamily="Consolas"
+                                                     FontSize="12"
+                                                     MinHeight="72" />
+                                            <WrapPanel Margin="0,12,0,4">
+                                                <Button x:Name="PrintKeySheetButton" Content="Print separate key sheets" Background="#A7F3D0" Click="PrintKeySheet_Click" />
+                                                <Button x:Name="SaveKeySheetButton" Content="Save test PDF" Background="#334155" Foreground="#E5E7EB" Click="SaveKeySheet_Click" />
+                                                <Button x:Name="ClearCreateSecretsButton" Content="Clear secrets" Background="#334155" Foreground="#E5E7EB" Click="ClearCreateSecrets_Click" />
+                                            </WrapPanel>
+                                            <TextBlock x:Name="KeySheetStatusText" Text="The two key sheets have not been printed or explicitly exported for testing yet." Foreground="#FBBF24" TextWrapping="Wrap" />
+                                        </StackPanel>
+                                    </Border>
+
+                                    <TextBlock x:Name="HintLabel" Text="Optional hint" FontWeight="SemiBold" Margin="0,12,0,6" />
+                                    <TextBox x:Name="HintBox" MaxLength="180" />
+                                    <TextBlock x:Name="HintWarningText"
+                                               Text="Stored in the public container header. Do not enter passwords or secret fragments."
+                                               Foreground="#FBBF24"
+                                               TextWrapping="Wrap"
+                                               Margin="0,6,0,0" />
+                                </StackPanel>
+                            </Border>
+                        </Grid>
+                    </ScrollViewer>
+                </Border>
+            </TabItem>
+
+            <TabItem x:Name="ExtractTab" Header="Extract">
+                <Border x:Name="ExtractPanel" Padding="18" Background="#111827" CornerRadius="8" BorderBrush="#1F2937" BorderThickness="1" AllowDrop="True">
+                    <ScrollViewer VerticalScrollBarVisibility="Auto"
+                                  AllowDrop="True"
+                                  PreviewDragOver="Global_PreviewDragOver"
+                                  PreviewDrop="Global_PreviewDrop">
+                        <StackPanel MaxWidth="760">
+                            <TextBlock x:Name="ExtractTitleText" Text="Extract" FontSize="20" FontWeight="SemiBold" />
+                             <TextBlock x:Name="ExtractSubtitleText"
+                                        Text="Select a ZPAQ file or encrypted ZPAQ container and choose the output folder."
+                                        Foreground="#94A3B8"
+                                        Margin="0,4,0,8" />
+                             <TextBlock x:Name="RecoveryPolicyText"
+                                        Text="KPAR2 authenticates encrypted archives with two keyed MACs. For unencrypted archives it provides error correction only. Emergency recovery always writes a new file."
+                                        Foreground="#FBBF24"
+                                        TextWrapping="Wrap"
+                                        Margin="0,0,0,14" />
+                            <TextBlock x:Name="ArchiveFileLabel" Text="Archive file" FontWeight="SemiBold" Margin="0,0,0,6" />
+                            <TextBlock x:Name="ExtractArchiveDropHintText"
+                                       Text="Drop a .zpaq or .kzpaq file here, or anywhere in this panel."
+                                       Foreground="#94A3B8"
+                                       Margin="0,0,0,6"
+                                       TextWrapping="Wrap" />
+                            <DockPanel LastChildFill="True">
+                                <Button x:Name="BrowseExtractArchiveButton" Content="Browse" DockPanel.Dock="Right" Margin="8,0,0,0" Click="ChooseExtractArchive_Click" />
+                                <TextBox x:Name="ExtractArchiveBox" AllowDrop="True" TextChanged="ExtractArchiveBox_TextChanged" DragOver="ExtractArchiveBox_DragOver" Drop="ExtractArchiveBox_Drop" />
+                            </DockPanel>
+                            <TextBlock x:Name="OutputFolderLabel" Text="Output folder" FontWeight="SemiBold" Margin="0,16,0,6" />
+                            <TextBlock x:Name="OutputFolderDropHintText"
+                                       Text="Suggested automatically from the archive name. Drop a folder here to override it."
+                                       Foreground="#94A3B8"
+                                       Margin="0,0,0,6"
+                                       TextWrapping="Wrap" />
+                            <DockPanel LastChildFill="True">
+                                <Button x:Name="BrowseOutputFolderButton" Content="Browse" DockPanel.Dock="Right" Margin="8,0,0,0" Click="ChooseOutputFolder_Click" />
+                                <TextBox x:Name="OutputFolderBox" AllowDrop="True" DragOver="OutputFolderBox_DragOver" Drop="OutputFolderBox_Drop" />
+                            </DockPanel>
+
+                            <Border Margin="0,22,0,0" Padding="14" Background="#0B1120" CornerRadius="8" BorderBrush="#334155" BorderThickness="1">
+                                <StackPanel>
+                                    <TextBlock x:Name="ExtractPasswordTitle" Text="Password for extraction" FontSize="16" FontWeight="SemiBold" />
+                                    <TextBlock x:Name="ExtractPasswordHelpText"
+                                               Text="Enter the user password and both generated hexadecimal passwords from the separately stored key sheets."
+                                               Foreground="#94A3B8"
+                                               TextWrapping="Wrap"
+                                               Margin="0,6,0,10" />
+                                    <TextBlock x:Name="ExtractHintLabel"
+                                               Text="Optional hint from archive"
+                                               FontWeight="SemiBold"
+                                               Margin="0,0,0,4" />
+                                    <TextBlock x:Name="ExtractHintText"
+                                               Text="No container hint loaded."
+                                               Foreground="#FBBF24"
+                                               TextWrapping="Wrap"
+                                               Margin="0,0,0,10" />
+                                    <TextBlock x:Name="ExtractPasswordLabel" Text="User password" FontWeight="SemiBold" Margin="0,0,0,6" />
+                                    <PasswordBox x:Name="ExtractPasswordBox" MaxLength="128" />
+                                    <TextBlock x:Name="ExtractGeneratedPasswordFirstLabel" Text="Generated password A from key sheet" FontWeight="SemiBold" Margin="0,12,0,6" />
+                                    <TextBox x:Name="ExtractGeneratedPasswordFirstBox" MaxLength="160" FontFamily="Consolas" TextWrapping="Wrap" MinHeight="60" />
+                                    <TextBlock x:Name="ExtractGeneratedPasswordSecondLabel" Text="Generated password B from key sheet" FontWeight="SemiBold" Margin="0,12,0,6" />
+                                    <TextBox x:Name="ExtractGeneratedPasswordSecondBox" MaxLength="160" FontFamily="Consolas" TextWrapping="Wrap" MinHeight="60" />
+                                </StackPanel>
+                            </Border>
+
+                            <WrapPanel Margin="0,22,0,0">
+                                 <Button x:Name="ExtractArchiveButton" Content="Extract" Click="ExtractArchive_Click" />
+                                 <Button x:Name="ListArchiveButton" Content="Show contents" Background="#334155" Foreground="#E5E7EB" Click="ListArchive_Click" />
+                                 <Button x:Name="EmergencyRecoveryButton" Content="Emergency recovery to new file" Background="#7C2D12" Foreground="#FEF2F2" Click="EmergencyRecovery_Click" />
+                                 <Button x:Name="ClearExtractSecretsButton" Content="Clear secrets" Background="#334155" Foreground="#E5E7EB" Click="ClearExtractSecrets_Click" />
+                            </WrapPanel>
+                        </StackPanel>
+                    </ScrollViewer>
+                </Border>
+            </TabItem>
+
+            <TabItem x:Name="EraseTab" Header="Cryptographic erase">
+                <Border x:Name="ErasePanel" Padding="18" Background="#111827" CornerRadius="8" BorderBrush="#1F2937" BorderThickness="1" AllowDrop="True">
+                    <ScrollViewer VerticalScrollBarVisibility="Auto"
+                                  AllowDrop="True"
+                                  PreviewDragOver="Global_PreviewDragOver"
+                                  PreviewDrop="Global_PreviewDrop">
+                        <StackPanel MaxWidth="820">
+                            <TextBlock x:Name="EraseTitleText" Text="Cryptographic erase" FontSize="20" FontWeight="SemiBold" />
+                            <TextBlock x:Name="EraseSubtitleText"
+                                       Text="Erase encrypted containers by corrupting and deleting the encrypted container. Plain files require drive-level secure erase."
+                                       Foreground="#94A3B8"
+                                       Margin="0,4,0,14"
+                                       TextWrapping="Wrap" />
+                            <TextBlock x:Name="EraseFileLabel" Text="Encrypted container" FontWeight="SemiBold" Margin="0,0,0,6" />
+                            <TextBlock x:Name="EraseDropHintText"
+                                       Text="Drop an encrypted .kzpaq container here."
+                                       Foreground="#94A3B8"
+                                       Margin="0,0,0,6"
+                                       TextWrapping="Wrap" />
+                            <DockPanel LastChildFill="True">
+                                <Button x:Name="BrowseEraseButton" Content="Browse" DockPanel.Dock="Right" Margin="8,0,0,0" Click="ChooseEraseFile_Click" />
+                                <TextBox x:Name="ErasePathBox" AllowDrop="True" DragOver="ErasePathBox_DragOver" Drop="ErasePathBox_Drop" />
+                            </DockPanel>
+                            <WrapPanel Margin="0,14,0,0">
+                                <Button x:Name="AnalyzeEraseButton" Content="Analyze" Click="AnalyzeErase_Click" />
+                            </WrapPanel>
+                            <Border Margin="0,16,0,0" Padding="14" Background="#0B1120" CornerRadius="8" BorderBrush="#334155" BorderThickness="1">
+                                <StackPanel>
+                                    <TextBlock x:Name="EraseStatusText" Text="No file analyzed yet." Foreground="#FBBF24" TextWrapping="Wrap" />
+                                    <TextBlock x:Name="EraseHardwareNoticeText"
+                                               Text="Hardware SSD secure erase is whole-drive vendor/firmware functionality, not a per-file app operation."
+                                               Foreground="#FCA5A5"
+                                               TextWrapping="Wrap"
+                                               Margin="0,10,0,0" />
+                                </StackPanel>
+                            </Border>
+                            <CheckBox x:Name="EraseConfirmBox" Content="I understand that per-file hardware secure erase on SSDs cannot be guaranteed and I want to delete this encrypted container." Margin="0,18,0,8" />
+                            <Button x:Name="EraseContainerButton" Content="Cryptographically erase container" Background="#FCA5A5" Foreground="#111827" HorizontalAlignment="Left" Click="EraseContainer_Click" />
+                        </StackPanel>
+                    </ScrollViewer>
+                </Border>
+            </TabItem>
+        </TabControl>
+
+        <Border x:Name="LogPanel" Grid.Row="2" Padding="14" Background="#020617" CornerRadius="8" BorderBrush="#1F2937" BorderThickness="1" AllowDrop="True">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
+                </Grid.RowDefinitions>
+                <DockPanel>
+                    <TextBlock x:Name="LogTitleText" Text="Log" FontSize="16" FontWeight="SemiBold" />
+                    <Button x:Name="ClearLogButton" Content="Clear" DockPanel.Dock="Right" Background="#334155" Foreground="#E5E7EB" Click="ClearLog_Click" />
+                </DockPanel>
+                <TextBox x:Name="LogBox"
+                         Grid.Row="1"
+                         Margin="0,10,0,0"
+                         Background="#020617"
+                         Foreground="#CBD5E1"
+                         BorderBrush="#0F172A"
+                         IsReadOnly="True"
+                         TextWrapping="Wrap"
+                         VerticalScrollBarVisibility="Auto" />
+            </Grid>
+        </Border>
+    </Grid>
+</Window>

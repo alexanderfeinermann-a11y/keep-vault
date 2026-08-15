@@ -1,0 +1,23 @@
+bin/
+obj/
+build-obj/
+obj_alt/
+**/bin/
+**/obj/
+**/build-obj/
+**/obj_alt/
+.vs/
+.idea/
+*.user
+*.suo
+*.tmp
+*.log
+*.obj
+*.exp
+*.lib
+work/
+dist/
+
+# macOS
+.DS_Store
+**/.DS_Store

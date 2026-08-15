@@ -1,0 +1,17 @@
+<Project>
+  <PropertyGroup>
+    <BaseIntermediateOutputPath>$(MSBuildProjectDirectory)\build-obj\</BaseIntermediateOutputPath>
+    <DefaultItemExcludes>$(DefaultItemExcludes);$(MSBuildProjectDirectory)\obj\**;$(MSBuildProjectDirectory)\obj_alt\**;$(MSBuildProjectDirectory)\build-obj\**;$(MSBuildProjectDirectory)\bin\**</DefaultItemExcludes>
+    <RuntimeIdentifiers>win-x64</RuntimeIdentifiers>
+    <PublishSingleFile>true</PublishSingleFile>
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+    <RestoreLockedMode Condition="'$(RestoreLockedMode)' == ''">true</RestoreLockedMode>
+    <KalynaSigningCertificateThumbprint Condition="'$(KalynaSigningCertificateThumbprint)' == ''">238A01DA34617F36CA12290245C220DB77798AA6</KalynaSigningCertificateThumbprint>
+    <KalynaExpectedSignerSha256 Condition="'$(KalynaExpectedSignerSha256)' == ''">2A3E4EB493A8CFCD660308580FAC61BD343A6689CFF96A34CD83356133891978</KalynaExpectedSignerSha256>
+    <KalynaExpectedSignerSha3_512 Condition="'$(KalynaExpectedSignerSha3_512)' == ''">7C5BD087B774B558640CB8F4CB7803BB6990F138465CDE29AD7AAA31DF13D855D216E20C6A8DB1386CEAC12C0B08BFA0C1B9A8D834EC7E3594D3C014CD2F36B7</KalynaExpectedSignerSha3_512>
+    <KalynaExpectedSignerSkein1024 Condition="'$(KalynaExpectedSignerSkein1024)' == ''">D83A1E038D08BC80F3B2F4413E18717BDA7A5FE8DA0F1B6A4A40096472EC8366F367FBFC9409E4F10275A265474D57166DEEA290D367422D05EB6CBC92A950EE1842FCA0B71444FC7517C839A0BD3FB2002F6B2BF58887E1FA48C1569575C4B85EF3A760BD426C71421F866E8F93A50D24E9992D653E0F5C84ED2FA60F8E127D</KalynaExpectedSignerSkein1024>
+    <KalynaExpectedMldsa87Sha256 Condition="'$(KalynaExpectedMldsa87Sha256)' == ''">A73FBF5EDB00395497E41D2E0655492256BE850D5FF3211C7567CF1E3BA05C95</KalynaExpectedMldsa87Sha256>
+    <KalynaExpectedMldsa87Sha3_512 Condition="'$(KalynaExpectedMldsa87Sha3_512)' == ''">D1994A8714655C9B385C8A215D8A99D1C8CD6D7106F724F289E474113D62BCF264B54CD10F99EDEBAFED709ACEB908484486000D5AC599CC9D2DFEE4663AE3C1</KalynaExpectedMldsa87Sha3_512>
+    <KalynaExpectedMldsa87Skein1024 Condition="'$(KalynaExpectedMldsa87Skein1024)' == ''">B96F75F0AC41F2E24AA641F5AC45FEDCFB9A8BF7067D9B727EA913B3DD1F0A48809254BF5D1F1DCA7FB4A3D144C2E680AE6146F73F91628A7D5E4CE76E331BF91139951FB301538F3BEC11615FEDF23F0F729916C25D3DDAE749FBE39BC651A7A5E553BCC0954D7B1174A2448845697F72DAA2B894774098C0E816248C00F2E7</KalynaExpectedMldsa87Skein1024>
+  </PropertyGroup>
+</Project>

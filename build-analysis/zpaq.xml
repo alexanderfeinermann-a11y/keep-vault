@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<DEFECTS>
+  <DEFECT>
+    <SFA>
+      <FILEPATH>C:\Dev\Codex\Kalyna\external\zpaq\</FILEPATH>
+      <FILENAME>zpaq.cpp</FILENAME>
+      <LINE>1707</LINE>
+      <COLUMN>28</COLUMN>
+    </SFA>
+    <DEFECTCODE>6246</DEFECTCODE>
+    <DESCRIPTION>Die lokale Deklaration von "i" blendet die Deklaration des gleichen Namens im äußeren Bereich aus. Weitere Informationen finden Sie in der früheren Deklaration in Zeile "1615" von "c:\dev\codex\kalyna\external\zpaq\zpaq.cpp".</DESCRIPTION>
+    <FUNCTION>Jidac::read_archive</FUNCTION>
+    <DECORATED>?read_archive@Jidac@@AEAA_JPEBDPEAH@Z</DECORATED>
+    <FUNCLINE>1536</FUNCLINE>
+    <PATH>
+      <SFA>
+        <FILEPATH>C:\Dev\Codex\Kalyna\external\zpaq\</FILEPATH>
+        <FILENAME>zpaq.cpp</FILENAME>
+        <LINE>1615</LINE>
+        <COLUMN>21</COLUMN>
+      </SFA>
+    </PATH>
+  </DEFECT>
+  <DEFECT>
+    <SFA>
+      <FILEPATH>C:\Dev\Codex\Kalyna\external\zpaq\</FILEPATH>
+      <FILENAME>zpaq.cpp</FILENAME>
+      <LINE>1754</LINE>
+      <COLUMN>32</COLUMN>
+    </SFA>
+    <DEFECTCODE>6246</DEFECTCODE>
+    <DESCRIPTION>Die lokale Deklaration von "i" blendet die Deklaration des gleichen Namens im äußeren Bereich aus. Weitere Informationen finden Sie in der früheren Deklaration in Zeile "1615" von "c:\dev\codex\kalyna\external\zpaq\zpaq.cpp".</DESCRIPTION>
+    <FUNCTION>Jidac::read_archive</FUNCTION>
+    <DECORATED>?read_archive@Jidac@@AEAA_JPEBDPEAH@Z</DECORATED>
+    <FUNCLINE>1536</FUNCLINE>
+    <PATH>
+      <SFA>
+        <FILEPATH>C:\Dev\Codex\Kalyna\external\zpaq\</FILEPATH>
+        <FILENAME>zpaq.cpp</FILENAME>
+        <LINE>1615</LINE>
+        <COLUMN>21</COLUMN>
+      </SFA>
+    </PATH>
+  </DEFECT>
+  <DEFECT>
+    <SFA>
+      <FILEPATH>C:\Dev\Codex\Kalyna\external\zpaq\</FILEPATH>
+      <FILENAME>zpaq.cpp</FILENAME>
+      <LINE>1762</LINE>
+      <COLUMN>32</COLUMN>
+    </SFA>
+    <DEFECTCODE>6246</DEFECTCODE>
+    <DESCRIPTION>Die lokale Deklaration von "i" blendet die Deklaration des gleichen Namens im äußeren Bereich aus. Weitere Informationen finden Sie in der früheren Deklaration in Zeile "1615" von "c:\dev\codex\kalyna\external\zpaq\zpaq.cpp".</DESCRIPTION>
+    <FUNCTION>Jidac::read_archive</FUNCTION>
+    <DECORATED>?read_archive@Jidac@@AEAA_JPEBDPEAH@Z</DECORATED>
+    <FUNCLINE>1536</FUNCLINE>
+    <PATH>
+      <SFA>
+        <FILEPATH>C:\Dev\Codex\Kalyna\external\zpaq\</FILEPATH>
+        <FILENAME>zpaq.cpp</FILENAME>
+        <LINE>1615</LINE>
+        <COLUMN>21</COLUMN>
+      </SFA>
+    </PATH>
+  </DEFECT>
+</DEFECTS>

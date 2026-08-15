@@ -1,0 +1,79 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net9.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <ApplicationIcon>Assets\Keep Vault.ico</ApplicationIcon>
+    <AssemblyName>Keep Vault</AssemblyName>
+    <Product>Keep Vault</Product>
+    <AssemblyTitle>Keep Vault</AssemblyTitle>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="..\tools\zpaq.exe" Link="zpaq.exe" CopyToOutputDirectory="Always" CopyToPublishDirectory="Always" ExcludeFromSingleFile="true" />
+    <None Include="..\tools\argon2.exe" Link="argon2.exe" CopyToOutputDirectory="Always" CopyToPublishDirectory="Always" ExcludeFromSingleFile="true" />
+    <None Include="..\tools\kalyna_ref.dll" Link="kalyna_ref.dll" CopyToOutputDirectory="Always" CopyToPublishDirectory="Always" ExcludeFromSingleFile="true" />
+    <None Include="..\tools\threefish_ref.dll" Link="threefish_ref.dll" CopyToOutputDirectory="Always" CopyToPublishDirectory="Always" ExcludeFromSingleFile="true" />
+    <None Include="..\tools\argon2_ref.dll" Link="argon2_ref.dll" CopyToOutputDirectory="Always" CopyToPublishDirectory="Always" ExcludeFromSingleFile="true" />
+    <None Include="..\tools\*.sha3"
+          Exclude="..\tools\mldsa87_ref.dll.sha3"
+          Link="%(Filename)%(Extension)"
+          CopyToOutputDirectory="Always"
+          CopyToPublishDirectory="Always"
+          ExcludeFromSingleFile="true" />
+    <None Include="..\tools\*.skein"
+          Exclude="..\tools\mldsa87_ref.dll.skein"
+          Link="%(Filename)%(Extension)"
+          CopyToOutputDirectory="Always"
+          CopyToPublishDirectory="Always"
+          ExcludeFromSingleFile="true" />
+    <None Include="..\tools\*.khsig"
+          Exclude="..\tools\mldsa87_ref.dll.khsig;..\tools\mldsa87_ref.dll.sha3.khsig;..\tools\mldsa87_ref.dll.skein.khsig"
+          Link="%(Filename)%(Extension)"
+          CopyToOutputDirectory="Always"
+          CopyToPublishDirectory="Always"
+          ExcludeFromSingleFile="true" />
+    <EmbeddedResource Include="..\tools\mldsa87-public.key" LogicalName="KeepVault.MLDsa87.PublicKey" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\KalynaArchiver.Signing\KalynaArchiver.Signing.csproj" />
+    <PackageReference Include="BouncyCastle.Cryptography" Version="2.6.2" />
+    <PackageReference Include="System.Security.Cryptography.Pkcs" Version="9.0.0" />
+    <PackageReference Include="PDFsharp" Version="6.2.4" />
+    <PackageReference Include="QRCoder" Version="1.8.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+      <_Parameter1>KalynaExpectedSignerSha256</_Parameter1>
+      <_Parameter2>$(KalynaExpectedSignerSha256)</_Parameter2>
+    </AssemblyAttribute>
+    <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+      <_Parameter1>KalynaExpectedSignerSha3_512</_Parameter1>
+      <_Parameter2>$(KalynaExpectedSignerSha3_512)</_Parameter2>
+    </AssemblyAttribute>
+    <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+      <_Parameter1>KalynaExpectedSignerSkein1024</_Parameter1>
+      <_Parameter2>$(KalynaExpectedSignerSkein1024)</_Parameter2>
+    </AssemblyAttribute>
+    <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+      <_Parameter1>KalynaExpectedMldsa87Sha256</_Parameter1>
+      <_Parameter2>$(KalynaExpectedMldsa87Sha256)</_Parameter2>
+    </AssemblyAttribute>
+    <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+      <_Parameter1>KalynaExpectedMldsa87Sha3_512</_Parameter1>
+      <_Parameter2>$(KalynaExpectedMldsa87Sha3_512)</_Parameter2>
+    </AssemblyAttribute>
+    <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+      <_Parameter1>KalynaExpectedMldsa87Skein1024</_Parameter1>
+      <_Parameter2>$(KalynaExpectedMldsa87Skein1024)</_Parameter2>
+    </AssemblyAttribute>
+  </ItemGroup>
+
+</Project>
