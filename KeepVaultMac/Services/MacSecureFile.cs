@@ -57,7 +57,7 @@ public static partial class SecureFile
     internal static FileStream OpenVerifiedSingleLinkFileForDestruction(string path)
     {
         string fullPath = Path.GetFullPath(path);
-        FileStream stream = MacSafeFileSystem.OpenReadWriteNoSymlinks(fullPath, asynchronous: true, requireSingleLink: true);
+        FileStream stream = MacSafeFileSystem.OpenReadWriteNoSymlinks(fullPath, requireSingleLink: true);
         try
         {
             _ = NativePathResolver.RequireCanonicalFilePath(stream.SafeFileHandle, fullPath, "Secure-delete target");

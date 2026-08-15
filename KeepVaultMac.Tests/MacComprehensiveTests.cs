@@ -30,7 +30,6 @@ internal static partial class MacComprehensiveTests
 
     internal static async Task RunAsync()
     {
-        StageSignedNativeComponents();
         var tests = new (string Name, Func<Task> Run)[]
         {
             ("macOS process hardening", TestProcessHardeningAsync),
@@ -78,44 +77,25 @@ internal static partial class MacComprehensiveTests
         [".sha3", ".skein", ".khsig", ".sha3.khsig", ".skein.khsig"];
 
     /// <summary>
-    /// Copies the release bundle's signed native components, together with
-    /// their detached manifests and hybrid signatures, into this test's own
-    /// sealed Native directory.
+    /// Enumerates the native components exactly as the build shipped them,
+    /// inside the signed app bundle, when KEEPVAULT_SIGNED_BUNDLE names one.
     /// </summary>
     /// <remarks>
-    /// The point of this group is to exercise the artifacts the build actually
-    /// signs; the development copies otherwise present in the test output
-    /// carry no signatures and would prove nothing. Staging them locally
-    /// rather than reading across into the bundle keeps
-    /// <see cref="NativeToolIntegrity"/>'s rule that a native tool may only be
-    /// loaded from the running image's own directories fully in force — that
-    /// control is deliberately not relaxed for tests. Inside the bundle the
-    /// sidecars live under Contents/Resources; here they sit adjacent, which is
-    /// exactly what the resolver reports for a location outside a bundle.
+    /// These are the artifacts whose signatures actually matter, so the trust
+    /// group verifies them in place. They cannot be executed here: the shipped
+    /// helpers carry com.apple.security.inherit and so require a sandboxed
+    /// parent, which a test runner is not. The functional groups therefore run
+    /// against the locally staged, re-signed copies produced by
+    /// tools/Stage-TestNatives-macOS.sh, which keep every trust gate but drop
+    /// the sandbox entitlements.
     /// </remarks>
-    private static void StageSignedNativeComponents()
+    private static string? ResolveShippedComponent(string logicalName)
     {
         string? bundle = Environment.GetEnvironmentVariable("KEEPVAULT_SIGNED_BUNDLE");
-        if (string.IsNullOrEmpty(bundle))
-        {
-            return;
-        }
-
-        string bundleRoot = Path.Combine(bundle, "Contents", "MacOS");
-        string stageDirectory = Path.Combine(AppContext.BaseDirectory, "Native");
-        Directory.CreateDirectory(stageDirectory);
-        foreach (string logicalName in NativeLogicalNames)
-        {
-            string source = NativeToolIntegrity.ResolveKnownTool(logicalName, bundleRoot)
-                ?? throw new FileNotFoundException($"Signed native component is unavailable in the bundle: {logicalName}");
-            string sourceSidecarBase = IntegrityService.ResolveSidecarBasePath(source);
-            string destination = Path.Combine(stageDirectory, Path.GetFileName(source));
-            File.Copy(source, destination, overwrite: true);
-            foreach (string suffix in SidecarSuffixes)
-            {
-                File.Copy(sourceSidecarBase + suffix, destination + suffix, overwrite: true);
-            }
-        }
+        return string.IsNullOrEmpty(bundle)
+            ? null
+            : NativeToolIntegrity.ResolveKnownTool(logicalName, Path.Combine(bundle, "Contents", "MacOS"))
+              ?? throw new FileNotFoundException($"Signed native component is unavailable in the bundle: {logicalName}");
     }
 
     private static string ResolveSignedComponent(string logicalName)
@@ -173,6 +153,29 @@ internal static partial class MacComprehensiveTests
             Require(componentSignature.IsTrusted, $"Hybrid signature is not trusted for {logicalName}.");
             using TrustedNativeFileLease lease = NativeToolIntegrity.AcquireTrustedFile(path);
             Require(File.Exists(lease.Path), $"Authenticated private snapshot missing for {logicalName}.");
+
+            // Repeat the cryptographic checks against the component as the
+            // build actually shipped it inside the signed bundle. Those bytes
+            // differ from the locally staged copy, which is re-signed without
+            // the sandbox entitlements so that it can be executed at all.
+            if (ResolveShippedComponent(logicalName) is not { } shippedPath)
+            {
+                continue;
+            }
+
+            string shippedSidecarBase = IntegrityService.ResolveSidecarBasePath(shippedPath);
+            ToolIntegrityStatus shipped = IntegrityService.CheckFile(shippedPath, requireManifest: true);
+            Require(shipped.IsTrusted, $"Shipped native trust failed for {logicalName}: {shipped.Message} {shipped.HybridSignatureMessage} {shipped.SignatureMessage}");
+            Require(shipped.HashMatches, $"Shipped dual manifest failed for {logicalName}.");
+            Require(
+                string.Equals(shipped.Signer, ExpectedAppleTeamIdentifier, StringComparison.Ordinal),
+                $"Shipped Apple Team ID pin mismatch for {logicalName}: {shipped.Signer}");
+            HybridSignatureVerificationResult shippedSignature = HybridSignatureService.VerifyFile(
+                shippedPath,
+                shippedSidecarBase + HybridSignatureService.SidecarExtension,
+                policy);
+            Require(shippedSignature.RsaPssValid, $"Shipped RSA-PSS/SHA-512 signature failed for {logicalName}.");
+            Require(shippedSignature.Mldsa87Valid, $"Shipped post-quantum ML-DSA-87 signature failed for {logicalName}.");
         }
 
         string signedTarget = ResolveSignedComponent("zpaq.exe");

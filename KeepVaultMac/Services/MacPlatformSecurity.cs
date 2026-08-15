@@ -35,13 +35,20 @@ internal static partial class MacSafeFileSystem
         }
     }
 
-    internal static FileStream OpenReadWriteNoSymlinks(string path, bool asynchronous, bool requireSingleLink)
+    internal static FileStream OpenReadWriteNoSymlinks(string path, bool requireSingleLink)
     {
         SafeFileHandle handle = OpenHandleNoSymlinks(path, write: true);
         try
         {
             ValidateRegularFile(handle, requireSingleLink, path);
-            return new FileStream(handle, FileAccess.ReadWrite, bufferSize: 1024 * 1024, isAsync: asynchronous);
+
+            // The descriptor comes from a plain open(2) and is therefore
+            // synchronous. Constructing the stream with isAsync: true would
+            // throw, because FileStream requires a handle that was opened for
+            // overlapped I/O — a Windows concept with no macOS equivalent.
+            // Asynchronous reads and writes still work; .NET runs them on the
+            // thread pool, exactly as for the read-only path above.
+            return new FileStream(handle, FileAccess.ReadWrite, bufferSize: 1024 * 1024, isAsync: false);
         }
         catch
         {
