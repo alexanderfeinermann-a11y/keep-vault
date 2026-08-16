@@ -1031,7 +1031,12 @@ public sealed partial class MainWindow : Window, IDisposable
     /// </remarks>
     private async Task<bool> VerifyAndDeleteOriginalsAsync(string archivePath, string[] inputs, bool encrypted)
     {
-        string verifyRoot = Directory.CreateTempSubdirectory("keep-vault-verify-").FullName;
+        // The temporary directory sits below /var/folders, and /var is itself a
+        // symlink to /private/var. Every read here goes through the
+        // symlink-refusing open, which rejects a symlink anywhere in the path,
+        // so the real path has to be resolved before the directory is used.
+        string verifyRoot = MacSafeFileSystem.ResolveExistingRealPath(
+            Directory.CreateTempSubdirectory("keep-vault-verify-").FullName);
         try
         {
             File.SetUnixFileMode(
@@ -1081,6 +1086,18 @@ public sealed partial class MainWindow : Window, IDisposable
             ClearInputStorageAccess();
             Log(T("originalsDeleted"));
             return true;
+        }
+        catch (Exception exception) when (exception is IOException
+            or UnauthorizedAccessException
+            or InvalidDataException
+            or InvalidOperationException)
+        {
+            // The archive itself was written and is fine; only the read-back
+            // failed. Report that and keep both the archive and every original,
+            // rather than letting the outer handler discard a good archive.
+            Log($"{T("verifyMismatch")} — {exception.Message}");
+            await ErrorAsync(T("verifyMismatch"));
+            return false;
         }
         finally
         {
