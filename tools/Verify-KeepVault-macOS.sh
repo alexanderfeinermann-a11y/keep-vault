@@ -243,13 +243,18 @@ for image_entitlements in ${core_entitlements} ${launcher_entitlements} \
   done
 done
 
-# Only the scanner may reach hardware, and only the camera, for reading a
-# printed key sheet. Every other image ships with no capability whatsoever —
-# including the core, which never gains the ability to look through it.
+# Camera access is the only hardware capability anywhere in the bundle, and it
+# exists solely to read a printed key sheet. The scanner declares it because it
+# opens the device; the app declares it because macOS holds the responsible
+# process answerable for what its helpers do, and refuses rather than prompts
+# when that process claims nothing. Every other image ships with no capability
+# at all — the supervisor, the launcher and the compression tools never gain
+# the ability to look through it.
 [[ $(/usr/libexec/PlistBuddy -c 'Print :com.apple.security.device.camera' ${scanner_entitlements}) == true ]]
-for bare_entitlements in ${core_entitlements} ${launcher_entitlements} ${zpaq_entitlements} ${argon_entitlements} ${supervisor_entitlements}; do
+[[ $(/usr/libexec/PlistBuddy -c 'Print :com.apple.security.device.camera' ${core_entitlements}) == true ]]
+for bare_entitlements in ${launcher_entitlements} ${zpaq_entitlements} ${argon_entitlements} ${supervisor_entitlements}; do
   if /usr/libexec/PlistBuddy -c 'Print :com.apple.security.device.camera' ${bare_entitlements} >/dev/null 2>&1; then
-    print -u2 "Only the core may declare camera access: ${bare_entitlements:t}"
+    print -u2 "Only the app and its scanner may declare camera access: ${bare_entitlements:t}"
     exit 1
   fi
 done

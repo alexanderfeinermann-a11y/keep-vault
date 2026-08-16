@@ -36,5 +36,17 @@
     it look through the camera for that whole time buys nothing.
 -->
 <plist version="1.0">
-<dict/>
+<dict>
+  <!--
+    The camera is opened only by the scanner helper, for the seconds a scan
+    takes, and never by this process. The capability still has to be declared
+    here, because macOS does not judge the process that opens the device — it
+    judges the responsible one, and for a helper spawned by this app that is
+    this app. Without it TCC refuses the helper outright instead of asking, and
+    Keep Vault never appears under Privacy where the user can grant or revoke
+    it. Declaring it is what puts that switch in the user's hands.
+  -->
+  <key>com.apple.security.device.camera</key>
+  <true/>
+</dict>
 </plist>

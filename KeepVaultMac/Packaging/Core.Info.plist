@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!--
+    Linked into the core binary's __TEXT,__info_plist section.
+
+    The bundle names "Keep Vault Launcher" as its main executable, because the
+    launcher is what macOS starts and what verifies everything before handing
+    over. The process that then actually runs is this binary, which is a
+    different file with a different signing identity. macOS resolves a bundle
+    from its declared main executable, so for anything that asks "who is this
+    process and what is it allowed to do", the running core belongs to no
+    bundle at all.
+
+    That matters for TCC. When the scanner helper asks for the camera, the
+    request is attributed to the responsible process — this one. Without a
+    usage description reachable from it, TCC does not prompt the user, it
+    refuses outright. Carrying the description in the binary itself makes the
+    core answerable regardless of which Info.plist macOS can or cannot find.
+  -->
+  <key>CFBundleIdentifier</key>
+  <string>de.michael-feinermann.keep-vault.core</string>
+  <key>CFBundleName</key>
+  <string>Keep Vault</string>
+  <key>CFBundleDisplayName</key>
+  <string>Keep Vault</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <key>NSCameraUsageDescription</key>
+  <string>Keep Vault liest den QR-Code eines gedruckten Schlüsselzettels, damit der 512-Bit-Faktor nicht von Hand eingetippt werden muss. Das Kamerabild wird nur währenddessen ausgewertet und nirgends gespeichert.</string>
+</dict>
+</plist>
