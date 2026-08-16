@@ -1,13 +1,60 @@
 # Keep Vault
 
-Windows-WPF-Anwendung zum Archivieren, Entpacken und kryptografischen Loeschen
-von ZPAQ-Archiven. Verschluesselte Archive koennen Kalyna-512/512 oder
+Anwendung zum Archivieren, Entpacken und kryptografischen Loeschen von ZPAQ-
+Archiven, fuer **Windows** (WPF) und **macOS** (Avalonia). Beide Fassungen
+teilen denselben Kryptografiekern und erzeugen dasselbe Containerformat, sodass
+ein Archiv auf der jeweils anderen Plattform gelesen werden kann. Verschluesselte Archive koennen Kalyna-512/512 oder
 Threefish-1024 verwenden. Beide Suites nutzen Argon2id aus den PHC-
 Referenzquellen, HMAC-SHA3-512, Skeins nativen keyed MAC und zwei getrennt
 erzeugte 512-Bit-Passwortfaktoren.
 
 Die Anwendung befindet sich in Entwicklung. Sie ersetzt kein externes
 Kryptografie-Audit, kein HSM und keine Betriebssystemhaertung.
+
+## Installation
+
+Fertige Pakete liegen unter
+[Releases](https://github.com/alexanderfeinermann-a11y/keep-vault/releases).
+Jedes Paket traegt neben Apples bzw. Authenticodes Signatur eine zweite,
+unabhaengige Signatur aus RSA-PSS/SHA-512 und ML-DSA-87 (FIPS 204). Die
+zugehoerigen `.sha3`-, `.skein`- und `.khsig`-Dateien gehoeren zum Paket und
+duerfen nicht getrennt werden.
+
+### Windows
+
+1. `Keep Vault-portable-win-x64.zip` herunterladen.
+2. Vor dem Entpacken in den Dateieigenschaften **Zulassen** setzen, sonst
+   blockiert Windows die enthaltenen Programme.
+3. ZIP entpacken.
+4. `Install-KeepVaultShortcuts.ps1` in PowerShell ausfuehren, um Startmenue-
+   und Desktop-Verknuepfungen anzulegen, oder `KalynaArchiver.exe` direkt
+   starten.
+5. Optional vorab pruefen:
+   `"Keep Vault Release Verifier-win-x64.exe" "Keep Vault-portable-win-x64.zip"`
+
+### macOS
+
+Voraussetzung: macOS 14 oder neuer, Apple Silicon oder Intel (universelles
+Binary).
+
+1. `Keep Vault-portable-macOS.zip` herunterladen und entpacken.
+2. Die Dateien `Keep Vault.app.launcher.*` gehoeren **neben** die App und
+   muessen dort bleiben: der Launcher prueft bei jedem Start seine eigene duale
+   Signatur und startet ohne diese Dateien nicht.
+3. `tools/Install-KeepVault-macOS.sh` ausfuehren. Das Skript prueft die
+   Signaturen, installiert nach `/Applications` und legt ein Alias auf dem
+   Schreibtisch an. Es darf **nicht** mit `sudo` laufen.
+4. Optional vorab pruefen:
+   `"./Keep Vault Release Verifier" "Keep Vault.app"`
+
+Beim Start prueft die App Apples Code-Signatur, die eingebetteten CDHash-Pins
+und die duale Signatur jeder mitgelieferten ausfuehrbaren Datei. Schlaegt eine
+dieser Pruefungen fehl, startet sie nicht.
+
+Fuer das Einscannen der QR-Codes von den gedruckten Schluesselzetteln fragt
+macOS beim ersten Mal nach Kamerazugriff. Die Kamera wird ausschliesslich vom
+Hilfsprogramm `keep-vault-scanner` geoeffnet, nie vom Hauptprozess, und nur
+fuer die Dauer eines Scans.
 
 ## Formatpolitik
 

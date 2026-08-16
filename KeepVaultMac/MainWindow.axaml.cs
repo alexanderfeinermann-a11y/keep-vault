@@ -8,6 +8,7 @@ using Avalonia.Controls.Primitives;
 using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.Media;
+using Avalonia.Media.Imaging;
 using Avalonia.Platform.Storage;
 using Avalonia.Threading;
 using KalynaArchiver.Gui;
@@ -63,6 +64,7 @@ public sealed partial class MainWindow : Window, IDisposable
     {
         _settingsStore = settingsStore ?? throw new ArgumentNullException(nameof(settingsStore));
         InitializeComponent();
+        LoadLogo();
 
         _language = LoadLanguage();
         SelectLanguage(_language);
@@ -1488,7 +1490,9 @@ public sealed partial class MainWindow : Window, IDisposable
             SelectedEncryptionSuite,
             PasswordKeyService.NormalizeGeneratedPassword(GeneratedPasswordFirstBox.Text ?? string.Empty),
             PasswordKeyService.NormalizeGeneratedPassword(GeneratedPasswordSecondBox.Text ?? string.Empty),
-            DateTime.Now);
+            DateTime.Now,
+            IsEnglish,
+            Environment.MachineName);
     }
 
     private void ResetKeySheetStatus()
@@ -1519,6 +1523,35 @@ public sealed partial class MainWindow : Window, IDisposable
         if (!string.Equals(_keySheetFingerprint, BuildKeySheetFingerprint(current), StringComparison.Ordinal))
         {
             throw new InvalidOperationException(T("keySheetRequired"));
+        }
+    }
+
+    /// <summary>
+    /// Puts the Keep Vault mark into the window header and the privacy shield.
+    /// </summary>
+    /// <remarks>
+    /// Loaded from an embedded resource rather than through Avalonia's resource
+    /// URIs: the assembly is named "Keep Vault", and the space in that name does
+    /// not survive an avares:// URI. A missing logo is not worth refusing to
+    /// start over, so a failure here leaves the image empty and the app usable.
+    /// </remarks>
+    private void LoadLogo()
+    {
+        try
+        {
+            using Stream? stream = typeof(MainWindow).Assembly
+                .GetManifestResourceStream("KeepVault.Logo.png");
+            if (stream is null)
+            {
+                return;
+            }
+
+            var logo = new Bitmap(stream);
+            HeaderLogoImage.Source = logo;
+            PrivacyShieldLogoImage.Source = logo;
+        }
+        catch (Exception exception) when (exception is IOException or InvalidOperationException)
+        {
         }
     }
 

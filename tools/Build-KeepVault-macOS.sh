@@ -499,6 +499,8 @@ for scanner_arch in ${launcher_architectures[@]}; do
     -O -whole-module-optimization -parse-as-library \
     ${packaging_dir}/ScannerHelper.swift \
     -framework AppKit -framework AVFoundation \
+    -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist \
+    -Xlinker ${packaging_dir}/ScannerHelper.Info.plist \
     -o ${thin_scanner}
   scanner_thin+=(${thin_scanner})
 done
@@ -605,6 +607,33 @@ else
 fi
 chmod 0755 ${supervisor_path}
 sign_macho ${supervisor_path} ${bundle_identifier}.supervisor ${packaging_dir}/Helper.entitlements
+
+# The supervisor embeds the signed core's pins, so it cannot exist before the
+# first hybrid pass and gets its own. It is checked against the same
+# post-quantum pair as the core: its Apple signature and its cdhash pin are both
+# anchored in RSA and ECDSA, and resting one process on that alone would
+# undercut the assumption the whole chain is built on.
+supervisor_signature_arguments=(
+  ${signer_dll}
+  sign
+  --pfx ${pfx_path}
+  --mldsa-private-key ${mldsa_private_key}
+  --mldsa-public-key ${mldsa_public_key}
+  --reference-library ${repo_root}/KeepVaultMac/Native/$([[ ${architecture} == universal ]] && print osx-universal || print osx-arm64)/libmldsa87_ref.dylib
+  --policy ${mac_project}/Directory.Build.props
+  --launcher-pins ${build_root}/SupervisorHybridPins.swift
+  --target ${supervisor_path}
+)
+if [[ -n ${pfx_password_service} ]]; then
+  supervisor_signature_arguments+=(--pfx-password-keychain-service ${pfx_password_service})
+  [[ -n ${pfx_password_account} ]] && supervisor_signature_arguments+=(--pfx-keychain-account ${pfx_password_account})
+else
+  supervisor_signature_arguments+=(--pfx-password-env ${pfx_password_environment})
+fi
+(
+  cd ${mac_project}
+  run_hybrid_signer ${supervisor_signature_arguments[@]}
+)
 
 supervisor_apple_pins=${build_root}/SupervisorApplePins.swift
 generate_cdhash_pins \
@@ -718,17 +747,73 @@ for final_path in \
   ${final_zip}.skein \
   ${final_zip}.khsig \
   ${final_zip}.sha3.khsig \
-  ${final_zip}.skein.khsig; do
+  ${final_zip}.skein.khsig \
+  ${final_app}.launcher.sha3 \
+  ${final_app}.launcher.skein \
+  ${final_app}.launcher.khsig \
+  ${final_app}.launcher.sha3.khsig \
+  ${final_app}.launcher.skein.khsig; do
   if [[ -e ${final_path} || -L ${final_path} ]]; then
     print -u2 "Refusing to overwrite an existing release artifact: ${final_path}"
     exit 1
   fi
 done
 ditto ${app_stage} ${final_app}
+
+# The launcher is the bundle's main executable, so codesign writes the bundle
+# seal into that very file. A hybrid signature over its own bytes therefore
+# cannot live inside the bundle: adding it would change the seal and invalidate
+# itself. It is signed now, once the bytes are final, and placed beside the app
+# — which is also what gets published, so the one component that was covered by
+# Apple's signature alone now carries the dual signature too.
+launcher_signature_common=(
+  ${signer_dll}
+  sign
+  --pfx ${pfx_path}
+  --mldsa-private-key ${mldsa_private_key}
+  --mldsa-public-key ${mldsa_public_key}
+  --reference-library ${repo_root}/KeepVaultMac/Native/$([[ ${architecture} == universal ]] && print osx-universal || print osx-arm64)/libmldsa87_ref.dylib
+  --policy ${mac_project}/Directory.Build.props
+  --launcher-pins ${build_root}/SelfHybridPins.swift
+  --target ${final_app}/Contents/MacOS/Keep\ Vault\ Launcher
+)
+if [[ -n ${pfx_password_service} ]]; then
+  launcher_signature_common+=(--pfx-password-keychain-service ${pfx_password_service})
+  [[ -n ${pfx_password_account} ]] && launcher_signature_common+=(--pfx-keychain-account ${pfx_password_account})
+else
+  launcher_signature_common+=(--pfx-password-env ${pfx_password_environment})
+fi
+(
+  cd ${mac_project}
+  run_hybrid_signer ${launcher_signature_common[@]}
+)
+
+# Move the launcher's sidecars out of the bundle and beside it, under the app's
+# own name, which is where the launcher looks for them at startup.
+launcher_sidecar_source=${final_app}/Contents/MacOS/Keep\ Vault\ Launcher
+for sidecar_suffix in .sha3 .skein .khsig .sha3.khsig .skein.khsig; do
+  if [[ ! -f ${launcher_sidecar_source}${sidecar_suffix} ]]; then
+    print -u2 "The launcher self-signature is incomplete: ${sidecar_suffix}"
+    exit 1
+  fi
+  mv -- ${launcher_sidecar_source}${sidecar_suffix} ${final_app}.launcher${sidecar_suffix}
+done
+print "launcher_self_signature=${final_app}.launcher.khsig"
 final_symbols=${dist_dir}/Keep\ Vault-macOS-${architecture}.dSYMs
 rm -rf -- ${final_symbols}
 ditto ${symbols_dir} ${final_symbols}
-ditto -c -k --sequesterRsrc --keepParent ${final_app} ${final_zip}
+# The launcher will not start without its own dual signature, so the sidecars
+# have to be inside the distribution archive as well. Archiving the contents of
+# a staging directory (rather than --keepParent on the bundle) keeps the app at
+# the archive root and puts the sidecars beside it, exactly as installed.
+zip_stage=${build_root}/zip-stage
+rm -rf -- ${zip_stage}
+mkdir -p ${zip_stage}
+ditto ${final_app} ${zip_stage}/Keep\ Vault.app
+for sidecar_suffix in .sha3 .skein .khsig .sha3.khsig .skein.khsig; do
+  ditto ${final_app}.launcher${sidecar_suffix} ${zip_stage}/Keep\ Vault.app.launcher${sidecar_suffix}
+done
+ditto -c -k --sequesterRsrc ${zip_stage} ${final_zip}
 
 archive_common=(
   ${signer_dll}
@@ -762,11 +847,13 @@ fi
 ${script_dir}/Verify-KeepVault-macOS.sh \
   --app ${archive_check}/Keep\ Vault.app \
   --allow-development \
+  --require-launcher-signature \
   --mldsa-public-key ${mldsa_public_key}
 
 ${script_dir}/Verify-KeepVault-macOS.sh \
   --app ${final_app} \
   --allow-development \
+  --require-launcher-signature \
   --mldsa-public-key ${mldsa_public_key}
 print "app=${final_app}"
 print "archive=${final_zip}"

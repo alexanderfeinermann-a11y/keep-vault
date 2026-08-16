@@ -35,7 +35,18 @@ public sealed partial class MainWindow
         string extension = encrypted ? ".kzpaq" : ".zpaq";
         if (Directory.Exists(full))
         {
-            return BuildNumberedArchivePath(full, "archive", extension);
+            // Beside the folder, named after it — not inside it. An archive
+            // created inside its own input is refused a moment later by the
+            // safety check, so suggesting one only ever produced a dead end.
+            // Naming it after the folder also keeps it distinct from anything
+            // else of that name: a folder "Docs" and a file "Docs.zip" can sit
+            // side by side, and so can the "Docs(1).kzpaq" made from either.
+            string trimmed = Path.TrimEndingDirectorySeparator(full);
+            string? parent = Path.GetDirectoryName(trimmed);
+            string folderName = Path.GetFileName(trimmed);
+            return string.IsNullOrEmpty(parent) || string.IsNullOrWhiteSpace(folderName)
+                ? BuildNumberedArchivePath(full, "archive", extension)
+                : BuildNumberedArchivePath(parent, folderName, extension);
         }
 
         string directory = Path.GetDirectoryName(full) ?? Environment.CurrentDirectory;

@@ -34,6 +34,33 @@ if (args.Contains("--full", StringComparer.Ordinal))
     await MacComprehensiveTests.RunAsync().ConfigureAwait(false);
 }
 
+// Renders both language variants so the printed layout can be inspected as a
+// document rather than only asserted on.
+int sheetIndex = Array.IndexOf(args, "--dump-key-sheets");
+if (sheetIndex >= 0 && sheetIndex + 1 < args.Length)
+{
+    string outputDirectory = args[sheetIndex + 1];
+    Directory.CreateDirectory(outputDirectory);
+    string first = new string('A', 0) + string.Concat(Enumerable.Range(0, 128).Select(i => "0123456789abcdef"[(i * 7) % 16]));
+    string second = string.Concat(Enumerable.Range(0, 128).Select(i => "0123456789abcdef"[(i * 11 + 3) % 16]));
+    foreach (bool english in new[] { false, true })
+    {
+        var service = new KeySheetService();
+        string target = Path.Combine(outputDirectory, english ? "key-sheets-en.pdf" : "key-sheets-de.pdf");
+        service.SaveTestPdf(
+            new KeySheetData(
+                Path.Combine(outputDirectory, "beispiel-archiv.kzpaq"),
+                EncryptionSuite.Threefish1024,
+                first,
+                second,
+                DateTime.Now,
+                english,
+                Environment.MachineName),
+            target);
+        Console.WriteLine($"key_sheets={target}");
+    }
+}
+
 static Task TestSha3Async()
 {
     string actual = Convert.ToHexString(Sha3_512Compat.HashData([]));

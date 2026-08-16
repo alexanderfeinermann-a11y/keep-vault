@@ -7,14 +7,18 @@ internal sealed record MacKeySheetData(
     EncryptionSuite Suite,
     string FirstGeneratedPassword,
     string SecondGeneratedPassword,
-    DateTime CreatedAt)
+    DateTime CreatedAt,
+    bool English = false,
+    string DeviceName = "")
 {
     internal KeySheetData ToServiceData() => new(
         ArchivePath,
         Suite,
         FirstGeneratedPassword,
         SecondGeneratedPassword,
-        CreatedAt);
+        CreatedAt,
+        English,
+        DeviceName);
 }
 
 /// <summary>

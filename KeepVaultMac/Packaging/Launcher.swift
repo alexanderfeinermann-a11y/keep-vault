@@ -9,6 +9,7 @@ private let coreIdentifier = "de.michael-feinermann.keep-vault.core"
 private let supervisorIdentifier = "de.michael-feinermann.keep-vault.supervisor"
 private let appleTeamIdentifier = "2T6K9PGS55"
 private let coreName = "Keep Vault"
+private let launcherName = "Keep Vault Launcher"
 private let supervisorName = "Keep Vault Supervisor"
 private let handshakeFileDescriptor: Int32 = 198
 private let supervisorReadyByte: UInt8 = 0x4B
@@ -137,22 +138,22 @@ private func validateDynamicCode(processIdentifier: pid_t, requirementText: Stri
     }
 }
 
-private func openAndHashCore(at path: String) throws -> OpenedCore {
+private func openAndHashCore(at path: String, subject: String = "App-Core") throws -> OpenedCore {
     let fileDescriptor = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW_ANY)
     guard fileDescriptor >= 0 else {
-        throw LauncherFailure(message: "Der signierte App-Core kann nicht symlink-sicher geoeffnet werden (errno \(errno)).")
+        throw LauncherFailure(message: "Der signierte \(subject) kann nicht symlink-sicher geoeffnet werden (errno \(errno)).")
     }
 
     do {
         var info = stat()
         guard fstat(fileDescriptor, &info) == 0 else {
-            throw LauncherFailure(message: "Der App-Core kann nicht statisch geprueft werden (errno \(errno)).")
+            throw LauncherFailure(message: "Der \(subject) kann nicht statisch geprueft werden (errno \(errno)).")
         }
         guard (info.st_mode & S_IFMT) == S_IFREG,
               info.st_nlink == 1,
               info.st_size > 0,
               (info.st_mode & (S_IWGRP | S_IWOTH)) == 0 else {
-            throw LauncherFailure(message: "Der App-Core ist kein geschuetztes regulaeres Einzel-Link-Artefakt.")
+            throw LauncherFailure(message: "Der \(subject) ist kein geschuetztes regulaeres Einzel-Link-Artefakt.")
         }
 
         var hasher = SHA512()
@@ -166,7 +167,7 @@ private func openAndHashCore(at path: String) throws -> OpenedCore {
                 if errno == EINTR {
                     continue
                 }
-                throw LauncherFailure(message: "Der App-Core konnte nicht vollstaendig gehasht werden (errno \(errno)).")
+                throw LauncherFailure(message: "Der \(subject) konnte nicht vollstaendig gehasht werden (errno \(errno)).")
             }
             hasher.update(data: Data(buffer[0..<count]))
         }
@@ -306,7 +307,7 @@ private func constantTimeEqual(_ left: Data, _ right: Data) -> Bool {
     return difference == 0
 }
 
-private func verifyHybridCore(_ openedCore: OpenedCore, signaturePath: String) throws {
+private func verifyHybridCore(_ openedCore: OpenedCore, signaturePath: String, subject: String = "App-Core") throws {
     guard KeepVaultHybridPins.rsaCertificateSha256.count == SHA256.byteCount,
           KeepVaultHybridPins.mldsaPublicKey.count == mldsa87PublicKeyBytes else {
         throw LauncherFailure(message: "Die Launcher-Signierrichtlinie besitzt ungueltige Schluessellaengen.")
@@ -320,7 +321,7 @@ private func verifyHybridCore(_ openedCore: OpenedCore, signaturePath: String) t
     let envelope = try parseHybridEnvelope(encoded)
     guard envelope.length == openedCore.length,
           constantTimeEqual(envelope.digest, openedCore.digest) else {
-        throw LauncherFailure(message: "Die hybride Signatur ist nicht an diesen App-Core gebunden.")
+        throw LauncherFailure(message: "Die hybride Signatur ist nicht an diesen \(subject) gebunden.")
     }
 
     let actualCertificatePin = Data(SHA256.hash(data: envelope.certificate))
@@ -346,7 +347,7 @@ private func verifyHybridCore(_ openedCore: OpenedCore, signaturePath: String) t
         envelope.rsaSignature as CFData,
         &rsaError) else {
         let reason = rsaError?.takeRetainedValue().localizedDescription ?? "unbekannter Fehler"
-        throw LauncherFailure(message: "RSA-PSS/SHA-512-Signatur des App-Cores ist ungueltig: \(reason).")
+        throw LauncherFailure(message: "RSA-PSS/SHA-512-Signatur (\(subject)) ist ungueltig: \(reason).")
     }
 
     let publicKey = Data(KeepVaultHybridPins.mldsaPublicKey)
@@ -368,7 +369,7 @@ private func verifyHybridCore(_ openedCore: OpenedCore, signaturePath: String) t
         }
     }
     guard referenceResult == 0 else {
-        throw LauncherFailure(message: "ML-DSA-87-Signatur des App-Cores ist ungueltig.")
+        throw LauncherFailure(message: "ML-DSA-87-Signatur (\(subject)) ist ungueltig.")
     }
 }
 
@@ -534,6 +535,54 @@ private enum KeepVaultLauncher {
             let coreSignatureURL = bundleURL.appendingPathComponent(
                 "Contents/Resources/HybridSignatures/\(coreName).khsig",
                 isDirectory: false)
+
+            // The supervisor is checked against the same post-quantum pair as
+            // everything else. Its Apple signature and its compiled-in cdhash
+            // pin are both anchored in RSA and ECDSA, so on their own they would
+            // leave this one process resting on assumptions the rest of the app
+            // deliberately does not make.
+            let supervisorSignatureURL = bundleURL.appendingPathComponent(
+                "Contents/Resources/HybridSignatures/\(supervisorName).khsig",
+                isDirectory: false)
+            let openedSupervisor = try openAndHashCore(at: supervisorURL.path, subject: "Supervisor")
+            do {
+                try verifyHybridCore(
+                    openedSupervisor,
+                    signaturePath: supervisorSignatureURL.path,
+                    subject: "Supervisor")
+            } catch {
+                close(openedSupervisor.fileDescriptor)
+                throw error
+            }
+            close(openedSupervisor.fileDescriptor)
+
+            // The launcher is the bundle's main executable, so codesign writes
+            // the bundle seal into this very file: a hybrid signature over its
+            // own bytes cannot live inside the bundle, because adding it would
+            // change the seal and invalidate itself. It therefore sits beside
+            // the app, is published alongside the release, and is checked here
+            // in addition to Apple's signature — closing the one gap where a
+            // component was covered by Apple's signature alone.
+            let selfSignatureURL = bundleURL
+                .deletingLastPathComponent()
+                .appendingPathComponent(bundleURL.lastPathComponent + ".launcher.khsig", isDirectory: false)
+            let launcherURL = bundleURL.appendingPathComponent("Contents/MacOS/\(launcherName)", isDirectory: false)
+            let openedLauncher = try openAndHashCore(at: launcherURL.path, subject: "Launcher")
+            do {
+                try verifyHybridCore(openedLauncher, signaturePath: selfSignatureURL.path, subject: "Launcher")
+            } catch {
+                close(openedLauncher.fileDescriptor)
+                let detail = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                throw LauncherFailure(message:
+                    "Die duale Signatur des Launchers konnte nicht geprueft werden.\n\n"
+                    + "Grund: \(detail)\n\n"
+                    + "Die Signatur liegt als \"\(selfSignatureURL.lastPathComponent)\" direkt neben der App "
+                    + "und gehoert zwingend dazu. Wurde die App ohne diese Dateien verschoben oder kopiert, "
+                    + "installieren Sie sie bitte erneut mit \"Install-KeepVault-macOS.sh\" bzw. entpacken Sie "
+                    + "das Release vollstaendig. Andernfalls wurde die App veraendert und darf nicht "
+                    + "gestartet werden.")
+            }
+            close(openedLauncher.fileDescriptor)
 
             let openedCore = try openAndHashCore(at: coreURL.path)
             do {

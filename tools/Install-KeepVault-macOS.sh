@@ -85,6 +85,19 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 ditto ${source_app} ${staged_app}
+
+# The launcher's own dual signature cannot live inside the bundle — codesign
+# writes the bundle seal into the launcher itself, so a signature over its bytes
+# would invalidate itself. It travels beside the app and is verified at every
+# launch, so it has to be installed alongside.
+for launcher_sidecar_suffix in .sha3 .skein .khsig .sha3.khsig .skein.khsig; do
+  launcher_sidecar=${source_app}.launcher${launcher_sidecar_suffix}
+  if [[ ! -f ${launcher_sidecar} || -L ${launcher_sidecar} ]]; then
+    print -u2 "The launcher self-signature is missing from the source: ${launcher_sidecar:t}"
+    exit 1
+  fi
+  ditto ${launcher_sidecar} ${install_root}/Keep\ Vault.app.launcher${launcher_sidecar_suffix}
+done
 ${script_dir}/Verify-KeepVault-macOS.sh --app ${staged_app} --allow-development
 
 destination=${applications_dir}/Keep\ Vault.app
@@ -134,7 +147,13 @@ else
   mv ${staged_app} ${destination}
 fi
 
-if ! ${script_dir}/Verify-KeepVault-macOS.sh --app ${destination} --allow-development; then
+for launcher_sidecar_suffix in .sha3 .skein .khsig .sha3.khsig .skein.khsig; do
+  staged_sidecar=${install_root}/Keep\ Vault.app.launcher${launcher_sidecar_suffix}
+  final_sidecar=${applications_dir}/Keep\ Vault.app.launcher${launcher_sidecar_suffix}
+  mv -f -- ${staged_sidecar} ${final_sidecar}
+done
+
+if ! ${script_dir}/Verify-KeepVault-macOS.sh --app ${destination} --allow-development --require-launcher-signature; then
   if [[ -d ${backup_path} && ! -L ${backup_path} ]]; then
     failed_name=.Keep\ Vault.failed.$(date -u +%Y%m%dT%H%M%SZ).app
     if atomic_replace ${destination} ${backup_path} ${failed_name}; then

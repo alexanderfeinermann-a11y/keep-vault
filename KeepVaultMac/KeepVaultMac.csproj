@@ -93,6 +93,7 @@
 
   <ItemGroup>
     <EmbeddedResource Include="Packaging/Keys/mldsa87-public.key" LogicalName="KeepVault.MLDsa87.PublicKey" />
+    <EmbeddedResource Include="Assets/KeepVaultLogo.png" LogicalName="KeepVault.Logo.png" />
     <Content Include="Native/osx-arm64/zpaq" CopyToOutputDirectory="PreserveNewest" TargetPath="Native/zpaq" />
     <Content Include="Native/osx-arm64/argon2" CopyToOutputDirectory="PreserveNewest" TargetPath="Native/argon2" />
     <Content Include="Native/osx-arm64/libargon2_ref.dylib" CopyToOutputDirectory="PreserveNewest" TargetPath="Native/libargon2_ref.dylib" />

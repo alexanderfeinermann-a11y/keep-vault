@@ -37,6 +37,7 @@ internal static class MacGuiTests
     [
         ("GUI entropy display beyond the 512 minimum", () => RunOnUiThread(TestEntropyDisplayGrowsPastMinimum)),
         ("GUI encryption toggle and target normalization", () => RunOnUiThread(TestEncryptionToggle)),
+        ("GUI folder target lands beside the folder", () => RunOnUiThread(TestFolderTargetSuggestion)),
         ("GUI password policy feedback", () => RunOnUiThread(TestPasswordPolicyFeedback)),
         ("GUI reference control inventory", () => RunOnUiThread(TestReferenceControlsPresent)),
     ];
@@ -224,6 +225,62 @@ internal static class MacGuiTests
     /// reference produces: the cipher selection follows the checkbox and the
     /// target archive extension is rewritten.
     /// </summary>
+    /// <summary>
+    /// A folder input must not suggest an archive inside that same folder.
+    /// </summary>
+    /// <remarks>
+    /// Suggesting a target inside the input produced a path the safety check
+    /// then refused, which reads to the user as the app objecting to a folder
+    /// and a same-named archive coexisting. The suggestion has to be a path the
+    /// app will actually accept.
+    /// </remarks>
+    private static void TestFolderTargetSuggestion(MainWindow window)
+    {
+        _ = window;
+        string root = Directory.CreateTempSubdirectory("keep-vault-target-").FullName;
+        try
+        {
+            string folder = Path.Combine(root, "Docs");
+            Directory.CreateDirectory(folder);
+            File.WriteAllText(Path.Combine(folder, "note.txt"), "content");
+            File.WriteAllText(Path.Combine(root, "Docs.zip"), "not really a zip");
+
+            string suggestion = MainWindow.SuggestTargetArchivePath(folder, encrypted: true);
+
+            MacComprehensiveTests.Require(
+                !suggestion.StartsWith(folder + Path.DirectorySeparatorChar, StringComparison.Ordinal),
+                $"The suggested archive target is inside its own input folder: {suggestion}");
+            MacComprehensiveTests.Require(
+                string.Equals(Path.GetDirectoryName(suggestion), root, StringComparison.Ordinal),
+                $"The suggested archive target is not beside the input folder: {suggestion}");
+            MacComprehensiveTests.Require(
+                Path.GetFileName(suggestion).StartsWith("Docs(", StringComparison.Ordinal),
+                $"The suggested archive target is not named after the folder: {suggestion}");
+            MacComprehensiveTests.Require(
+                !File.Exists(suggestion) && !Directory.Exists(suggestion),
+                $"The suggested archive target already exists: {suggestion}");
+
+            // A same-named zip beside the folder must not block the folder: the
+            // numbered name is claimed against what is actually on disk, so
+            // once one target exists the next suggestion moves on by itself.
+            string fromZip = MainWindow.SuggestTargetArchivePath(Path.Combine(root, "Docs.zip"), encrypted: true);
+            MacComprehensiveTests.Require(
+                !File.Exists(fromZip) && !Directory.Exists(fromZip),
+                $"The suggested target for the same-named archive already exists: {fromZip}");
+
+            File.WriteAllText(suggestion, "placeholder");
+            string afterTaken = MainWindow.SuggestTargetArchivePath(folder, encrypted: true);
+            MacComprehensiveTests.Require(
+                !string.Equals(afterTaken, suggestion, StringComparison.Ordinal)
+                    && !File.Exists(afterTaken),
+                $"An occupied target name was suggested again: {afterTaken}");
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
     private static void TestEncryptionToggle(MainWindow window)
     {
         CheckBox encrypt = Control<CheckBox>(window, "EncryptBox");

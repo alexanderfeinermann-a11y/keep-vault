@@ -141,6 +141,19 @@ done
 
 mkdir -p ${portable_dir}
 ditto ${source_app} ${portable_dir}/Keep\ Vault.app
+
+# The launcher's dual signature covers the bundle's main executable, whose bytes
+# codesign rewrites when it seals the bundle — so it cannot live inside. It sits
+# beside the app and is checked at every launch; without it the app refuses to
+# start, which makes it part of the portable payload.
+for launcher_sidecar_suffix in .sha3 .skein .khsig .sha3.khsig .skein.khsig; do
+  launcher_sidecar=${source_app}.launcher${launcher_sidecar_suffix}
+  if [[ ! -f ${launcher_sidecar} || -L ${launcher_sidecar} ]]; then
+    print -u2 "The launcher self-signature is missing from the source: ${launcher_sidecar:t}"
+    exit 1
+  fi
+  ditto ${launcher_sidecar} ${portable_dir}/Keep\ Vault.app.launcher${launcher_sidecar_suffix}
+done
 ditto ${verifier_path} ${portable_dir}/Keep\ Vault\ Release\ Verifier
 
 props=${mac_project}/Directory.Build.props
@@ -154,6 +167,7 @@ Keep Vault Portable (macOS)
 
 Start:
   Keep Vault.app
+  Keep Vault.app.launcher.khsig (plus .sha3/.skein sidecars)
 
 This folder is self-contained for macOS ${architecture} and requires no
 installer and no .NET runtime. Keep the app bundle, the verifier, and the

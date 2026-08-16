@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!--
+    The scanner ships as a plain Mach-O rather than a nested bundle, because
+    sealing a nested bundle rewrites its main executable and would invalidate
+    the hybrid signature over exactly that file.
+
+    A bare executable has no Info.plist, and without one TCC refuses camera
+    access outright instead of asking the user — which is why this plist is
+    linked into the binary's __TEXT,__info_plist section. It gives the helper
+    its own identity and the usage string macOS shows in the prompt.
+  -->
+  <key>CFBundleIdentifier</key>
+  <string>de.michael-feinermann.keep-vault.scanner</string>
+  <key>CFBundleName</key>
+  <string>Keep Vault Scanner</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <key>NSCameraUsageDescription</key>
+  <string>Keep Vault liest den QR-Code eines gedruckten Schlüsselzettels, damit der 512-Bit-Faktor nicht von Hand eingetippt werden muss. Das Kamerabild wird nur währenddessen ausgewertet und nirgends gespeichert.</string>
+  <key>LSBackgroundOnly</key>
+  <false/>
+  <key>LSUIElement</key>
+  <true/>
+</dict>
+</plist>

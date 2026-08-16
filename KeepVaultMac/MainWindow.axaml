@@ -112,15 +112,17 @@
   <Grid Margin="22" RowDefinitions="Auto,*,180">
     <Border Grid.Row="0" Classes="card" Padding="22,18">
       <Grid ColumnDefinitions="*,Auto">
-        <StackPanel Spacing="5">
-          <StackPanel Orientation="Horizontal" Spacing="11">
-            <Border Width="13" Height="30" CornerRadius="7" Background="#5DE4EC" VerticalAlignment="Center" />
+        <StackPanel Orientation="Horizontal" Spacing="16">
+          <Image x:Name="HeaderLogoImage"
+                 Width="78"
+                 Height="78"
+                 VerticalAlignment="Center" />
+          <StackPanel Spacing="5" VerticalAlignment="Center">
             <TextBlock x:Name="TitleText" Text="Keep Vault" FontSize="30" FontWeight="Bold" />
+            <TextBlock x:Name="SubtitleText"
+                       Text="Sichere, wiederherstellbare Archive für macOS"
+                       Classes="muted" />
           </StackPanel>
-          <TextBlock x:Name="SubtitleText"
-                     Text="Sichere, wiederherstellbare Archive für macOS"
-                     Classes="muted"
-                     Margin="24,0,0,0" />
         </StackPanel>
         <Grid Grid.Column="1" ColumnDefinitions="Auto,210" RowDefinitions="Auto,Auto,Auto" ColumnSpacing="12" RowSpacing="6">
           <TextBlock x:Name="LanguageLabel" Text="Sprache" Classes="muted" VerticalAlignment="Center" />
@@ -430,7 +432,10 @@
             BorderBrush="#304259"
             BorderThickness="1">
       <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="10">
-        <Border Width="64" Height="8" CornerRadius="4" Background="#5DE4EC" HorizontalAlignment="Center" />
+        <Image x:Name="PrivacyShieldLogoImage"
+               Width="108"
+               Height="108"
+               HorizontalAlignment="Center" />
         <TextBlock Text="Keep Vault" FontSize="30" FontWeight="Bold" HorizontalAlignment="Center" />
         <TextBlock x:Name="PrivacyShieldText"
                    Text="Geheimnisansicht verdeckt, solange Keep Vault nicht aktiv ist."

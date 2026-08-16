@@ -9,6 +9,7 @@ app_path=''
 allow_development=0
 require_notarization=0
 mldsa_public_key=${KEEPVAULT_MLDSA_PUBLIC_KEY:-${repo_root}/KeepVaultMac/Packaging/Keys/mldsa87-public.key}
+require_launcher_signature=0
 dotnet_command=${KEEPVAULT_DOTNET:-/Users/michael/.dotnet-keepvault/dotnet}
 expected_signer_lock_sha256='B07635B8B5CF158644267CBB99E6483D6F947F37D3B9918B4FF39407EB6BA5EB'
 
@@ -37,6 +38,10 @@ while (( $# != 0 )); do
       (( $# >= 2 )) || usage
       mldsa_public_key=$2
       shift 2
+      ;;
+    --require-launcher-signature)
+      require_launcher_signature=1
+      shift
       ;;
     *) usage ;;
   esac
@@ -276,7 +281,7 @@ done
 # mirroring the layout below Contents/MacOS.
 macos_root=${app_path}/Contents/MacOS
 signature_root=${app_path}/Contents/Resources/HybridSignatures
-hybrid_targets=(${core} ${required_native[@]/#/${native_dir}/})
+hybrid_targets=(${core} ${supervisor} ${required_native[@]/#/${native_dir}/})
 for target in ${hybrid_targets[@]}; do
   sidecar_base=${signature_root}/${target#${macos_root}/}
   for suffix in .sha3 .skein .khsig .sha3.khsig .skein.khsig; do
@@ -327,6 +332,41 @@ if [[ -x ${dotnet_command} && ! -L ${dotnet_command} && -f ${mldsa_public_key} ]
     cd ${repo_root}/KeepVaultMac
     ${dotnet_command} ${verify_arguments[@]}
   )
+  # The launcher carries the bundle seal in its own bytes, so its dual
+  # signature lives beside the app rather than inside it. Verifying it needs the
+  # default sidecar naming, so binary and sidecars are staged together under the
+  # name the verifier expects; copying preserves the bytes the signature binds
+  # to.
+  launcher_binary=${macos_root}/Keep\ Vault\ Launcher
+  launcher_sidecar_base=${app_path}.launcher
+  if [[ -f ${launcher_sidecar_base}.khsig && ! -L ${launcher_sidecar_base}.khsig ]]; then
+    launcher_stage=$(mktemp -d "${TMPDIR:-/tmp}/keep-vault-launcher-verify.XXXXXXXX")
+    ditto ${launcher_binary} ${launcher_stage}/Keep\ Vault\ Launcher
+    for suffix in .sha3 .skein .khsig .sha3.khsig .skein.khsig; do
+      if [[ ! -f ${launcher_sidecar_base}${suffix} || -L ${launcher_sidecar_base}${suffix} ]]; then
+        rm -rf -- ${launcher_stage}
+        print -u2 "The launcher self-signature is incomplete: ${launcher_sidecar_base:t}${suffix}"
+        exit 1
+      fi
+      ditto ${launcher_sidecar_base}${suffix} ${launcher_stage}/Keep\ Vault\ Launcher${suffix}
+    done
+    launcher_status=0
+    (
+      cd ${repo_root}/KeepVaultMac
+      ${dotnet_command} ${signer_dll} verify \
+        --mldsa-public-key ${mldsa_public_key} \
+        --policy ${repo_root}/KeepVaultMac/Directory.Build.props \
+        --target ${launcher_stage}/Keep\ Vault\ Launcher
+    ) || launcher_status=$?
+    rm -rf -- ${launcher_stage}
+    (( launcher_status == 0 )) || exit ${launcher_status}
+    print 'launcher_self_signature=verified'
+  elif (( require_launcher_signature )); then
+    print -u2 "The launcher self-signature is required but missing: ${launcher_sidecar_base:t}.khsig"
+    exit 1
+  else
+    print 'launcher_self_signature=absent (bundle not yet released)'
+  fi
 else
   print -u2 'The independent managed hybrid verifier or pinned ML-DSA public key is unavailable.'
   exit 1

@@ -5,6 +5,16 @@ namespace KalynaArchiver;
 
 public sealed partial class MainWindow
 {
+    /// <summary>
+    /// Whether the app is currently being used in English.
+    /// </summary>
+    /// <remarks>
+    /// Printed key sheets follow this rather than the machine locale: the sheet
+    /// is read years later, and the language the owner chose in the app is the
+    /// better guess at the language they will still read it in.
+    /// </remarks>
+    internal bool IsEnglish => _language == "en";
+
     private void ApplyLanguage()
     {
         Title = "Keep Vault";
@@ -92,7 +102,7 @@ public sealed partial class MainWindow
 
     private string T(string key)
     {
-        bool en = _language == "en";
+        bool en = IsEnglish;
         return key switch
         {
             "subtitle" => en ? "Secure, recoverable archives for macOS" : "Sichere, wiederherstellbare Archive für macOS",
@@ -121,8 +131,8 @@ public sealed partial class MainWindow
             "inputDropHint" => en ? "Drop files or folders anywhere in this panel." : "Dateien oder Ordner irgendwo in diesem Panel ablegen.",
             "targetArchive" => en ? "Target archive" : "Zielarchiv",
             "targetArchiveDropHint" => en
-                ? "Drop a folder to create archive(1).kzpaq there, or a file to derive name(1).kzpaq."
-                : "Ordner ablegen, um dort archive(1).kzpaq zu erzeugen, oder eine Datei für name(1).kzpaq ablegen.",
+                ? "Drop a folder to create folder(1).kzpaq beside it, or a file to derive name(1).kzpaq."
+                : "Ordner ablegen, um daneben ordner(1).kzpaq zu erzeugen, oder eine Datei für name(1).kzpaq ablegen.",
             "browse" => en ? "Browse" : "Auswählen",
             "compression" => en ? "Compression" : "Kompression",
             "encrypt" => en ? "Encrypt archive" : "Archiv verschlüsseln",

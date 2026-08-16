@@ -272,26 +272,56 @@ public sealed class KeySheetService
         }
 
         string canonicalArchivePath = MacCanonicalPath.CanonicalizeCreatableFile(data.ArchivePath);
+        string deviceName = string.IsNullOrWhiteSpace(data.DeviceName)
+            ? Environment.MachineName
+            : data.DeviceName.Trim();
         return new ValidatedKeySheetData(
             canonicalArchivePath,
             data.Suite,
             suite.DisplayName,
             first,
             second,
-            data.CreatedAt);
+            data.CreatedAt,
+            data.English,
+            deviceName);
     }
+
+    /// <summary>
+    /// The page the app can be downloaded and verified from.
+    /// </summary>
+    /// <remarks>
+    /// A key sheet outlives the computer it was printed on. Whoever finds it
+    /// later needs to know what it belongs to and where to get the program that
+    /// reads it, so the address is on the paper rather than only in the app.
+    /// </remarks>
+    private const string ProjectUrl = "https://github.com/alexanderfeinermann-a11y/keep-vault";
+
+    /// <summary>
+    /// No text on a key sheet is ever smaller than this.
+    /// </summary>
+    /// <remarks>
+    /// These sheets are read under stress, often years later and often by
+    /// someone older than the person who printed them. A hex factor misread by
+    /// one character is unrecoverable, so legibility is a security property
+    /// here, not a matter of taste.
+    /// </remarks>
+    private const double MinimumFontSize = 16;
 
     private static PdfDocument CreatePdfDocument(ValidatedKeySheetData data)
     {
         var document = new PdfDocument();
-        document.Info.Title = $"{ProductName} getrennte Schlüsselzettel";
+        document.Info.Title = data.English
+            ? $"{ProductName} separated key sheets"
+            : $"{ProductName} getrennte Schlüsselzettel";
         document.Info.Author = ProductName;
         DrawPdfSheet(document.AddPage(), data, KeySheetFactor.First);
 
-        // Deliberately do not acquire XGraphics for this page. Therefore no content
-        // stream, text, image, QR data, or factor material is attached to page 2.
-        PdfPage blank = document.AddPage();
-        SetA4(blank);
+        // Page 2 separates factor A from factor B, and that separation is the
+        // whole point of it: nothing derived from either factor may appear here.
+        // It carries only the public installation instructions and the public
+        // project address, so A and B still never share a sheet of paper — not
+        // even through a duplex print or a page held up to the light.
+        DrawInstallationPage(document.AddPage(), data.English);
 
         DrawPdfSheet(document.AddPage(), data, KeySheetFactor.Second);
         return document;
@@ -304,76 +334,351 @@ public sealed class KeySheetService
             ? data.FirstGeneratedPassword
             : data.SecondGeneratedPassword;
         string factorName = factor == KeySheetFactor.First ? "A" : "B";
+        bool en = data.English;
 
         using XGraphics graphics = XGraphics.FromPdfPage(page);
-        var titleFont = new XFont("Arial", 20, XFontStyleEx.Bold);
-        var headingFont = new XFont("Arial", 11, XFontStyleEx.Bold);
-        var normalFont = new XFont("Arial", 10);
-        var warningFont = new XFont("Arial", 9, XFontStyleEx.Bold);
-        var monoFont = new XFont("Courier New", 8.5);
+        var titleFont = new XFont("Arial", 24, XFontStyleEx.Bold);
+        var headingFont = new XFont("Arial", MinimumFontSize, XFontStyleEx.Bold);
+        var normalFont = new XFont("Arial", MinimumFontSize);
+        var warningFont = new XFont("Arial", MinimumFontSize, XFontStyleEx.Bold);
+        var shoutFont = new XFont("Arial", 19, XFontStyleEx.Bold);
+
+        // The factor is the one thing on this sheet that must never be misread,
+        // so it is set at the same size as the heading announcing it.
+        var monoFont = new XFont("Courier New", MinimumFontSize);
         var formatter = new XTextFormatter(graphics);
 
         const double margin = 42;
         const double bodyWidth = 500;
         double y = margin;
-        graphics.DrawString($"{ProductName} Schlüsselzettel {factorName}", titleFont, XBrushes.Black, new XPoint(margin, y));
-        y += 24;
+
+        graphics.DrawString(
+            en ? $"{ProductName} key sheet {factorName}" : $"{ProductName} Schlüsselzettel {factorName}",
+            titleFont,
+            XBrushes.Black,
+            new XPoint(margin, y));
+        y += 30;
+
         formatter.DrawString(
-            "Diesen Schlüsselzettel getrennt vom anderen aufbewahren. Zwischen A und B liegt absichtlich eine vollständig leere Seite.",
+            en
+                ? "Keep this key sheet separate from the other one. The completely blank middle page between A and B is intentional."
+                : "Diesen Schlüsselzettel getrennt vom anderen aufbewahren. Die Seite zwischen A und B trennt beide Faktoren absichtlich.",
             warningFont,
             XBrushes.DarkRed,
-            new XRect(margin, y, bodyWidth, 28));
-        y += 42;
+            new XRect(margin, y, bodyWidth, 46));
+        y += 56;
 
-        DrawLabelAndValue(graphics, formatter, headingFont, normalFont, "Verschlüsselungssuite", data.SuiteDisplayName, margin, bodyWidth, ref y, 24);
-        DrawLabelAndValue(graphics, formatter, headingFont, normalFont, "Archivdatei", Path.GetFileName(data.CanonicalArchivePath), margin, bodyWidth, ref y, 32);
-        DrawLabelAndValue(graphics, formatter, headingFont, normalFont, "Speicherort", Path.GetDirectoryName(data.CanonicalArchivePath) ?? data.CanonicalArchivePath, margin, bodyWidth, ref y, 42);
+        graphics.DrawString(
+            en ? "DO NOT THROW AWAY!" : "NICHT WEGSCHMEISSEN!",
+            shoutFont,
+            XBrushes.Red,
+            new XPoint(margin, y));
+        y += 30;
 
-        graphics.DrawString($"Generierter hexadezimaler 512-Bit-Faktor {factorName}", headingFont, XBrushes.Black, new XPoint(margin, y));
-        y += 15;
-        formatter.DrawString(GroupGeneratedPassword(generatedPassword), monoFont, XBrushes.Black, new XRect(margin, y, bodyWidth, 54));
-        y += 74;
+        DrawLabelAndValue(graphics, headingFont, normalFont,
+            en ? "Encryption suite" : "Verschlüsselungssuite",
+            data.SuiteDisplayName, margin, bodyWidth, ref y);
+        DrawLabelAndValue(graphics, headingFont, normalFont,
+            en ? "Archive file" : "Archivdatei",
+            Path.GetFileName(data.CanonicalArchivePath), margin, bodyWidth, ref y);
+        DrawLabelAndValue(graphics, headingFont, normalFont,
+            en ? "Created on device" : "Erstellt auf Gerät",
+            data.DeviceName, margin, bodyWidth, ref y);
+        DrawLabelAndValue(graphics, headingFont, normalFont,
+            en ? "Storage location" : "Speicherort",
+            Path.GetDirectoryName(data.CanonicalArchivePath) ?? data.CanonicalArchivePath,
+            margin, bodyWidth, ref y);
 
-        graphics.DrawString("Benutzerpasswort (von Hand eintragen, nicht digital speichern)", headingFont, XBrushes.Black, new XPoint(margin, y));
+        graphics.DrawString(
+            en
+                ? $"Generated hexadecimal 512-bit factor {factorName}"
+                : $"Generierter hexadezimaler 512-Bit-Faktor {factorName}",
+            headingFont,
+            XBrushes.Black,
+            new XPoint(margin, y));
         y += 24;
-        for (int index = 0; index < 4; index++)
+        formatter.DrawString(
+            GroupGeneratedPassword(generatedPassword),
+            monoFont,
+            XBrushes.Black,
+            new XRect(margin, y, bodyWidth, 92));
+        y += 98;
+
+        // Everything from the QR codes down is measured up from the bottom
+        // edge. The fields above vary in height with the archive path, and the
+        // codes and the download address are exactly the parts that must not be
+        // the ones squeezed off the page when a path runs long.
+        const double qrSize = 132;
+        const double qrGap = 28;
+        double footerBaseline = page.Height.Point - 24;
+        double urlBaseline = footerBaseline - 26;
+        double urlLabelBaseline = urlBaseline - 21;
+        double qrTop = urlLabelBaseline - 22 - qrSize;
+        double qrHeadingBaseline = qrTop - 10;
+
+        graphics.DrawString(
+            en
+                ? "User password (write by hand, never store digitally)"
+                : "Benutzerpasswort (von Hand eintragen, nicht digital speichern)",
+            headingFont,
+            XBrushes.Black,
+            new XPoint(margin, y));
+
+        // The writing lines take up whatever room is left between the heading
+        // and the QR block, so a long storage path shortens the lines rather
+        // than pushing them across the codes below.
+        double writingTop = y + 10;
+        double writingBottom = qrHeadingBaseline - 20;
+        const int writingLines = 3;
+        double writingSpacing = Math.Min(28, (writingBottom - writingTop) / writingLines);
+        for (int index = 0; index < writingLines && writingSpacing >= 14; index++)
         {
-            graphics.DrawLine(XPens.Black, margin, y, page.Width.Point - margin, y);
-            y += 28;
+            double lineY = writingTop + (writingSpacing * (index + 1));
+            graphics.DrawLine(XPens.Black, margin, lineY, page.Width.Point - margin, lineY);
         }
 
-        y += 12;
-        graphics.DrawString($"QR-Code enthält ausschließlich Faktor {factorName} (Fehlerkorrektur Q)", headingFont, XBrushes.Black, new XPoint(margin, y));
-        y += 12;
-        DrawQrCode(graphics, generatedPassword, margin, y, 190);
+        graphics.DrawString(
+            en
+                ? $"Both QR codes contain factor {factorName} only (error correction Q)"
+                : $"Beide QR-Codes enthalten ausschließlich Faktor {factorName} (Fehlerkorrektur Q)",
+            headingFont,
+            XBrushes.Black,
+            new XPoint(margin, qrHeadingBaseline));
 
-        string footer = $"Erstellt: {data.CreatedAt:yyyy-MM-dd HH:mm:ss}    Offline und physisch geschützt aufbewahren.";
-        graphics.DrawString(footer, normalFont, XBrushes.DarkSlateGray, new XPoint(margin, page.Height.Point - 36));
+        // Printed twice side by side: a single smudged, creased or faded code
+        // would otherwise force the whole factor to be typed by hand.
+        string qrPayload = PasswordKeyService.NormalizeGeneratedPassword(generatedPassword);
+        DrawQrCode(graphics, qrPayload, margin, qrTop, qrSize);
+        DrawQrCode(graphics, qrPayload, margin + qrSize + qrGap, qrTop, qrSize);
+
+        graphics.DrawString(
+            en ? "Download and verify the app at:" : "App herunterladen und prüfen unter:",
+            normalFont,
+            XBrushes.Black,
+            new XPoint(margin, urlLabelBaseline));
+        graphics.DrawString(ProjectUrl, normalFont, XBrushes.DarkBlue, new XPoint(margin, urlBaseline));
+
+        string footer = en
+            ? $"Created: {data.CreatedAt:yyyy-MM-dd HH:mm:ss}    Keep offline and physically protected."
+            : $"Erstellt: {data.CreatedAt:yyyy-MM-dd HH:mm:ss}    Offline und physisch geschützt aufbewahren.";
+        graphics.DrawString(footer, normalFont, XBrushes.DarkSlateGray, new XPoint(margin, footerBaseline));
+    }
+
+    /// <summary>
+    /// Draws the page that separates factor A from factor B.
+    /// </summary>
+    /// <remarks>
+    /// Nothing here depends on the archive or on either factor: this method
+    /// deliberately takes no key-sheet data at all, so the separating page
+    /// cannot leak anything even if it is later edited carelessly.
+    /// </remarks>
+    private static void DrawInstallationPage(PdfPage page, bool en)
+    {
+        SetA4(page);
+        using XGraphics graphics = XGraphics.FromPdfPage(page);
+        var titleFont = new XFont("Arial", 24, XFontStyleEx.Bold);
+        var headingFont = new XFont("Arial", MinimumFontSize, XFontStyleEx.Bold);
+        var normalFont = new XFont("Arial", MinimumFontSize);
+
+        const double margin = 42;
+        const double bodyWidth = 500;
+        double y = margin;
+
+        graphics.DrawString(
+            en ? "Installing Keep Vault" : "Keep Vault installieren",
+            titleFont,
+            XBrushes.Black,
+            new XPoint(margin, y));
+        y += 34;
+
+        DrawWrappedValue(
+            graphics,
+            normalFont,
+            en
+                ? "This page separates factor A from factor B and contains no key material."
+                : "Diese Seite trennt Faktor A von Faktor B und enthält kein Schlüsselmaterial.",
+            margin,
+            bodyWidth,
+            ref y);
+        y += 14;
+
+        graphics.DrawString(
+            en ? "Download" : "Bezugsquelle",
+            headingFont,
+            XBrushes.Black,
+            new XPoint(margin, y));
+        y += 22;
+        graphics.DrawString(ProjectUrl, normalFont, XBrushes.DarkBlue, new XPoint(margin, y));
+        y += 14;
+
+        DrawQrCode(graphics, ProjectUrl, margin, y, 126);
+        y += 126 + 30;
+
+        graphics.DrawString("Windows", headingFont, XBrushes.Black, new XPoint(margin, y));
+        y += 24;
+        DrawSteps(graphics, normalFont, margin, bodyWidth, ref y, en
+            ? [
+                "1. Download the Windows release from the page above.",
+                "2. Unblock the ZIP file in its properties, then extract it.",
+                "3. Run Install-KeepVaultShortcuts.ps1 in PowerShell, or start KalynaArchiver.exe directly.",
+                "4. The installer verifies the dual signature before it creates any shortcut.",
+            ]
+            : [
+                "1. Windows-Release von der oben genannten Seite herunterladen.",
+                "2. Die ZIP-Datei in den Eigenschaften zulassen, danach entpacken.",
+                "3. Install-KeepVaultShortcuts.ps1 in PowerShell ausführen oder KalynaArchiver.exe direkt starten.",
+                "4. Der Installer prüft die duale Signatur, bevor er eine Verknüpfung anlegt.",
+            ]);
+        y += 16;
+
+        graphics.DrawString("macOS", headingFont, XBrushes.Black, new XPoint(margin, y));
+        y += 24;
+        DrawSteps(graphics, normalFont, margin, bodyWidth, ref y, en
+            ? [
+                "1. Download the macOS release from the page above.",
+                "2. Extract the ZIP file. The .khsig files belong next to the app and must stay there.",
+                "3. Run tools/Install-KeepVault-macOS.sh; it installs the app and creates a Desktop alias.",
+                "4. The app checks Apple's signature and its own dual signature at every start.",
+            ]
+            : [
+                "1. macOS-Release von der oben genannten Seite herunterladen.",
+                "2. Die ZIP-Datei entpacken. Die .khsig-Dateien gehören neben die App und müssen dort bleiben.",
+                "3. tools/Install-KeepVault-macOS.sh ausführen; es installiert die App und legt ein Alias an.",
+                "4. Die App prüft bei jedem Start Apples Signatur und ihre eigene duale Signatur.",
+            ]);
+
+        string footer = en
+            ? "Keep this page with the key sheets."
+            : "Diese Seite bei den Schlüsselzetteln aufbewahren.";
+        graphics.DrawString(footer, normalFont, XBrushes.DarkSlateGray, new XPoint(margin, page.Height.Point - 24));
+    }
+
+    /// <summary>
+    /// Draws numbered steps, wrapping each one to the page width.
+    /// </summary>
+    /// <remarks>
+    /// Drawn line by line rather than into a fixed rectangle: a clipped
+    /// rectangle silently drops the end of the last instruction, which on a
+    /// sheet nobody re-reads before filing is a mistake that only surfaces when
+    /// the instructions are actually needed.
+    /// </remarks>
+    private static void DrawSteps(
+        XGraphics graphics,
+        XFont font,
+        double x,
+        double width,
+        ref double y,
+        string[] steps)
+    {
+        foreach (string step in steps)
+        {
+            DrawWrappedValue(graphics, font, step, x, width, ref y);
+            y += 4;
+        }
     }
 
     private static void DrawLabelAndValue(
         XGraphics graphics,
-        XTextFormatter formatter,
         XFont headingFont,
         XFont normalFont,
         string label,
         string value,
         double x,
         double width,
-        ref double y,
-        double valueHeight)
+        ref double y)
     {
         graphics.DrawString(label, headingFont, XBrushes.Black, new XPoint(x, y));
-        y += 15;
-        formatter.DrawString(value, normalFont, XBrushes.Black, new XRect(x, y, width, valueHeight));
-        y += valueHeight + 6;
+        y += 22;
+        DrawWrappedValue(graphics, normalFont, value, x, width, ref y);
+        y += 12;
     }
 
-    private static void DrawQrCode(XGraphics graphics, string generatedPassword, double x, double y, double size)
+    /// <summary>
+    /// Draws a value across as many lines as it needs, breaking inside long
+    /// unbroken strings.
+    /// </summary>
+    /// <remarks>
+    /// A storage location is a single token with no spaces, and at this font
+    /// size it is easily wider than the page. Word wrapping alone would run it
+    /// off the right edge, which is how a sheet ends up telling its owner only
+    /// half of where the archive is, so the break falls after a path separator
+    /// where possible and mid-token where not.
+    /// </remarks>
+    private static void DrawWrappedValue(
+        XGraphics graphics,
+        XFont font,
+        string value,
+        double x,
+        double width,
+        ref double y)
     {
-        string normalized = PasswordKeyService.NormalizeGeneratedPassword(generatedPassword);
+        const double lineHeight = 20;
+        foreach (string line in WrapToWidth(graphics, font, value, width))
+        {
+            graphics.DrawString(line, font, XBrushes.Black, new XPoint(x, y));
+            y += lineHeight;
+        }
+    }
+
+    private static List<string> WrapToWidth(XGraphics graphics, XFont font, string value, double width)
+    {
+        var lines = new List<string>();
+        if (string.IsNullOrEmpty(value))
+        {
+            lines.Add(string.Empty);
+            return lines;
+        }
+
+        var current = new StringBuilder();
+        int lastBreak = -1;
+        foreach (char character in value)
+        {
+            current.Append(character);
+            if (character is '/' or ' ' or '\\' or '-' or '_')
+            {
+                lastBreak = current.Length;
+            }
+
+            if (graphics.MeasureString(current.ToString(), font).Width <= width)
+            {
+                continue;
+            }
+
+            // Prefer the last separator, but never emit an empty line: if the
+            // overflow happens before any separator, break mid-token instead.
+            int cut = lastBreak > 0 && lastBreak < current.Length ? lastBreak : current.Length - 1;
+            if (cut <= 0)
+            {
+                cut = 1;
+            }
+
+            lines.Add(current.ToString(0, cut).TrimEnd());
+            string remainder = current.ToString(cut, current.Length - cut).TrimStart();
+            current.Clear();
+            current.Append(remainder);
+            lastBreak = -1;
+        }
+
+        if (current.Length > 0)
+        {
+            lines.Add(current.ToString());
+        }
+
+        return lines;
+    }
+
+    /// <summary>
+    /// Draws one QR code for an arbitrary payload.
+    /// </summary>
+    /// <remarks>
+    /// Factor payloads are normalised by their caller, so what is encoded here
+    /// is exactly what the scanner will be checked against. The matrix is
+    /// cleared afterwards because for a factor it is key material.
+    /// </remarks>
+    private static void DrawQrCode(XGraphics graphics, string payload, double x, double y, double size)
+    {
         using var generator = new QRCodeGenerator();
-        using QRCodeData qrData = generator.CreateQrCode(normalized, QRCodeGenerator.ECCLevel.Q);
+        using QRCodeData qrData = generator.CreateQrCode(payload, QRCodeGenerator.ECCLevel.Q);
         try
         {
             int moduleCount = qrData.ModuleMatrix.Count;
@@ -487,7 +792,9 @@ public sealed class KeySheetService
         string SuiteDisplayName,
         string FirstGeneratedPassword,
         string SecondGeneratedPassword,
-        DateTime CreatedAt);
+        DateTime CreatedAt,
+        bool English,
+        string DeviceName);
 }
 
 public enum KeySheetFactor
@@ -496,12 +803,27 @@ public enum KeySheetFactor
     Second,
 }
 
+/// <summary>
+/// Everything a printed key sheet shows.
+/// </summary>
+/// <param name="English">
+/// Renders the sheets in English rather than German. A sheet is read years
+/// later, possibly by someone else, so it follows the language the app was
+/// being used in rather than the machine locale at print time.
+/// </param>
+/// <param name="DeviceName">
+/// The machine the archive was created on. With several computers in a
+/// household this is often the only remaining clue to where the archive itself
+/// ended up.
+/// </param>
 public sealed record KeySheetData(
     string ArchivePath,
     EncryptionSuite Suite,
     string FirstGeneratedPassword,
     string SecondGeneratedPassword,
-    DateTime CreatedAt);
+    DateTime CreatedAt,
+    bool English = false,
+    string DeviceName = "");
 
 public enum PhysicalPrinterEvidence
 {

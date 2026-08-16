@@ -1852,7 +1852,15 @@ public sealed partial class MainWindow : Window, IDisposable
         string extension = encrypted ? ".kzpaq" : ".zpaq";
         if (Directory.Exists(trimmed))
         {
-            return BuildNumberedArchivePath(trimmed, "archive", extension);
+            // Beside the folder, named after it — not inside it. An archive
+            // created inside its own input is refused a moment later by the
+            // safety check, so suggesting one only ever produced a dead end.
+            string normalized = Path.TrimEndingDirectorySeparator(Path.GetFullPath(trimmed));
+            string? folderParent = Path.GetDirectoryName(normalized);
+            string folderName = Path.GetFileName(normalized);
+            return string.IsNullOrEmpty(folderParent) || string.IsNullOrWhiteSpace(folderName)
+                ? BuildNumberedArchivePath(normalized, "archive", extension)
+                : BuildNumberedArchivePath(folderParent, folderName, extension);
         }
 
         string directory = Path.GetDirectoryName(Path.GetFullPath(trimmed)) ?? Environment.CurrentDirectory;
@@ -2301,7 +2309,7 @@ public sealed partial class MainWindow : Window, IDisposable
             ("en", "eraseTab") => "Cryptographic erase",
             ("en", "subtitle2") => "Create, extract, and cryptographically erase encrypted ZPAQ archives.",
             ("en", "createSubtitle") => "Select files or folders, choose the target archive, then print the two separately stored key sheets before encrypting.",
-            ("en", "targetArchiveDropHint") => "Drop a folder here to create archive(1).kzpaq there, or drop any file to derive name(1).kzpaq.",
+            ("en", "targetArchiveDropHint") => "Drop a folder here to create folder(1).kzpaq beside it, or drop any file to derive name(1).kzpaq.",
             ("en", "createPasswordSetupTitle") => "Three-part password for encrypted archives",
             ("en", "createPasswordSetupHelp") => "Extraction requires the user password plus two independently generated 512-bit hexadecimal passwords.",
             ("en", "passwordGeneratorTitle") => "Two independent generated 512-bit passwords",
@@ -2466,7 +2474,7 @@ public sealed partial class MainWindow : Window, IDisposable
             (_, "eraseTab") => "Cryptographic erase",
             (_, "subtitle2") => "Verschlüsselte ZPAQ-Archive erstellen, entpacken und kryptografisch löschen.",
             (_, "createSubtitle") => "Dateien oder Ordner auswählen, Zielarchiv festlegen und vor der Verschlüsselung die zwei getrennten Schlüsselzettel drucken.",
-            (_, "targetArchiveDropHint") => "Ordner hier ablegen, um dort archive(1).kzpaq zu erstellen, oder eine Datei als Namensvorlage für name(1).kzpaq ablegen.",
+            (_, "targetArchiveDropHint") => "Ordner hier ablegen, um daneben ordner(1).kzpaq zu erstellen, oder eine Datei als Namensvorlage für name(1).kzpaq ablegen.",
             (_, "createPasswordSetupTitle") => "Dreiteiliges Passwort für verschlüsselte Archive",
             (_, "createPasswordSetupHelp") => "Zum Entpacken werden das Userpasswort sowie zwei unabhängig generierte 512-Bit-Hex-Passwörter benötigt.",
             (_, "passwordGeneratorTitle") => "Zwei unabhängige generierte 512-Bit-Passwörter",
