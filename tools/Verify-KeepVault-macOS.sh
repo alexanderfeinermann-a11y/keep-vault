@@ -280,6 +280,9 @@ disallowed_entitlements=(
   com.apple.security.cs.allow-unsigned-executable-memory
   com.apple.security.cs.disable-library-validation
   com.apple.security.cs.disable-executable-page-protection
+  com.apple.security.cs.allow-dyld-environment-variables
+  com.apple.security.cs.allow-relative-library-loads
+  com.apple.security.cs.debugger
   com.apple.security.network.client
   com.apple.security.network.server
   com.apple.security.device.audio-input
