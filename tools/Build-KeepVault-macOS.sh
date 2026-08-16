@@ -778,6 +778,11 @@ ${script_dir}/Verify-KeepVault-macOS.sh \
 
 dist_dir=${repo_root}/dist/Keep\ Vault-macOS
 mkdir -p ${dist_dir}
+
+# Keep build output out of Spotlight. Without this the release copy, the
+# portable copy and the installed app all answer to a search for "Keep Vault",
+# and the user is left guessing which of them they are about to open.
+touch ${repo_root}/dist/.metadata_never_index
 final_app=${dist_dir}/Keep\ Vault.app
 final_zip=${dist_dir}/Keep\ Vault-macOS-${architecture}.zip
 for final_path in \
