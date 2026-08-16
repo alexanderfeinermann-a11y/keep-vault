@@ -1,4 +1,6 @@
 using System.Diagnostics;
+using System.Net.Sockets;
+using System.Text;
 using System.Security.Cryptography;
 using KalynaArchiver.Services;
 
@@ -34,7 +36,10 @@ internal static class MacScannerBroker
     /// ordinary signed Mach-O next to zpaq and argon2, and it is verified the
     /// same way they are.
     /// </remarks>
-    private const string HelperFileName = "keep-vault-scanner";
+    private const string HelperRelativePath =
+        "Library/Helpers/Keep Vault Scanner.app/Contents/MacOS/Keep Vault Scanner";
+
+    private const string HelperBundleRelativePath = "Library/Helpers/Keep Vault Scanner.app";
 
     /// <summary>
     /// A factor is 128 hexadecimal characters, so anything beyond a few hundred
@@ -64,13 +69,15 @@ internal static class MacScannerBroker
     private static TrustedNativeFileLease AcquireHelper()
     {
         string baseDirectory = Path.TrimEndingDirectorySeparator(Path.GetFullPath(AppContext.BaseDirectory));
-        string executable = Path.Combine(baseDirectory, "Native", HelperFileName);
+        string contents = Path.GetDirectoryName(baseDirectory)
+            ?? throw new InvalidOperationException("The scanner helper is only available inside the application bundle.");
+        string executable = Path.Combine(contents, HelperRelativePath.Replace('/', Path.DirectorySeparatorChar));
         if (!File.Exists(executable) || File.ResolveLinkTarget(executable, returnFinalTarget: false) is not null)
         {
             throw new FileNotFoundException("The scanner helper is missing from the application bundle.", executable);
         }
 
-        MacSignatureInfo signature = MacCodeSignature.Check(executable, nestedBundle: false);
+        MacSignatureInfo signature = MacCodeSignature.Check(executable, nestedBundle: true);
         if (!IntegrityService.IsAcceptedSignatureState(signature.State))
         {
             throw new InvalidOperationException(
@@ -93,17 +100,17 @@ internal static class MacScannerBroker
         }
 
         using TrustedNativeFileLease scopedHelperLease = helperLease;
-        string helper = scopedHelperLease.Path;
+        string helperBundle = Path.Combine(
+            Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(Path.GetFullPath(AppContext.BaseDirectory)))!,
+            HelperBundleRelativePath.Replace('/', Path.DirectorySeparatorChar));
 
-        var startInfo = new ProcessStartInfo
-        {
-            FileName = helper,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-        };
-        startInfo.ArgumentList.Add("scan-factor");
-        startInfo.ArgumentList.Add(title);
+        // A private directory only this user can enter, holding the socket the
+        // helper answers on. The factor therefore never touches the file system.
+        string replyDirectory = Directory.CreateTempSubdirectory("keep-vault-scan-").FullName;
+        File.SetUnixFileMode(
+            replyDirectory,
+            UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        string socketPath = Path.Combine(replyDirectory, "reply.sock");
 
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(ScanTimeout);
@@ -111,36 +118,73 @@ internal static class MacScannerBroker
         Process? process = null;
         try
         {
+            using var listener = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
+            listener.Bind(new UnixDomainSocketEndPoint(socketPath));
+            listener.Listen(1);
+
+            // Started through LaunchServices, not spawned. That is the whole
+            // point of the nested bundle: a spawned helper is answered for by
+            // this app, which macOS cannot resolve to a name, so it refused the
+            // camera outright rather than asking. Opened as an application the
+            // helper answers for itself and appears under Privacy by name.
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = "/usr/bin/open",
+                RedirectStandardError = true,
+                UseShellExecute = false,
+            };
+            startInfo.ArgumentList.Add("-a");
+            startInfo.ArgumentList.Add(helperBundle);
+            startInfo.ArgumentList.Add("--args");
+            startInfo.ArgumentList.Add("scan-factor");
+            startInfo.ArgumentList.Add(title);
+            startInfo.ArgumentList.Add(socketPath);
+
             process = Process.Start(startInfo)
                 ?? throw new InvalidOperationException("The scanner helper could not be started.");
-            string output = await process.StandardOutput.ReadToEndAsync(timeout.Token).ConfigureAwait(false);
             await process.WaitForExitAsync(timeout.Token).ConfigureAwait(false);
-
-            // Exit code 2 means the user closed the scanner window.
-            if (process.ExitCode == 2)
-            {
-                return new ScanResult(Cancelled: true, Factor: null, Failure: null);
-            }
-
             if (process.ExitCode != 0)
             {
-                string error = await process.StandardError
+                string launchError = await process.StandardError
                     .ReadToEndAsync(CancellationToken.None).ConfigureAwait(false);
-                return new ScanResult(false, null, error.Trim());
+                return new ScanResult(false, null, launchError.Trim().Length > 0
+                    ? launchError.Trim()
+                    : "Der Scanner konnte nicht gestartet werden.");
             }
 
-            if (output.Length > MaxReplyCharacters)
+            using Socket reply = await AcceptOrExplainAsync(listener, replyDirectory, timeout.Token)
+                .ConfigureAwait(false);
+            byte[] buffer = new byte[MaxReplyCharacters];
+            int filled = 0;
+            while (filled < buffer.Length)
             {
-                return new ScanResult(false, null, "Die Scanner-Antwort ist unplausibel groß.");
+                int read = await reply
+                    .ReceiveAsync(buffer.AsMemory(filled), SocketFlags.None, timeout.Token)
+                    .ConfigureAwait(false);
+                if (read == 0)
+                {
+                    break;
+                }
+
+                filled += read;
             }
 
-            string factor = output.Trim();
-            if (factor.Length != PasswordKeyService.GeneratedPasswordLength || !factor.All(Uri.IsHexDigit))
+            string output;
+            try
+            {
+                output = Encoding.ASCII.GetString(buffer, 0, filled).Trim();
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(buffer);
+            }
+
+            if (output.Length != PasswordKeyService.GeneratedPasswordLength || !output.All(Uri.IsHexDigit))
             {
                 return new ScanResult(false, null, "Der gescannte Code ist kein gültiger Schlüsselfaktor.");
             }
 
-            return new ScanResult(false, factor.ToUpperInvariant(), null);
+            return new ScanResult(false, output.ToUpperInvariant(), null);
         }
         catch (OperationCanceledException)
         {
@@ -155,6 +199,49 @@ internal static class MacScannerBroker
         finally
         {
             process?.Dispose();
+            try
+            {
+                Directory.Delete(replyDirectory, recursive: true);
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+            }
+        }
+    }
+
+    /// <summary>
+    /// Waits for the helper, or explains why it never answered.
+    /// </summary>
+    /// <remarks>
+    /// The helper is opened as an application, so nothing it writes to stderr
+    /// reaches this process. When it fails before connecting it leaves the
+    /// reason beside the socket; without this the user would only ever see the
+    /// scan time out.
+    /// </remarks>
+    private static async Task<Socket> AcceptOrExplainAsync(
+        Socket listener,
+        string replyDirectory,
+        CancellationToken cancellationToken)
+    {
+        string failurePath = Path.Combine(replyDirectory, "failure.txt");
+        Task<Socket> accept = listener.AcceptAsync(cancellationToken).AsTask();
+        while (true)
+        {
+            Task finished = await Task.WhenAny(accept, Task.Delay(250, cancellationToken))
+                .ConfigureAwait(false);
+            if (finished == accept)
+            {
+                return await accept.ConfigureAwait(false);
+            }
+
+            if (File.Exists(failurePath))
+            {
+                string reason = (await File.ReadAllTextAsync(failurePath, cancellationToken)
+                    .ConfigureAwait(false)).Trim();
+                throw new InvalidOperationException(reason.Length > 0
+                    ? reason
+                    : "Der Scanner wurde ohne Angabe eines Grundes beendet.");
+            }
         }
     }
 

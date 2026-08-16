@@ -314,6 +314,33 @@ public sealed class IntegrityService : IDisposable
     /// process, so a verifier inspecting a bundle other than its own reaches the
     /// same answer the app itself does.
     /// </remarks>
+    /// <summary>
+    /// Recognises a helper application nested inside another bundle and returns
+    /// the outer bundle's Contents directory.
+    /// </summary>
+    private static bool TryGetOuterHelperLayout(string nestedContents, out string outerContents, out string helperName)
+    {
+        outerContents = string.Empty;
+        helperName = string.Empty;
+
+        string? nestedApp = Path.GetDirectoryName(nestedContents);
+        string? helpers = nestedApp is null ? null : Path.GetDirectoryName(nestedApp);
+        string? library = helpers is null ? null : Path.GetDirectoryName(helpers);
+        string? candidate = library is null ? null : Path.GetDirectoryName(library);
+        if (nestedApp is null || helpers is null || library is null || candidate is null
+            || !Path.GetFileName(nestedApp).EndsWith(".app", StringComparison.Ordinal)
+            || !string.Equals(Path.GetFileName(helpers), "Helpers", StringComparison.Ordinal)
+            || !string.Equals(Path.GetFileName(library), "Library", StringComparison.Ordinal)
+            || !string.Equals(Path.GetFileName(candidate), "Contents", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        outerContents = candidate;
+        helperName = Path.GetFileNameWithoutExtension(Path.GetFileName(nestedApp));
+        return true;
+    }
+
     internal static bool TryGetSealedBundleLayout(string path, out string contents, out string relative)
     {
         string full = Path.GetFullPath(path);
@@ -332,8 +359,22 @@ public sealed class IntegrityService : IDisposable
                 continue;
             }
 
-            contents = parent;
             relative = full[(Path.TrimEndingDirectorySeparator(directory).Length + 1)..];
+
+            // A helper application nested under Contents/Library/Helpers is
+            // sealed as its own bundle, so its detached signatures cannot live
+            // inside it: adding a file after sealing invalidates that seal. They
+            // belong to the outer bundle instead, under a directory named
+            // without an ".app" suffix so codesign does not mistake it for yet
+            // another nested bundle.
+            if (TryGetOuterHelperLayout(parent, out string outerContents, out string helperName))
+            {
+                contents = outerContents;
+                relative = Path.Combine("Helpers", helperName, relative);
+                return true;
+            }
+
+            contents = parent;
             return true;
         }
 
@@ -647,9 +688,18 @@ internal static class NativeToolIntegrity
     {
         string baseDirectory = Path.TrimEndingDirectorySeparator(Path.GetFullPath(AppContext.BaseDirectory));
         string directory = Path.GetDirectoryName(fullPath) ?? string.Empty;
+        // The scanner lives in its own nested bundle, one level outside
+        // Contents/MacOS, because macOS only grants camera access to something
+        // it can name. It is verified exactly like the tools beside it.
+        string? contentsDirectory = Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(baseDirectory));
+        string helperDirectory = contentsDirectory is null
+            ? string.Empty
+            : Path.Combine(contentsDirectory, "Library", "Helpers", "Keep Vault Scanner.app", "Contents", "MacOS");
+
         bool allowed = string.Equals(directory, baseDirectory, StringComparison.Ordinal)
             || string.Equals(directory, Path.Combine(baseDirectory, "Native"), StringComparison.Ordinal)
-            || string.Equals(directory, Path.Combine(baseDirectory, "Resources", "Native"), StringComparison.Ordinal);
+            || string.Equals(directory, Path.Combine(baseDirectory, "Resources", "Native"), StringComparison.Ordinal)
+            || (helperDirectory.Length > 0 && string.Equals(directory, helperDirectory, StringComparison.Ordinal));
         if (!allowed)
         {
             throw new InvalidOperationException($"Native tool is outside the sealed application directories: {fullPath}");

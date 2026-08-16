@@ -3,25 +3,43 @@
 <plist version="1.0">
 <dict>
   <!--
-    The scanner ships as a plain Mach-O rather than a nested bundle, because
-    sealing a nested bundle rewrites its main executable and would invalidate
-    the hybrid signature over exactly that file.
+    The scanner is a nested application rather than a spawned executable so
+    that macOS can name it. A camera prompt has to say who is asking, and a
+    bare helper spawned by Keep Vault is answered for by Keep Vault — which
+    macOS cannot resolve to this bundle, because the bundle's main executable
+    is the launcher while the process that actually runs is the core. With no
+    name available the request was refused outright instead of prompting.
 
-    A bare executable has no Info.plist, and without one TCC refuses camera
-    access outright instead of asking the user — which is why this plist is
-    linked into the binary's __TEXT,__info_plist section. It gives the helper
-    its own identity and the usage string macOS shows in the prompt.
+    As its own bundle the helper answers for itself: its own identifier, its
+    own usage description, and its own switch under Privacy. The camera stays
+    out of the core, which is the point of having a helper at all.
   -->
   <key>CFBundleIdentifier</key>
   <string>de.michael-feinermann.keep-vault.scanner</string>
+  <key>CFBundleExecutable</key>
+  <string>Keep Vault Scanner</string>
   <key>CFBundleName</key>
+  <string>Keep Vault Scanner</string>
+  <key>CFBundleDisplayName</key>
   <string>Keep Vault Scanner</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
+  <key>CFBundleInfoDictionaryVersion</key>
+  <string>6.0</string>
+  <key>CFBundleShortVersionString</key>
+  <string>@@BUILD_VERSION@@</string>
+  <key>CFBundleVersion</key>
+  <string>@@BUILD_VERSION@@</string>
+  <key>LSMinimumSystemVersion</key>
+  <string>14.0</string>
   <key>NSCameraUsageDescription</key>
   <string>Keep Vault liest den QR-Code eines gedruckten Schlüsselzettels, damit der 512-Bit-Faktor nicht von Hand eingetippt werden muss. Das Kamerabild wird nur währenddessen ausgewertet und nirgends gespeichert.</string>
-  <key>LSBackgroundOnly</key>
-  <false/>
+  <key>NSHighResolutionCapable</key>
+  <true/>
+  <!--
+    No Dock icon and no menu bar: the helper is a single window that exists for
+    the seconds a scan takes, not an application the user switches to.
+  -->
   <key>LSUIElement</key>
   <true/>
 </dict>

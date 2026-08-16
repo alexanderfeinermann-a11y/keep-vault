@@ -505,7 +505,26 @@ for scanner_arch in ${launcher_architectures[@]}; do
   scanner_thin+=(${thin_scanner})
 done
 
-scanner_path=${macos_dir}/Native/keep-vault-scanner
+# The scanner is a real application bundle, nested under Contents/Library/
+# Helpers, and it is started through LaunchServices rather than spawned. That is
+# what makes macOS treat it as its own program: a bare executable spawned by the
+# app is answered for by the app, and the app cannot be resolved to this bundle
+# because the bundle's main executable is the launcher, not the running core.
+# With no name to put in the dialog, macOS refused the camera outright instead
+# of asking. As its own bundle the helper carries its own identity, its own
+# usage description and its own entry under Privacy, where the user can grant
+# and revoke it.
+#
+# Sealing this nested bundle rewrites only its own main executable, not the
+# outer one, so it is signed first and hybrid-signed afterwards; its detached
+# signatures are then moved into the outer bundle, because adding files inside a
+# bundle that is already sealed would invalidate that seal.
+scanner_app=${contents}/Library/Helpers/Keep\ Vault\ Scanner.app
+scanner_path=${scanner_app}/Contents/MacOS/Keep\ Vault\ Scanner
+mkdir -p ${scanner_app}/Contents/MacOS
+sed -e "s/@@BUILD_VERSION@@/${build_version}/g" \
+  ${packaging_dir}/ScannerHelper.Info.plist > ${scanner_app}/Contents/Info.plist
+plutil -lint ${scanner_app}/Contents/Info.plist
 if (( ${#scanner_thin} > 1 )); then
   xcrun lipo -create ${scanner_thin[@]} -output ${scanner_path}
   xcrun lipo ${scanner_path} -verify_arch arm64 x86_64
@@ -513,7 +532,10 @@ else
   ditto ${scanner_thin[1]} ${scanner_path}
 fi
 chmod 0755 ${scanner_path}
-sign_macho ${scanner_path} ${bundle_identifier}.scanner ${packaging_dir}/ScannerHelper.entitlements
+codesign --force --sign ${identity} --options runtime ${timestamp_arguments[@]} \
+  --entitlements ${packaging_dir}/ScannerHelper.entitlements \
+  --identifier ${bundle_identifier}.scanner \
+  ${scanner_app}
 
 signer_project=${packaging_dir}/HybridSigner/KeepVaultMac.HybridSigner.csproj
 (
@@ -541,7 +563,7 @@ signer_arguments=(
   --target ${macos_dir}/Native/libargon2_ref.dylib
   --target ${macos_dir}/Native/libkalyna_ref.dylib
   --target ${macos_dir}/Native/libthreefish_ref.dylib
-  --target ${macos_dir}/Native/keep-vault-scanner
+  --target ${scanner_path}
 )
 if [[ -n ${pfx_password_service} ]]; then
   signer_arguments+=(--pfx-password-keychain-service ${pfx_password_service})
@@ -553,6 +575,24 @@ fi
   cd ${mac_project}
   run_hybrid_signer ${signer_arguments[@]}
 )
+
+# The helper's detached signatures cannot stay inside its own sealed bundle, so
+# they move into the outer bundle's signature tree. The directory name carries
+# no ".app" suffix on purpose: codesign would treat such a directory under
+# Resources as another nested bundle and try to sign it.
+scanner_signature_dir=${resources_dir}/HybridSignatures/Helpers/Keep\ Vault\ Scanner
+mkdir -p ${scanner_signature_dir}
+for scanner_sidecar_suffix in .sha3 .skein .khsig .sha3.khsig .skein.khsig; do
+  if [[ ! -f ${scanner_path}${scanner_sidecar_suffix} ]]; then
+    print -u2 "The scanner hybrid signature is incomplete: ${scanner_sidecar_suffix}"
+    exit 1
+  fi
+  mv -- ${scanner_path}${scanner_sidecar_suffix} \
+    ${scanner_signature_dir}/Keep\ Vault\ Scanner${scanner_sidecar_suffix}
+done
+
+# The nested bundle must still validate after its signatures were taken out.
+codesign --verify --strict --verbose=2 ${scanner_app}
 
 generate_cdhash_pins() {
   local signed_binary=$1

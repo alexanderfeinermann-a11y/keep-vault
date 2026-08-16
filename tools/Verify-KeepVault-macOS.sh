@@ -101,7 +101,7 @@ launcher=${app_path}/Contents/MacOS/Keep\ Vault\ Launcher
 core=${app_path}/Contents/MacOS/Keep\ Vault
 supervisor=${app_path}/Contents/MacOS/Keep\ Vault\ Supervisor
 native_dir=${app_path}/Contents/MacOS/Native
-required_native=(zpaq argon2 libargon2_ref.dylib libkalyna_ref.dylib libthreefish_ref.dylib keep-vault-scanner)
+required_native=(zpaq argon2 libargon2_ref.dylib libkalyna_ref.dylib libthreefish_ref.dylib)
 for required_path in ${launcher} ${core} ${supervisor} ${required_native[@]/#/${native_dir}/}; do
   if [[ ! -f ${required_path} || -L ${required_path} ]]; then
     print -u2 "Required executable component is missing or a symbolic link: ${required_path}"
@@ -222,7 +222,22 @@ extract_entitlements ${launcher} ${launcher_entitlements}
 extract_entitlements ${native_dir}/zpaq ${zpaq_entitlements}
 extract_entitlements ${native_dir}/argon2 ${argon_entitlements}
 extract_entitlements ${supervisor} ${supervisor_entitlements}
-extract_entitlements ${native_dir}/keep-vault-scanner ${scanner_entitlements}
+# The scanner is a nested application, not a bare tool: macOS only grants
+# camera access to something it can name, and only a bundle has a name.
+scanner_app=${app_path}/Contents/Library/Helpers/Keep\ Vault\ Scanner.app
+scanner_binary=${scanner_app}/Contents/MacOS/Keep\ Vault\ Scanner
+if [[ ! -d ${scanner_app} || -L ${scanner_app} || ! -f ${scanner_binary} || -L ${scanner_binary} ]]; then
+  print -u2 "The nested scanner application is missing: ${scanner_app}"
+  exit 1
+fi
+if [[ $(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' ${scanner_app}/Contents/Info.plist) \
+    != de.michael-feinermann.keep-vault.scanner ]]; then
+  print -u2 'The nested scanner application has an unexpected bundle identifier.'
+  exit 1
+fi
+/usr/libexec/PlistBuddy -c 'Print :NSCameraUsageDescription' ${scanner_app}/Contents/Info.plist >/dev/null
+codesign --verify --strict --verbose=2 ${scanner_app}
+extract_entitlements ${scanner_binary} ${scanner_entitlements}
 
 # Keep Vault does not use the App Sandbox: it is mutually exclusive with the
 # integrity chain on macOS, because a sandboxed process is not served a file

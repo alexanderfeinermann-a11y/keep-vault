@@ -102,7 +102,10 @@ private final class ScanController: NSObject, AVCaptureMetadataOutputObjectsDele
 
             finished = true
             session.stopRunning()
-            FileHandle.standardOutput.write(Data((factor + "\n").utf8))
+            let delivered = sendFactor(factor, toSocketAt: replySocketPath)
+            if !delivered {
+                FileHandle.standardError.write(Data("Das Ergebnis konnte nicht zurueckgegeben werden.\n".utf8))
+            }
 
             // Overwrite the copy this process holds before it goes away. The
             // value still lives in the pipe and in the core, which locks it;
@@ -116,7 +119,7 @@ private final class ScanController: NSObject, AVCaptureMetadataOutputObjectsDele
                 }
             }
 
-            exit(0)
+            exit(delivered ? 0 : 5)
         }
     }
 
@@ -153,9 +156,8 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSWind
                     // record and only the user can change it. Collapsing both
                     // into one message sends people to the wrong remedy.
                     let statusAfter = describeAuthorization(AVCaptureDevice.authorizationStatus(for: .video))
-                    let detail = "Der Kamerazugriff wurde verweigert "
-                        + "(Status vorher: \(statusBefore), nachher: \(statusAfter)).\n"
-                    FileHandle.standardError.write(Data(detail.utf8))
+                    reportFailure("Der Kamerazugriff wurde verweigert "
+                        + "(Status vorher: \(statusBefore), nachher: \(statusAfter)).")
                     exit(3)
                 }
 
@@ -164,10 +166,10 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSWind
                     self.controller = controller
                     try controller.start()
                 } catch let failure as ScannerFailure {
-                    FileHandle.standardError.write(Data((failure.message + "\n").utf8))
+                    reportFailure(failure.message)
                     exit(4)
                 } catch {
-                    FileHandle.standardError.write(Data(("Der Scanner konnte nicht starten: \(error)\n").utf8))
+                    reportFailure("Der Scanner konnte nicht starten: \(error)")
                     exit(4)
                 }
             }
@@ -177,6 +179,74 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSWind
     func windowWillClose(_ notification: Notification) {
         controller?.cancel()
     }
+}
+
+/// Where the scanned factor is handed back. Set once from the command line
+/// before the capture session starts.
+private nonisolated(unsafe) var replySocketPath = ""
+
+/// Hands the scanned factor back to Keep Vault over a private Unix socket.
+///
+/// The helper is started through LaunchServices so that macOS treats it as its
+/// own application: that is what lets it hold the camera permission under its
+/// own name instead of borrowing one it cannot be given. A process launched
+/// that way has no pipe back to its caller, so the caller passes the path of a
+/// socket it already listens on, inside a directory only this user can enter.
+/// The value therefore never reaches the file system.
+/// Records a failure where the caller can actually read it.
+///
+/// Started through LaunchServices, this process has no stderr the caller can
+/// see, so a failure would otherwise be silent: the window never appears and
+/// Keep Vault waits for a factor that will never arrive. The reason is written
+/// beside the reply socket, in the private directory the caller created.
+private func reportFailure(_ message: String) {
+    FileHandle.standardError.write(Data((message + "\n").utf8))
+    guard !replySocketPath.isEmpty else { return }
+    let directory = (replySocketPath as NSString).deletingLastPathComponent
+    let path = (directory as NSString).appendingPathComponent("failure.txt")
+    try? message.write(toFile: path, atomically: true, encoding: .utf8)
+}
+
+private func sendFactor(_ factor: String, toSocketAt path: String) -> Bool {
+    let descriptor = socket(AF_UNIX, SOCK_STREAM, 0)
+    guard descriptor >= 0 else { return false }
+    defer { close(descriptor) }
+
+    var address = sockaddr_un()
+    address.sun_family = sa_family_t(AF_UNIX)
+    let pathBytes = Array(path.utf8)
+    let capacity = MemoryLayout.size(ofValue: address.sun_path)
+    guard pathBytes.count < capacity else { return false }
+    withUnsafeMutablePointer(to: &address.sun_path) { destination in
+        destination.withMemoryRebound(to: CChar.self, capacity: capacity) { raw in
+            for (index, byte) in pathBytes.enumerated() {
+                raw[index] = CChar(bitPattern: byte)
+            }
+            raw[pathBytes.count] = 0
+        }
+    }
+
+    let connected = withUnsafePointer(to: &address) { pointer in
+        pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { raw in
+            connect(descriptor, raw, socklen_t(MemoryLayout<sockaddr_un>.size))
+        }
+    }
+    guard connected == 0 else { return false }
+
+    var payload = Array((factor + "\n").utf8)
+    defer { memset_s(&payload, payload.count, 0, payload.count) }
+    var offset = 0
+    while offset < payload.count {
+        let written = payload.withUnsafeBytes { buffer in
+            write(descriptor, buffer.baseAddress!.advanced(by: offset), payload.count - offset)
+        }
+        if written <= 0 {
+            if errno == EINTR { continue }
+            return false
+        }
+        offset += written
+    }
+    return true
 }
 
 private func describeAuthorization(_ status: AVAuthorizationStatus) -> String {
@@ -193,12 +263,24 @@ private func describeAuthorization(_ status: AVAuthorizationStatus) -> String {
 private enum KeepVaultScanner {
     static func main() {
         let arguments = CommandLine.arguments
-        guard arguments.count >= 2, arguments[1] == "scan-factor" else {
-            FileHandle.standardError.write(Data("Usage: scan-factor <title>\n".utf8))
+        // Find the verb rather than trusting its position. LaunchServices may
+        // insert its own arguments, such as the -psn_ process serial number,
+        // ahead of the ones the caller passed, and a fixed index turns that
+        // into an immediate exit with no visible cause.
+        guard let verb = arguments.firstIndex(of: "scan-factor"),
+              arguments.count >= verb + 3 else {
+            FileHandle.standardError.write(Data("Usage: scan-factor <title> <reply-socket>\n".utf8))
             exit(64)
         }
 
-        let rawTitle = arguments.count > 2 ? arguments[2] : "QR-Code scannen"
+        let socketPath = arguments[verb + 2]
+        guard socketPath.hasPrefix("/"), socketPath.count < 104 else {
+            FileHandle.standardError.write(Data("Ungueltiger Rueckgabepfad.\n".utf8))
+            exit(64)
+        }
+        replySocketPath = socketPath
+
+        let rawTitle = arguments[verb + 1]
         guard rawTitle.count <= 256,
               !rawTitle.unicodeScalars.contains(where: { $0.properties.generalCategory == .control }) else {
             FileHandle.standardError.write(Data("Ungueltiger Fenstertitel.\n".utf8))
