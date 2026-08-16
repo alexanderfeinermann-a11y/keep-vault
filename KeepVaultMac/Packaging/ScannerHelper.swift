@@ -48,6 +48,19 @@ private final class ScanController: NSObject, AVCaptureMetadataOutputObjectsDele
         super.init()
     }
 
+    /// Puts the window on screen before the camera is requested.
+    ///
+    /// macOS attaches the camera prompt to the asking application. A process
+    /// with nothing on screen has nothing to attach it to, and the request is
+    /// recorded as refused without the user ever being asked.
+    func presentWindow() {
+        let placeholder = NSView(frame: window.contentLayoutRect)
+        placeholder.wantsLayer = true
+        placeholder.layer?.backgroundColor = NSColor.black.cgColor
+        window.contentView = placeholder
+        window.makeKeyAndOrderFront(nil)
+    }
+
     func start() throws {
         guard let device = AVCaptureDevice.default(for: .video) else {
             throw ScannerFailure(message: "Es wurde keine Kamera gefunden.")
@@ -102,7 +115,7 @@ private final class ScanController: NSObject, AVCaptureMetadataOutputObjectsDele
 
             finished = true
             session.stopRunning()
-            let delivered = sendFactor(factor, toSocketAt: replySocketPath)
+            let delivered = sendFactor(factor, over: replyDescriptor)
             if !delivered {
                 FileHandle.standardError.write(Data("Das Ergebnis konnte nicht zurueckgegeben werden.\n".utf8))
             }
@@ -146,6 +159,15 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSWind
         // Ask explicitly rather than letting the first capture attempt trigger
         // the prompt, so a refusal is reported cleanly instead of appearing as
         // a camera that never produces frames.
+        // Put a window on screen before asking. macOS attaches the camera
+        // prompt to the asking application, and an accessory process with
+        // nothing visible has nothing to attach it to — the request was
+        // recorded as refused without the user ever seeing it.
+        NSApplication.shared.setActivationPolicy(.regular)
+        NSApplication.shared.activate(ignoringOtherApps: true)
+        controller = ScanController(title: title)
+        controller?.presentWindow()
+
         let statusBefore = describeAuthorization(AVCaptureDevice.authorizationStatus(for: .video))
         AVCaptureDevice.requestAccess(for: .video) { granted in
             DispatchQueue.main.async {
@@ -162,9 +184,7 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSWind
                 }
 
                 do {
-                    let controller = ScanController(title: self.title)
-                    self.controller = controller
-                    try controller.start()
+                    try self.controller?.start()
                 } catch let failure as ScannerFailure {
                     reportFailure(failure.message)
                     exit(4)
@@ -184,6 +204,10 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSWind
 /// Where the scanned factor is handed back. Set once from the command line
 /// before the capture session starts.
 private nonisolated(unsafe) var replySocketPath = ""
+
+/// The open connection back to Keep Vault, established before the camera is
+/// touched so a failure to reach the caller is reported instead of scanned for.
+private nonisolated(unsafe) var replyDescriptor: Int32 = -1
 
 /// Hands the scanned factor back to Keep Vault over a private Unix socket.
 ///
@@ -207,16 +231,18 @@ private func reportFailure(_ message: String) {
     try? message.write(toFile: path, atomically: true, encoding: .utf8)
 }
 
-private func sendFactor(_ factor: String, toSocketAt path: String) -> Bool {
+private func connectReply(to path: String) -> Int32 {
     let descriptor = socket(AF_UNIX, SOCK_STREAM, 0)
-    guard descriptor >= 0 else { return false }
-    defer { close(descriptor) }
+    guard descriptor >= 0 else { return -1 }
 
     var address = sockaddr_un()
     address.sun_family = sa_family_t(AF_UNIX)
     let pathBytes = Array(path.utf8)
     let capacity = MemoryLayout.size(ofValue: address.sun_path)
-    guard pathBytes.count < capacity else { return false }
+    guard pathBytes.count < capacity else {
+        close(descriptor)
+        return -1
+    }
     withUnsafeMutablePointer(to: &address.sun_path) { destination in
         destination.withMemoryRebound(to: CChar.self, capacity: capacity) { raw in
             for (index, byte) in pathBytes.enumerated() {
@@ -231,8 +257,36 @@ private func sendFactor(_ factor: String, toSocketAt path: String) -> Bool {
             connect(descriptor, raw, socklen_t(MemoryLayout<sockaddr_un>.size))
         }
     }
-    guard connected == 0 else { return false }
+    guard connected == 0 else {
+        close(descriptor)
+        return -1
+    }
+    return descriptor
+}
 
+/// Ends the scan when Keep Vault lets go of the connection.
+///
+/// The helper is opened as an application, so the caller cannot terminate it:
+/// the process it started was `open`, which exits immediately. The connection
+/// is therefore the link between them. When the user cancels or the scan times
+/// out, Keep Vault closes its end, the read below returns end-of-file, and the
+/// camera is released instead of staying live behind a window nobody is
+/// watching.
+private func exitWhenCallerDisconnects(_ descriptor: Int32) {
+    DispatchQueue.global(qos: .utility).async {
+        var byte: UInt8 = 0
+        while true {
+            let count = read(descriptor, &byte, 1)
+            if count < 0 && errno == EINTR { continue }
+            if count <= 0 {
+                exit(2)
+            }
+        }
+    }
+}
+
+private func sendFactor(_ factor: String, over descriptor: Int32) -> Bool {
+    guard descriptor >= 0 else { return false }
     var payload = Array((factor + "\n").utf8)
     defer { memset_s(&payload, payload.count, 0, payload.count) }
     var offset = 0
@@ -286,6 +340,13 @@ private enum KeepVaultScanner {
             FileHandle.standardError.write(Data("Ungueltiger Fenstertitel.\n".utf8))
             exit(64)
         }
+
+        replyDescriptor = connectReply(to: socketPath)
+        guard replyDescriptor >= 0 else {
+            reportFailure("Die Verbindung zu Keep Vault kam nicht zustande.")
+            exit(5)
+        }
+        exitWhenCallerDisconnects(replyDescriptor)
 
         let application = NSApplication.shared
         let delegate = ApplicationDelegate(title: rawTitle)

@@ -27,14 +27,18 @@ namespace KalynaArchiver.Gui;
 internal static class MacScannerBroker
 {
     /// <summary>
-    /// The helper sits beside the other native tools, under the same seal and
-    /// the same dual signature.
+    /// The scanner is a nested application, not a plain tool.
     /// </summary>
     /// <remarks>
-    /// It used to be a nested helper application under Contents/Library/Helpers,
-    /// which is what the App Sandbox required. Dropping the sandbox made it an
-    /// ordinary signed Mach-O next to zpaq and argon2, and it is verified the
-    /// same way they are.
+    /// A camera prompt has to name who is asking, and only a bundle has a name.
+    /// As a bare executable spawned by this app the request was attributed to
+    /// Keep Vault, which macOS cannot resolve to the bundle — the bundle's main
+    /// executable is the launcher, while the process that runs is the core — so
+    /// the camera was refused outright instead of being offered to the user.
+    ///
+    /// Do not flatten this back into Native/. It carries the same dual signature
+    /// as every other executable here and is verified the same way; the nesting
+    /// is what makes the permission grantable at all.
     /// </remarks>
     private const string HelperRelativePath =
         "Library/Helpers/Keep Vault Scanner.app/Contents/MacOS/Keep Vault Scanner";
@@ -69,8 +73,12 @@ internal static class MacScannerBroker
     private static TrustedNativeFileLease AcquireHelper()
     {
         string baseDirectory = Path.TrimEndingDirectorySeparator(Path.GetFullPath(AppContext.BaseDirectory));
-        string contents = Path.GetDirectoryName(baseDirectory)
-            ?? throw new InvalidOperationException("The scanner helper is only available inside the application bundle.");
+        string? contents = Path.GetDirectoryName(baseDirectory);
+        if (contents is null || !string.Equals(Path.GetFileName(contents), "Contents", StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException("The scanner helper is only available inside the application bundle.");
+        }
+
         string executable = Path.Combine(contents, HelperRelativePath.Replace('/', Path.DirectorySeparatorChar));
         if (!File.Exists(executable) || File.ResolveLinkTarget(executable, returnFinalTarget: false) is not null)
         {
@@ -152,6 +160,11 @@ internal static class MacScannerBroker
                     : "Der Scanner konnte nicht gestartet werden.");
             }
 
+            // The helper connects before it touches the camera, so this both
+            // proves it started and gives the only handle there is on it: it was
+            // opened as an application, and the process actually started here
+            // was `open`, which is already gone. Dropping this connection is how
+            // a cancelled scan reaches the helper and releases the camera.
             using Socket reply = await AcceptOrExplainAsync(listener, replyDirectory, timeout.Token)
                 .ConfigureAwait(false);
             byte[] buffer = new byte[MaxReplyCharacters];
@@ -179,6 +192,19 @@ internal static class MacScannerBroker
                 CryptographicOperations.ZeroMemory(buffer);
             }
 
+            if (output.Length == 0)
+            {
+                // The helper hung up without sending anything. It connects
+                // before it touches the camera, so this is the shape every
+                // failure after that point takes: the reason it left is in the
+                // file beside the socket, and reporting "invalid code" instead
+                // would send the user looking at their key sheet.
+                string reason = ReadFailure(replyDirectory);
+                return reason.Length > 0
+                    ? new ScanResult(false, null, reason)
+                    : new ScanResult(Cancelled: true, Factor: null, Failure: null);
+            }
+
             if (output.Length != PasswordKeyService.GeneratedPasswordLength || !output.All(Uri.IsHexDigit))
             {
                 return new ScanResult(false, null, "Der gescannte Code ist kein gültiger Schlüsselfaktor.");
@@ -188,12 +214,12 @@ internal static class MacScannerBroker
         }
         catch (OperationCanceledException)
         {
-            TryStop(process);
+            // The listener and any accepted connection are disposed on the way
+            // out, which is what tells the helper to stop.
             return new ScanResult(Cancelled: true, Factor: null, Failure: null);
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
-            TryStop(process);
             return new ScanResult(false, null, $"{exception.GetType().Name}: {exception.Message}");
         }
         finally
@@ -206,6 +232,19 @@ internal static class MacScannerBroker
             catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
             {
             }
+        }
+    }
+
+    private static string ReadFailure(string replyDirectory)
+    {
+        string failurePath = Path.Combine(replyDirectory, "failure.txt");
+        try
+        {
+            return File.Exists(failurePath) ? File.ReadAllText(failurePath).Trim() : string.Empty;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            return string.Empty;
         }
     }
 
@@ -245,18 +284,4 @@ internal static class MacScannerBroker
         }
     }
 
-    private static void TryStop(Process? process)
-    {
-        try
-        {
-            if (process is { HasExited: false })
-            {
-                process.Kill(entireProcessTree: true);
-            }
-        }
-        catch (Exception exception) when (exception is InvalidOperationException or NotSupportedException)
-        {
-            // The helper already exited; nothing to stop.
-        }
-    }
 }
