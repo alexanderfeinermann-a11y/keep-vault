@@ -36,11 +36,13 @@ internal static partial class MacComprehensiveTests
             ("signed native trust and tamper rejection", TestNativeTrustAsync),
             ("SHA3, Skein, Kalyna and Threefish reference vectors", TestPrimitiveVectorsAsync),
             ("ML-DSA-87 managed/reference interoperability", TestMldsaInteropAsync),
+            ("randomised differential testing against every reference library", TestReferenceDifferentialAsync),
             ("Argon2id fixed 1 GiB profile and independent equivalence", TestArgon2Async),
             ("ZPAQ levels, streaming, traversal and malformed corpus", TestZpaqAsync),
             ("v7 dual-suite roundtrip and manipulation rejection", TestContainersAsync),
             ("KPAR2-v2 repair, authentication and transplantation rejection", TestRecoveryAsync),
             ("cryptographic erase ordering and hard-link refusal", TestCryptographicEraseAsync),
+            ("verified original deletion refuses on any mismatch", TestVerifiedOriginalDeletionAsync),
             // The GUI groups run last: they drive the real window through
             // Avalonia's headless backend and feed the shared entropy pools
             // thousands of pointer samples, which the earlier groups should not
@@ -436,6 +438,228 @@ internal static partial class MacComprehensiveTests
         finally
         {
             Zero(publicKey, privateKey, message, managedSignature, referenceSignature);
+        }
+
+        return Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// Compares every primitive the app computes in managed code against its
+    /// official reference implementation, over randomised inputs.
+    /// </summary>
+    /// <remarks>
+    /// Fixed known-answer vectors prove a primitive agrees at a handful of
+    /// points. They do not catch the failures that actually occur in practice:
+    /// mishandled block boundaries, a wrong rate, incremental updates that
+    /// disagree with the one-shot call, or lengths that only go wrong past a
+    /// buffer size. Randomised differential testing across those boundaries
+    /// does, and it matters most here because SHA3-512 and Skein-1024 come from
+    /// Bouncy Castle rather than from the references — every container tag,
+    /// integrity manifest and key-derivation pre-hash depends on that library
+    /// being right.
+    ///
+    /// ZPAQ is deliberately absent: its pipeline was adapted for this app's
+    /// encryption, so stock zpaq is not a valid oracle for it. Its behaviour is
+    /// covered instead by the round-trip, traversal and malformed-corpus group.
+    /// </remarks>
+    /// <summary>
+    /// Covers the gate that guards deleting a user's only copy of a file.
+    /// </summary>
+    /// <remarks>
+    /// The archiving option deletes originals only after the archive has been
+    /// extracted again and compared byte for byte. What matters is not that the
+    /// happy path works but that every way the comparison can fail actually
+    /// blocks the deletion, so each failure mode is provoked deliberately: a
+    /// changed byte, a file the archive lost, and a file the archive gained.
+    /// </remarks>
+    private static async Task TestVerifiedOriginalDeletionAsync()
+    {
+        string root = CreateTempRoot("keep-vault-delete-verify-");
+        try
+        {
+            string originals = Path.Combine(root, "originals");
+            string extracted = Path.Combine(root, "extracted");
+            Directory.CreateDirectory(originals);
+            Directory.CreateDirectory(extracted);
+
+            string firstName = "first.bin";
+            string secondName = "second.bin";
+            byte[] first = RandomNumberGenerator.GetBytes(64 * 1024);
+            byte[] second = RandomNumberGenerator.GetBytes(4096);
+            await File.WriteAllBytesAsync(Path.Combine(originals, firstName), first).ConfigureAwait(false);
+            await File.WriteAllBytesAsync(Path.Combine(originals, secondName), second).ConfigureAwait(false);
+
+            string[] inputs =
+            [
+                Path.Combine(originals, firstName),
+                Path.Combine(originals, secondName),
+            ];
+
+            // A faithful extraction must be accepted.
+            await File.WriteAllBytesAsync(Path.Combine(extracted, firstName), first).ConfigureAwait(false);
+            await File.WriteAllBytesAsync(Path.Combine(extracted, secondName), second).ConfigureAwait(false);
+            MacOriginalDeletionService.VerificationResult match =
+                await MacOriginalDeletionService.VerifyExtractionAsync(inputs, extracted, null, CancellationToken.None)
+                    .ConfigureAwait(false);
+            Require(match.Verified, $"A faithful extraction was rejected: {match.Failure}");
+            Require(match.FilesCompared == 2, "The comparison did not cover both files.");
+            Require(match.BytesCompared == first.Length + second.Length, "The compared byte count is wrong.");
+
+            // One flipped byte must block deletion.
+            byte[] altered = first.ToArray();
+            altered[altered.Length / 2] ^= 0x01;
+            await File.WriteAllBytesAsync(Path.Combine(extracted, firstName), altered).ConfigureAwait(false);
+            MacOriginalDeletionService.VerificationResult flipped =
+                await MacOriginalDeletionService.VerifyExtractionAsync(inputs, extracted, null, CancellationToken.None)
+                    .ConfigureAwait(false);
+            Require(!flipped.Verified, "A single flipped byte was accepted as a faithful extraction.");
+
+            // A file the archive lost must block deletion.
+            await File.WriteAllBytesAsync(Path.Combine(extracted, firstName), first).ConfigureAwait(false);
+            File.Delete(Path.Combine(extracted, secondName));
+            MacOriginalDeletionService.VerificationResult missing =
+                await MacOriginalDeletionService.VerifyExtractionAsync(inputs, extracted, null, CancellationToken.None)
+                    .ConfigureAwait(false);
+            Require(!missing.Verified, "A dropped file was accepted as a faithful extraction.");
+
+            // A file the archive gained must block deletion too: it means the
+            // extraction is not the set that was archived.
+            await File.WriteAllBytesAsync(Path.Combine(extracted, secondName), second).ConfigureAwait(false);
+            await File.WriteAllBytesAsync(Path.Combine(extracted, "unexpected.bin"), second).ConfigureAwait(false);
+            MacOriginalDeletionService.VerificationResult extra =
+                await MacOriginalDeletionService.VerifyExtractionAsync(inputs, extracted, null, CancellationToken.None)
+                    .ConfigureAwait(false);
+            Require(!extra.Verified, "An unexpected extra file was accepted as a faithful extraction.");
+
+            // A truncated file has the right name and wrong length.
+            File.Delete(Path.Combine(extracted, "unexpected.bin"));
+            await File.WriteAllBytesAsync(
+                Path.Combine(extracted, secondName),
+                second.AsSpan(0, second.Length - 1).ToArray()).ConfigureAwait(false);
+            MacOriginalDeletionService.VerificationResult truncated =
+                await MacOriginalDeletionService.VerifyExtractionAsync(inputs, extracted, null, CancellationToken.None)
+                    .ConfigureAwait(false);
+            Require(!truncated.Verified, "A truncated file was accepted as a faithful extraction.");
+
+            // Every original must still be present: no failure path deletes.
+            Require(File.Exists(inputs[0]) && File.Exists(inputs[1]), "A rejected comparison removed an original.");
+
+            Zero(first, second, altered);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    private static Task TestReferenceDifferentialAsync()
+    {
+        string sha3ReferencePath = Environment.GetEnvironmentVariable("KEEPVAULT_SHA3_REFERENCE")
+            ?? Path.Combine(AppContext.BaseDirectory, "Native", "libsha3_ref.dylib");
+        Require(File.Exists(sha3ReferencePath), $"SHA3-512 reference adapter is missing: {sha3ReferencePath}");
+        using var sha3 = new KeepVaultMac.Tests.Sha3Reference(sha3ReferencePath);
+
+        Require(
+            sha3.BlockSize == 72,
+            $"The SHA3-512 reference reports a rate of {sha3.BlockSize} rather than 72 bytes.");
+
+        // Lengths chosen to straddle the SHA3-512 rate (72), the Skein-1024
+        // block (128) and the cipher block sizes, plus their neighbours, since
+        // that is where padding and buffering mistakes surface.
+        int[] lengths =
+        [
+            0, 1, 63, 64, 65, 71, 72, 73, 127, 128, 129, 143, 144, 145,
+            255, 256, 257, 1023, 1024, 1025, 4095, 4096,
+        ];
+
+        foreach (int length in lengths)
+        {
+            byte[] message = RandomNumberGenerator.GetBytes(length);
+            // HMAC accepts any key length, and varying it exercises the
+            // shorter-than-block, exactly-block and longer-than-block paths.
+            // Skein's keyed mode takes a fixed 128-byte key.
+            byte[] key = RandomNumberGenerator.GetBytes(length % 97 == 0 ? 64 : (length % 97) + 1);
+            byte[] skeinKey = RandomNumberGenerator.GetBytes(128);
+            try
+            {
+                Require(
+                    FixedEqual(Sha3_512Compat.HashData(message), sha3.Hash(message)),
+                    $"Managed SHA3-512 disagrees with the FIPS 202 reference at {length} bytes.");
+
+                using (var incremental = new Sha3_512Incremental())
+                {
+                    // Split at an offset that is not a multiple of the rate, so
+                    // a buffering error cannot hide behind aligned chunks.
+                    int split = length / 3;
+                    incremental.AppendData(message.AsSpan(0, split));
+                    incremental.AppendData(message.AsSpan(split));
+                    Require(
+                        FixedEqual(incremental.GetHashAndReset(), sha3.Hash(message)),
+                        $"Incremental SHA3-512 disagrees with the reference at {length} bytes.");
+                }
+
+                using (var mac = new HmacSha3_512(key))
+                {
+                    mac.AppendData(message);
+                    Require(
+                        FixedEqual(mac.GetHashAndReset(), sha3.Hmac(key, message)),
+                        $"Managed HMAC-SHA3-512 disagrees with the reference at {length} bytes.");
+                }
+
+                Require(
+                    FixedEqual(Skein1024Digest.HashData(message), NativeThreefish.HashSkein1024Reference(message)),
+                    $"Managed Skein-1024 disagrees with the Skein reference at {length} bytes.");
+
+                Require(
+                    FixedEqual(BouncySkeinMac(skeinKey, message), NativeThreefish.MacSkein1024Reference(skeinKey, message)),
+                    $"Managed Skein-1024 MAC disagrees with the Skein reference at {length} bytes.");
+            }
+            finally
+            {
+                Zero(message, key, skeinKey);
+            }
+        }
+
+        // Both ciphers run in counter mode, so a disagreement in the block
+        // function or in the counter's byte order shows up as diverging
+        // keystream. Sizes span the parallel-processing threshold.
+        foreach (int length in new[] { 1, 63, 64, 65, 4096, 1 << 20 })
+        {
+            byte[] plaintext = RandomNumberGenerator.GetBytes(length);
+            byte[] kalynaKey = RandomNumberGenerator.GetBytes(64);
+            byte[] kalynaNonce = RandomNumberGenerator.GetBytes(64);
+            byte[] threefishKey = RandomNumberGenerator.GetBytes(128);
+            byte[] threefishTweak = RandomNumberGenerator.GetBytes(16);
+            byte[] threefishNonce = RandomNumberGenerator.GetBytes(128);
+            byte[] kalynaOut = new byte[length];
+            byte[] kalynaBack = new byte[length];
+            byte[] threefishOut = new byte[length];
+            byte[] threefishBack = new byte[length];
+            try
+            {
+                NativeKalyna.XCryptCtr512(kalynaKey, kalynaNonce, plaintext, kalynaOut, length);
+                NativeKalyna.XCryptCtr512(kalynaKey, kalynaNonce, kalynaOut, kalynaBack, length);
+                Require(
+                    FixedEqual(plaintext, kalynaBack),
+                    $"Kalyna-512/512 counter mode is not self-inverse at {length} bytes.");
+                Require(
+                    !FixedEqual(plaintext, kalynaOut) || length == 0,
+                    $"Kalyna-512/512 produced its own plaintext as ciphertext at {length} bytes.");
+
+                NativeThreefish.XCryptCtr1024(threefishKey, threefishTweak, threefishNonce, plaintext, threefishOut, length);
+                NativeThreefish.XCryptCtr1024(threefishKey, threefishTweak, threefishNonce, threefishOut, threefishBack, length);
+                Require(
+                    FixedEqual(plaintext, threefishBack),
+                    $"Threefish-1024 counter mode is not self-inverse at {length} bytes.");
+                Require(
+                    !FixedEqual(plaintext, threefishOut) || length == 0,
+                    $"Threefish-1024 produced its own plaintext as ciphertext at {length} bytes.");
+            }
+            finally
+            {
+                Zero(plaintext, kalynaKey, kalynaNonce, threefishKey, threefishTweak, threefishNonce,
+                    kalynaOut, kalynaBack, threefishOut, threefishBack);
+            }
         }
 
         return Task.CompletedTask;

@@ -308,6 +308,30 @@ public sealed partial class MainWindow
             "kalynaAvailable" => en ? "Kalyna reference library: available" : "Kalyna-Referenzbibliothek: verfügbar",
             "kalynaMissing" => en ? "Kalyna reference library: unavailable" : "Kalyna-Referenzbibliothek: nicht verfügbar",
             "threefishAvailable" => en ? "Threefish reference library: available" : "Threefish-Referenzbibliothek: verfügbar",
+            "archiveCreatedOriginalsDeleted" => en
+                ? "Archive created; the originals were deleted after a verified byte-for-byte comparison."
+                : "Archiv erstellt; die Originale wurden nach geprüftem bitweisem Abgleich gelöscht.",
+            "verifyingBeforeDelete" => en
+                ? "Extracting the archive again and comparing it with the originals ..."
+                : "Archiv wird erneut entpackt und mit den Originalen verglichen …",
+            "verifyExtractFailed" => en
+                ? "The archive could not be extracted for verification. No original was deleted."
+                : "Das Archiv konnte zur Prüfung nicht entpackt werden. Es wurde keine Originaldatei gelöscht.",
+            "verifyMismatch" => en
+                ? "The archive does not reproduce the originals byte for byte. No original was deleted."
+                : "Das Archiv gibt die Originale nicht bitgenau wieder. Es wurde keine Originaldatei gelöscht.",
+            "verifyMatched" => en
+                ? "Byte-for-byte comparison passed: {0} files, {1} bytes."
+                : "Bitweiser Abgleich bestanden: {0} Dateien, {1} Bytes.",
+            "deleteOriginalsFailed" => en
+                ? "The comparison passed but an original could not be deleted."
+                : "Der Abgleich war erfolgreich, aber eine Originaldatei konnte nicht gelöscht werden.",
+            "originalsDeleted" => en
+                ? "The originals were deleted; only the archive remains."
+                : "Die Originale wurden gelöscht; es verbleibt nur das Archiv.",
+            "verifyCleanupFailed" => en
+                ? "The temporary verification copy could not be removed"
+                : "Die temporäre Prüfkopie konnte nicht entfernt werden",
             "scanFactorATitle" => en ? "Scan factor A" : "Faktor A scannen",
             "scanFactorBTitle" => en ? "Scan factor B" : "Faktor B scannen",
             "scanSucceeded" => en

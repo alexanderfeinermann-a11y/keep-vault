@@ -214,6 +214,12 @@
                                Classes="muted" FontSize="12" TextWrapping="Wrap" />
                   </Grid>
                 </Border>
+                <CheckBox x:Name="DeleteOriginalsBox"
+                          Content="Originaldateien nach geprüftem Abgleich löschen"
+                          IsChecked="False" />
+                <TextBlock x:Name="DeleteOriginalsHint"
+                           Text="Das Archiv wird danach erneut entpackt und bitweise mit den Originalen verglichen. Gelöscht wird erst bei vollständiger Übereinstimmung."
+                           Classes="muted" FontSize="12" TextWrapping="Wrap" />
                 <Button x:Name="CreateArchiveButton" Content="Archiv speichern" HorizontalAlignment="Left" Click="CreateArchive_Click" />
               </StackPanel>
 

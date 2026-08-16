@@ -117,6 +117,17 @@ build_architecture() {
     ${repo_root}/external/Skein-reference/NIST/CD/Reference_Implementation/skein_block.c \
     ${link_flags[@]}
 
+  # SHA3-512 reference, for differential testing against the Bouncy Castle
+  # implementation the app uses in production. Verification aid only; it is
+  # never placed in the shipped bundle.
+  ${cc} ${common_flags[@]} -dynamiclib \
+    -I${reference_dir}/ref \
+    -install_name @rpath/libsha3_ref.dylib \
+    -o ${output_dir}/libsha3_ref.dylib \
+    ${repo_root}/native/sha3_ref_export.c \
+    ${reference_dir}/ref/fips202.c \
+    ${link_flags[@]}
+
   ${cc} ${common_flags[@]} -dynamiclib -DDILITHIUM_MODE=5 \
     -I${reference_dir}/ref \
     -install_name @rpath/libmldsa87_ref.dylib \
@@ -157,7 +168,7 @@ build_architecture x86_64 osx-x64
 
 universal_dir=${output_root}/osx-universal
 mkdir -p -- ${universal_dir}
-artifacts=(zpaq argon2 libargon2_ref.dylib libkalyna_ref.dylib libmldsa87_ref.dylib libthreefish_ref.dylib)
+artifacts=(zpaq argon2 libargon2_ref.dylib libkalyna_ref.dylib libmldsa87_ref.dylib libsha3_ref.dylib libthreefish_ref.dylib)
 for artifact_name in ${artifacts[@]}; do
   xcrun lipo -create \
     ${output_root}/osx-arm64/${artifact_name} \

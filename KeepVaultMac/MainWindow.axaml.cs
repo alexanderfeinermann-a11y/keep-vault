@@ -591,10 +591,22 @@ public sealed partial class MainWindow : Window, IDisposable
                 await _recovery.CreateAsync(archivePath, Progress(), _lifetime.Token);
             }
 
+            // Deleting the originals is gated on proving the archive reproduces
+            // them, so it happens before the secrets are cleared: an encrypted
+            // archive can only be read back with the factors still in hand.
+            bool deleteOriginals = DeleteOriginalsBox.IsChecked == true;
+            bool originalsDeleted = false;
+            if (deleteOriginals)
+            {
+                originalsDeleted = await VerifyAndDeleteOriginalsAsync(archivePath, inputs, encrypted);
+            }
+
             createdArchive = null;
             ClearCreateSecrets();
             Log($"{T("done")}: {archivePath}");
-            await InfoAsync(T("archiveCreated"));
+            await InfoAsync(deleteOriginals && originalsDeleted
+                ? T("archiveCreatedOriginalsDeleted")
+                : T("archiveCreated"));
         }
         catch (OperationCanceledException) when (_lifetime.IsCancellationRequested)
         {
@@ -1001,6 +1013,106 @@ public sealed partial class MainWindow : Window, IDisposable
     private void ClearCreateSecrets_Click(object? sender, RoutedEventArgs e) => ClearCreateSecrets();
 
     private void ClearExtractSecrets_Click(object? sender, RoutedEventArgs e) => ClearExtractSecrets();
+
+    /// <summary>
+    /// Extracts the finished archive again, compares it byte for byte with the
+    /// inputs, and only then deletes the originals.
+    /// </summary>
+    /// <remarks>
+    /// The order is the whole point. A compression or encryption fault, a
+    /// truncated write or a silently dropped input would all still report a
+    /// successful archive, and for this kind of tool the loss would surface
+    /// only years later when the archive is finally needed. So the archive that
+    /// was actually written is read back, and anything short of a complete
+    /// match leaves every original in place.
+    ///
+    /// The extraction goes to a private directory that is removed afterwards,
+    /// so the round trip never leaves a second plaintext copy behind.
+    /// </remarks>
+    private async Task<bool> VerifyAndDeleteOriginalsAsync(string archivePath, string[] inputs, bool encrypted)
+    {
+        string verifyRoot = Directory.CreateTempSubdirectory("keep-vault-verify-").FullName;
+        try
+        {
+            File.SetUnixFileMode(
+                verifyRoot,
+                UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+            Log(T("verifyingBeforeDelete"));
+            OperationStatusText.Text = T("verifyingBeforeDelete");
+
+            ProcessResult extraction = encrypted
+                ? await ExtractEncryptedForVerificationAsync(archivePath, verifyRoot)
+                : await _zpaq.ExtractAsync(archivePath, verifyRoot, Progress(), _lifetime.Token);
+            if (!extraction.Succeeded)
+            {
+                Log(extraction.StandardError);
+                await ErrorAsync(T("verifyExtractFailed"));
+                return false;
+            }
+
+            MacOriginalDeletionService.VerificationResult verification =
+                await MacOriginalDeletionService.VerifyExtractionAsync(
+                    inputs,
+                    verifyRoot,
+                    Progress(),
+                    _lifetime.Token);
+            if (!verification.Verified)
+            {
+                Log($"{T("verifyMismatch")} — {verification.Failure}");
+                await ErrorAsync(T("verifyMismatch"));
+                return false;
+            }
+
+            Log(string.Format(
+                CultureInfo.CurrentCulture,
+                T("verifyMatched"),
+                verification.FilesCompared,
+                verification.BytesCompared));
+
+            IReadOnlyList<string> failures = MacOriginalDeletionService.DeleteOriginals(inputs);
+            if (failures.Count > 0)
+            {
+                Log($"{T("deleteOriginalsFailed")} — {string.Join("; ", failures)}");
+                await ErrorAsync(T("deleteOriginalsFailed"));
+                return false;
+            }
+
+            InputList.Items.Clear();
+            ClearInputStorageAccess();
+            Log(T("originalsDeleted"));
+            return true;
+        }
+        finally
+        {
+            // The extracted copy is plaintext regardless of how the archive was
+            // encrypted, so it is removed whether the comparison succeeded or
+            // not.
+            try
+            {
+                Directory.Delete(verifyRoot, recursive: true);
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+                Log($"{T("verifyCleanupFailed")} — {verifyRoot}");
+            }
+        }
+    }
+
+    private async Task<ProcessResult> ExtractEncryptedForVerificationAsync(string archivePath, string outputRoot)
+    {
+        return await _zpaq.ExtractStreamingAsync(
+            (zpaqStream, cancellationToken) => _containers.DecryptToStreamAsync(
+                archivePath,
+                CreatePasswordBox.Text ?? string.Empty,
+                GeneratedPasswordFirstBox.Text ?? string.Empty,
+                GeneratedPasswordSecondBox.Text ?? string.Empty,
+                zpaqStream,
+                Progress(),
+                cancellationToken),
+            outputRoot,
+            Progress(),
+            _lifetime.Token);
+    }
 
     private async void ScanFirstFactor_Click(object? sender, RoutedEventArgs e)
         => await ScanFactorIntoAsync(ExtractGeneratedPasswordFirstBox, T("scanFactorATitle"));
