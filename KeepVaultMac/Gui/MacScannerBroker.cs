@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Net.Sockets;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Security.Cryptography;
 using KalynaArchiver.Services;
@@ -24,7 +25,7 @@ namespace KalynaArchiver.Gui;
 /// executable this app runs, and what it returns is validated again here so
 /// neither side depends on the other having done it.
 /// </remarks>
-internal static class MacScannerBroker
+internal static partial class MacScannerBroker
 {
     /// <summary>
     /// The scanner is a nested application, not a plain tool.
@@ -108,6 +109,7 @@ internal static class MacScannerBroker
         }
 
         using TrustedNativeFileLease scopedHelperLease = helperLease;
+        string helper = scopedHelperLease.Path;
         string helperBundle = Path.Combine(
             Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(Path.GetFullPath(AppContext.BaseDirectory)))!,
             HelperBundleRelativePath.Replace('/', Path.DirectorySeparatorChar));
@@ -167,6 +169,17 @@ internal static class MacScannerBroker
             // a cancelled scan reaches the helper and releases the camera.
             using Socket reply = await AcceptOrExplainAsync(listener, replyDirectory, timeout.Token)
                 .ConfigureAwait(false);
+
+            // Confirm the process on the other end is the helper that was just
+            // verified. The socket lives in a directory only this user can
+            // enter, so this is not about other accounts — it is about code
+            // already running as this user racing the helper to the socket and
+            // feeding a factor of its choosing into a recovery.
+            if (!IsExpectedPeer(reply, helper))
+            {
+                return new ScanResult(false, null,
+                    "Die Antwort kam nicht vom geprüften Scanner und wurde verworfen.");
+            }
             byte[] buffer = new byte[MaxReplyCharacters];
             int filled = 0;
             while (filled < buffer.Length)
@@ -233,6 +246,49 @@ internal static class MacScannerBroker
             {
             }
         }
+    }
+
+    private const int SolLocal = 0;
+    private const int LocalPeerPid = 0x002;
+    private const int MaximumPathBytes = 4096;
+
+    [LibraryImport("libc", EntryPoint = "getsockopt", SetLastError = true)]
+    private static partial int GetSocketOption(int descriptor, int level, int name, out int value, ref uint length);
+
+    [LibraryImport("libproc", EntryPoint = "proc_pidpath", SetLastError = true)]
+    private static partial int ProcessPath(int pid, Span<byte> buffer, uint size);
+
+    /// <summary>
+    /// Confirms the connected process is the verified helper.
+    /// </summary>
+    /// <remarks>
+    /// The peer is identified by the kernel, not by anything it says, and its
+    /// executable path is compared with the file whose signatures were checked
+    /// a moment ago. A different program answering on this socket is refused
+    /// rather than believed: what it would be supplying is one half of the key
+    /// to an archive.
+    /// </remarks>
+    private static bool IsExpectedPeer(Socket reply, string expectedExecutable)
+    {
+        uint length = sizeof(int);
+        if (GetSocketOption((int)reply.Handle, SolLocal, LocalPeerPid, out int peerPid, ref length) != 0
+            || peerPid <= 0)
+        {
+            return false;
+        }
+
+        Span<byte> buffer = stackalloc byte[MaximumPathBytes];
+        int written = ProcessPath(peerPid, buffer, MaximumPathBytes);
+        if (written <= 0)
+        {
+            return false;
+        }
+
+        string peerPath = Encoding.UTF8.GetString(buffer[..written]);
+        return string.Equals(
+            Path.GetFullPath(peerPath),
+            Path.GetFullPath(expectedExecutable),
+            StringComparison.Ordinal);
     }
 
     private static string ReadFailure(string replyDirectory)
