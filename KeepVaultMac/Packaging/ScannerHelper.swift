@@ -143,10 +143,19 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSWind
         // Ask explicitly rather than letting the first capture attempt trigger
         // the prompt, so a refusal is reported cleanly instead of appearing as
         // a camera that never produces frames.
+        let statusBefore = describeAuthorization(AVCaptureDevice.authorizationStatus(for: .video))
         AVCaptureDevice.requestAccess(for: .video) { granted in
             DispatchQueue.main.async {
                 guard granted else {
-                    FileHandle.standardError.write(Data("Der Kamerazugriff wurde verweigert.\n".utf8))
+                    // Report which of the two very different failures happened.
+                    // "Nicht entschieden" means macOS never asked the user and
+                    // refused on its own; "verweigert" means an answer is on
+                    // record and only the user can change it. Collapsing both
+                    // into one message sends people to the wrong remedy.
+                    let statusAfter = describeAuthorization(AVCaptureDevice.authorizationStatus(for: .video))
+                    let detail = "Der Kamerazugriff wurde verweigert "
+                        + "(Status vorher: \(statusBefore), nachher: \(statusAfter)).\n"
+                    FileHandle.standardError.write(Data(detail.utf8))
                     exit(3)
                 }
 
@@ -167,6 +176,16 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSWind
 
     func windowWillClose(_ notification: Notification) {
         controller?.cancel()
+    }
+}
+
+private func describeAuthorization(_ status: AVAuthorizationStatus) -> String {
+    switch status {
+    case .notDetermined: return "nicht entschieden"
+    case .restricted: return "durch Richtlinie gesperrt"
+    case .denied: return "verweigert"
+    case .authorized: return "erlaubt"
+    @unknown default: return "unbekannt"
     }
 }
 
