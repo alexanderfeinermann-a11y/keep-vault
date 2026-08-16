@@ -712,11 +712,15 @@ for launcher_arch in ${launcher_architectures[@]}; do
     object_files+=(${object_path})
     (( object_index += 1 ))
   done
+  # The rollback floor the launcher enforces against the machine-wide anchor.
+  launcher_version_source=${build_root}/KeepVaultBuildVersion.swift
+  print "enum KeepVaultBuild { static let version: UInt64 = ${build_version} }" > ${launcher_version_source}
   thin_launcher=${build_root}/Keep\ Vault\ Launcher-${launcher_arch}
   xcrun swiftc \
     -target ${launcher_arch}-apple-macos14.0 \
     -O -whole-module-optimization -parse-as-library \
     ${packaging_dir}/Launcher.swift ${build_root}/HybridPins.swift ${supervisor_apple_pins} \
+    ${launcher_version_source} \
     ${object_files[@]} \
     -framework AppKit -framework Security \
     -o ${thin_launcher}

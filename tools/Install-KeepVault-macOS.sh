@@ -218,5 +218,55 @@ APPLESCRIPT
   print "desktop_alias=${alias_path}"
 fi
 
+# Record this installation machine-wide so an older release cannot be put back
+# later. An old release keeps valid signatures for as long as the key lives, so
+# signature checks alone cannot tell "ours" from "ours, and known to be flawed".
+#
+# The record has to sit where this user cannot rewrite it, otherwise it stops
+# whoever it is meant to stop. That is the one part of the installation that
+# needs an administrator; everything else deliberately runs unprivileged.
+anchor_directory='/Library/Application Support/Keep Vault'
+anchor_path=${anchor_directory}/minimum-version
+installed_version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' ${destination}/Contents/Info.plist)
+if [[ ! ${installed_version} =~ '^[0-9]+$' ]]; then
+  print -u2 "The installed bundle has no numeric version: ${installed_version}"
+  exit 1
+fi
+
+recorded_version=0
+if [[ -f ${anchor_path} && ! -L ${anchor_path} ]]; then
+  recorded_version=$(<${anchor_path})
+  [[ ${recorded_version} =~ '^[0-9]+$' ]] || recorded_version=0
+fi
+
+if (( installed_version < recorded_version )); then
+  print -u2 "Refusing to install version ${installed_version} over the newer ${recorded_version} recorded on this machine."
+  exit 1
+fi
+
+if (( installed_version > recorded_version )) || [[ ! -f ${anchor_path} ]]; then
+  ANCHOR_DIRECTORY=${anchor_directory} ANCHOR_PATH=${anchor_path} ANCHOR_VERSION=${installed_version} \
+    osascript <<'APPLESCRIPT'
+set anchorDirectory to system attribute "ANCHOR_DIRECTORY"
+set anchorPath to system attribute "ANCHOR_PATH"
+set anchorVersion to system attribute "ANCHOR_VERSION"
+set commandText to "/bin/mkdir -p " & quoted form of anchorDirectory & ¬
+  " && /usr/sbin/chown root:wheel " & quoted form of anchorDirectory & ¬
+  " && /bin/chmod 0755 " & quoted form of anchorDirectory & ¬
+  " && /usr/bin/printf '%s' " & quoted form of anchorVersion & " > " & quoted form of anchorPath & ¬
+  " && /usr/sbin/chown root:wheel " & quoted form of anchorPath & ¬
+  " && /bin/chmod 0644 " & quoted form of anchorPath
+do shell script commandText with administrator privileges
+APPLESCRIPT
+  anchor_owner=$(stat -f '%u' ${anchor_path} 2>/dev/null || print -1)
+  if [[ ${anchor_owner} != 0 || $(<${anchor_path}) != ${installed_version} ]]; then
+    print -u2 'The machine-wide installation record could not be written; a rollback would go undetected.'
+    exit 1
+  fi
+  print "rollback_anchor=${anchor_path} (${installed_version})"
+else
+  print "rollback_anchor=${anchor_path} (unveraendert ${recorded_version})"
+fi
+
 print "installed_app=${destination}"
 [[ -z ${recovery_path} ]] || print "previous_version_recoverable_at=${recovery_path}"

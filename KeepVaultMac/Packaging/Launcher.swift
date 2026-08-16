@@ -504,6 +504,68 @@ private func replaceWithSuspendedCore(at path: String, openedCore: OpenedCore) t
     throw LauncherFailure(message: "Der gepruefte App-Core konnte nicht als suspendierter Prozess eingesetzt werden (Fehler \(spawnStatus)).")
 }
 
+
+/// The machine-wide record of the newest Keep Vault ever installed here.
+///
+/// Every signature check answers "were these bytes signed by us", and an old
+/// release answers yes for as long as the key lives. That is what makes a
+/// rollback work: an attacker who can write to /Applications reinstates an
+/// earlier, genuinely signed version and gets every flaw that was since fixed,
+/// with all signatures intact.
+///
+/// Nothing inside the bundle can prevent that, because whoever replaces the
+/// bundle replaces any floor it carries. The floor therefore lives outside it,
+/// in a directory owned by root, which an attacker holding only this user's
+/// rights can neither lower nor delete. Writing it is the one step of the
+/// installation that asks for an administrator.
+private let rollbackAnchorPath = "/Library/Application Support/Keep Vault/minimum-version"
+
+private func enforceRollbackFloor() throws {
+    let fileDescriptor = open(rollbackAnchorPath, O_RDONLY | O_CLOEXEC | O_NOFOLLOW_ANY)
+    guard fileDescriptor >= 0 else {
+        // No anchor yet: a first installation, or one made before anchoring
+        // existed. The directory is root-owned, so this user cannot have
+        // removed it to get here.
+        return
+    }
+    defer { close(fileDescriptor) }
+
+    var info = stat()
+    guard fstat(fileDescriptor, &info) == 0 else {
+        throw LauncherFailure(message: "Die Installationsmarke konnte nicht geprueft werden.")
+    }
+
+    // Only a root-owned, non-user-writable anchor carries any weight. One this
+    // user could rewrite would be no obstacle to an attacker holding the same
+    // rights, so an anchor that lost its ownership is treated as tampering
+    // rather than quietly trusted.
+    guard info.st_uid == 0,
+          (info.st_mode & (S_IWGRP | S_IWOTH)) == 0,
+          (info.st_mode & S_IFMT) == S_IFREG,
+          info.st_size > 0,
+          info.st_size <= 64 else {
+        throw LauncherFailure(message:
+            "Die Installationsmarke gehoert nicht mehr dem System und ist damit wertlos. "
+            + "Bitte Keep Vault mit Install-KeepVault-macOS.sh neu installieren.")
+    }
+
+    var buffer = [UInt8](repeating: 0, count: 64)
+    let count = read(fileDescriptor, &buffer, buffer.count)
+    guard count > 0,
+          let text = String(bytes: buffer[0..<count], encoding: .utf8),
+          let recorded = UInt64(text.trimmingCharacters(in: .whitespacesAndNewlines)) else {
+        throw LauncherFailure(message: "Die Installationsmarke ist unlesbar.")
+    }
+
+    guard KeepVaultBuild.version >= recorded else {
+        throw LauncherFailure(message:
+            "Diese Fassung von Keep Vault ist aelter als die zuletzt auf diesem Rechner "
+            + "installierte (Version \(KeepVaultBuild.version) gegenueber \(recorded)). "
+            + "Eine aeltere Fassung traegt gueltige Signaturen und kann bereits behobene "
+            + "Schwachstellen zurueckbringen, deshalb wird sie nicht gestartet.")
+    }
+}
+
 @main
 private enum KeepVaultLauncher {
     static func main() {
@@ -513,6 +575,8 @@ private enum KeepVaultLauncher {
                   bundleURL.resolvingSymlinksInPath().standardizedFileURL.path == bundleURL.path else {
                 throw LauncherFailure(message: "Das App-Bundle darf nicht ueber symbolische Links gestartet werden.")
             }
+
+            try enforceRollbackFloor()
 
             let outerRequirement = "identifier \"\(bundleIdentifier)\" and anchor apple generic and certificate leaf[subject.OU] = \"\(appleTeamIdentifier)\""
             try validateStaticCode(at: bundleURL, requirement: outerRequirement, nested: true)
