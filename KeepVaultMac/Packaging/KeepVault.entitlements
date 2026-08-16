@@ -3,26 +3,38 @@
 <!--
     Entitlements for the NativeAOT core.
 
-    The core is not the bundle's main executable: the launcher is, and it
-    establishes the sandbox with the actual capabilities (see
-    Launcher.entitlements) before replacing itself with the core through
-    posix_spawn with POSIX_SPAWN_SETEXEC. By the time the core image runs, a
-    sandbox already exists for the process, so the core must inherit it.
+    Keep Vault deliberately does not use the App Sandbox.
 
-    Declaring com.apple.security.app-sandbox here without inherit makes
-    libsystem_secinit try to create a fresh container for a process that is not
-    a bundle main executable; that fails and aborts the process on SIGTRAP
-    inside _libsecinit_appsandbox before any of our code runs.
+    The sandbox and this app's own integrity chain turned out to be mutually
+    exclusive on macOS. Only a process that owns its sandbox is served an open,
+    save or print panel; the core cannot own one, because the launcher verifies
+    it and then replaces itself with it, so the core runs as an inheriting
+    image. Delegating panels to a helper bundle does not work either: a
+    sandboxed process cannot start one, neither by spawning it, which hangs in
+    libsecinit before main, nor through LaunchServices, which reports success
+    and starts nothing. Making the core the main executable would restore the
+    panels but would put the core inside the bundle seal, and re-sealing
+    rewrites it — which invalidates the hybrid RSA-PSS/ML-DSA-87 signature over
+    the core that the launcher checks before running it.
 
-    An inheriting process receives exactly the parent's sandbox, so the
-    user-selected file access and printing granted to the launcher remain in
-    effect and must not be repeated here.
+    Between losing that signature and losing the sandbox, the signature is worth
+    more: it is what makes tampering with the shipped binary detectable, and it
+    is verified before a single instruction of the core executes. The sandbox
+    would have limited the damage of a compromise; the signature chain is what
+    prevents one.
+
+    What remains in force: hardened runtime with library validation, the pinned
+    Apple Team ID, the launcher's pre-execution verification, the dual
+    SHA3-512/Skein-1024 manifests, the hybrid RSA-PSS + ML-DSA-87 signatures
+    over every executable component, descriptor-based symlink-safe file access,
+    and mlock'ed key material.
+
+    The core declares no capability at all. Reading a printed key sheet's QR
+    code needs the camera, and camera access under the hardened runtime is
+    granted per process, so it lives in the separate scanner helper: the core
+    holds the archive keys and runs for as long as the app is open, and letting
+    it look through the camera for that whole time buys nothing.
 -->
 <plist version="1.0">
-<dict>
-    <key>com.apple.security.app-sandbox</key>
-    <true/>
-    <key>com.apple.security.inherit</key>
-    <true/>
-</dict>
+<dict/>
 </plist>

@@ -308,6 +308,14 @@ public sealed partial class MainWindow
             "kalynaAvailable" => en ? "Kalyna reference library: available" : "Kalyna-Referenzbibliothek: verfügbar",
             "kalynaMissing" => en ? "Kalyna reference library: unavailable" : "Kalyna-Referenzbibliothek: nicht verfügbar",
             "threefishAvailable" => en ? "Threefish reference library: available" : "Threefish-Referenzbibliothek: verfügbar",
+            "scanFactorATitle" => en ? "Scan factor A" : "Faktor A scannen",
+            "scanFactorBTitle" => en ? "Scan factor B" : "Faktor B scannen",
+            "scanSucceeded" => en
+                ? "A key-sheet factor was read from the camera."
+                : "Ein Schlüsselzettel-Faktor wurde per Kamera eingelesen.",
+            "scanFailed" => en
+                ? "The QR code could not be read."
+                : "Der QR-Code konnte nicht gelesen werden.",
             "threefishMissing" => en ? "Threefish reference library: unavailable" : "Threefish-Referenzbibliothek: nicht verfügbar",
             "notFound" => en ? "not found" : "nicht gefunden",
             "dropAddedInputs" => en ? "Added {0} dropped item(s)." : "{0} abgelegte Elemente hinzugefügt.",

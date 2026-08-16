@@ -5,15 +5,15 @@
     <key>CFBundleDevelopmentRegion</key>
     <string>de</string>
     <key>CFBundleDisplayName</key>
-    <string>Keep Vault Panels</string>
+    <string>Keep Vault Scanner</string>
     <key>CFBundleExecutable</key>
-    <string>Keep Vault Panels</string>
+    <string>Keep Vault Scanner</string>
     <key>CFBundleIdentifier</key>
-    <string>de.michael-feinermann.keep-vault.filepanels</string>
+    <string>de.michael-feinermann.keep-vault.scanner</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
-    <string>Keep Vault Panels</string>
+    <string>Keep Vault Scanner</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
@@ -22,15 +22,12 @@
     <string>@@BUILD_VERSION@@</string>
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
-    <!-- The helper puts a single panel on screen and exits; it must never take
-         a Dock tile or a menu bar of its own. -->
+    <key>NSCameraUsageDescription</key>
+    <string>Keep Vault liest den QR-Code eines gedruckten Schlüsselzettels, damit der 512-Bit-Faktor nicht von Hand eingetippt werden muss.</string>
+    <!-- The scanner shows one window and exits; it must never take a Dock tile. -->
     <key>LSUIElement</key>
     <true/>
     <key>NSHighResolutionCapable</key>
     <true/>
-    <key>NSSupportsAutomaticTermination</key>
-    <false/>
-    <key>NSSupportsSuddenTermination</key>
-    <false/>
 </dict>
 </plist>

@@ -96,7 +96,7 @@ launcher=${app_path}/Contents/MacOS/Keep\ Vault\ Launcher
 core=${app_path}/Contents/MacOS/Keep\ Vault
 supervisor=${app_path}/Contents/MacOS/Keep\ Vault\ Supervisor
 native_dir=${app_path}/Contents/MacOS/Native
-required_native=(zpaq argon2 libargon2_ref.dylib libkalyna_ref.dylib libthreefish_ref.dylib)
+required_native=(zpaq argon2 libargon2_ref.dylib libkalyna_ref.dylib libthreefish_ref.dylib keep-vault-scanner)
 for required_path in ${launcher} ${core} ${supervisor} ${required_native[@]/#/${native_dir}/}; do
   if [[ ! -f ${required_path} || -L ${required_path} ]]; then
     print -u2 "Required executable component is missing or a symbolic link: ${required_path}"
@@ -211,31 +211,42 @@ launcher_entitlements=${entitlement_root}/launcher.plist
 zpaq_entitlements=${entitlement_root}/zpaq.plist
 argon_entitlements=${entitlement_root}/argon.plist
 supervisor_entitlements=${entitlement_root}/supervisor.plist
+scanner_entitlements=${entitlement_root}/scanner.plist
 extract_entitlements ${core} ${core_entitlements}
 extract_entitlements ${launcher} ${launcher_entitlements}
 extract_entitlements ${native_dir}/zpaq ${zpaq_entitlements}
 extract_entitlements ${native_dir}/argon2 ${argon_entitlements}
 extract_entitlements ${supervisor} ${supervisor_entitlements}
+extract_entitlements ${native_dir}/keep-vault-scanner ${scanner_entitlements}
 
-# The launcher is the bundle's main executable and the only image that may
-# establish the sandbox, so it alone carries the capabilities.
-for app_entitlements in ${launcher_entitlements}; do
-  [[ $(/usr/libexec/PlistBuddy -c 'Print :com.apple.security.app-sandbox' ${app_entitlements}) == true ]]
-  [[ $(/usr/libexec/PlistBuddy -c 'Print :com.apple.security.files.user-selected.read-write' ${app_entitlements}) == true ]]
-  [[ $(/usr/libexec/PlistBuddy -c 'Print :com.apple.security.print' ${app_entitlements}) == true ]]
-done
-# The core replaces the launcher through POSIX_SPAWN_SETEXEC and the helpers are
-# spawned beneath it, so all of them inherit the launcher's sandbox. Declaring
-# capabilities on an inheriting image is invalid and aborts it at startup.
-for helper_entitlements in ${core_entitlements} ${zpaq_entitlements} ${argon_entitlements} ${supervisor_entitlements}; do
-  [[ $(/usr/libexec/PlistBuddy -c 'Print :com.apple.security.app-sandbox' ${helper_entitlements}) == true ]]
-  [[ $(/usr/libexec/PlistBuddy -c 'Print :com.apple.security.inherit' ${helper_entitlements}) == true ]]
-  for capability in com.apple.security.files.user-selected.read-write com.apple.security.print; do
-    if /usr/libexec/PlistBuddy -c "Print :${capability}" ${helper_entitlements} >/dev/null 2>&1; then
-      print -u2 "An inheriting image must not declare its own sandbox capability: ${capability}"
+# Keep Vault does not use the App Sandbox: it is mutually exclusive with the
+# integrity chain on macOS, because a sandboxed process is not served a file
+# panel and making the core able to own a sandbox would place it inside the
+# bundle seal, whose re-sealing invalidates the hybrid signature the launcher
+# verifies before running it. See KeepVault.entitlements for the full reasoning.
+#
+# That trade-off is only defensible if it stays deliberate, so assert the
+# sandbox is absent everywhere rather than letting it reappear unnoticed and
+# silently break panels again.
+for image_entitlements in ${core_entitlements} ${launcher_entitlements} \
+    ${zpaq_entitlements} ${argon_entitlements} ${supervisor_entitlements} ${scanner_entitlements}; do
+  for sandbox_key in com.apple.security.app-sandbox com.apple.security.inherit; do
+    if /usr/libexec/PlistBuddy -c "Print :${sandbox_key}" ${image_entitlements} >/dev/null 2>&1; then
+      print -u2 "The App Sandbox must not be declared: ${sandbox_key} in ${image_entitlements:t}"
       exit 1
     fi
   done
+done
+
+# Only the scanner may reach hardware, and only the camera, for reading a
+# printed key sheet. Every other image ships with no capability whatsoever —
+# including the core, which never gains the ability to look through it.
+[[ $(/usr/libexec/PlistBuddy -c 'Print :com.apple.security.device.camera' ${scanner_entitlements}) == true ]]
+for bare_entitlements in ${core_entitlements} ${launcher_entitlements} ${zpaq_entitlements} ${argon_entitlements} ${supervisor_entitlements}; do
+  if /usr/libexec/PlistBuddy -c 'Print :com.apple.security.device.camera' ${bare_entitlements} >/dev/null 2>&1; then
+    print -u2 "Only the core may declare camera access: ${bare_entitlements:t}"
+    exit 1
+  fi
 done
 
 disallowed_entitlements=(
@@ -247,7 +258,6 @@ disallowed_entitlements=(
   com.apple.security.network.client
   com.apple.security.network.server
   com.apple.security.device.audio-input
-  com.apple.security.device.camera
   com.apple.security.device.usb
   com.apple.security.device.bluetooth
   com.apple.security.automation.apple-events

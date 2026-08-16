@@ -256,7 +256,7 @@ public sealed partial class MainWindow
         }
 
         string path = paths[0];
-        IStorageItem? selectedItem = items.FirstOrDefault(item => StorageItemHasPath(item, path));
+        IStorageItem? selectedItem = items.FirstOrDefault(item => StorageItemNamesPath(item, path));
         if (selectedItem is IStorageFile && !HasArchiveExtension(path))
         {
             AddInputStorageItems([selectedItem]);
@@ -283,7 +283,7 @@ public sealed partial class MainWindow
             return false;
         }
 
-        if (items.FirstOrDefault(item => StorageItemHasPath(item, archive)) is IStorageFile file)
+        if (items.FirstOrDefault(item => StorageItemNamesPath(item, archive)) is IStorageFile file)
         {
             if (!RetainExtractArchiveAccess(file))
             {

@@ -23,49 +23,6 @@ internal sealed partial class MacSecurityScopedResourceLease : IDisposable
         return Acquire(item.Path);
     }
 
-    /// <summary>
-    /// A lease that holds no scope of its own.
-    /// </summary>
-    /// <remarks>
-    /// Used where access is already held for the duration by a retained lease,
-    /// so a second scope would be redundant. Starting one twice and stopping it
-    /// once would leak the extension; this makes the borrow explicit instead.
-    /// </remarks>
-    internal static MacSecurityScopedResourceLease Borrowed() => new(0);
-
-    /// <summary>
-    /// Takes ownership of an NSURL that was resolved from a security-scoped
-    /// bookmark and starts access on it.
-    /// </summary>
-    /// <remarks>
-    /// Unlike a plain file URL, a bookmark-resolved one genuinely is
-    /// security-scoped, so a NO here is a real denial and fails closed. The URL
-    /// is retained for the lifetime of the lease because the autorelease pool
-    /// that produced it is not under this code's control.
-    /// </remarks>
-    internal static MacSecurityScopedResourceLease AdoptResolvedUrl(nint url)
-    {
-        if (url == 0)
-        {
-            throw new ArgumentOutOfRangeException(nameof(url), "A resolved security-scoped URL is required.");
-        }
-
-        nint retained = CFRetain(url);
-        if (retained == 0)
-        {
-            throw new InvalidOperationException("The resolved security-scoped URL could not be retained.");
-        }
-
-        if (!ObjcMessageSendBool(retained, StartAccessSelector))
-        {
-            CFRelease(retained);
-            throw new UnauthorizedAccessException(
-                "macOS denied access to the resource the panel helper reported as selected.");
-        }
-
-        return new MacSecurityScopedResourceLease(retained);
-    }
-
     internal static MacSecurityScopedResourceLease Acquire(Uri itemUri)
     {
         ArgumentNullException.ThrowIfNull(itemUri);
@@ -172,9 +129,6 @@ internal sealed partial class MacSecurityScopedResourceLease : IDisposable
     [LibraryImport("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation", EntryPoint = "CFRelease")]
     private static partial void CFRelease(nint value);
 
-    [LibraryImport("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation", EntryPoint = "CFRetain")]
-    private static partial nint CFRetain(nint value);
-
     [LibraryImport("/usr/lib/libobjc.A.dylib", EntryPoint = "sel_registerName", StringMarshalling = StringMarshalling.Utf8)]
     private static partial nint SelRegisterName(string name);
 
@@ -186,57 +140,35 @@ internal sealed partial class MacSecurityScopedResourceLease : IDisposable
     private static partial void ObjcMessageSendVoid(nint receiver, nint selector);
 }
 
-/// <summary>
-/// A retained grant of access to one file or folder.
-/// </summary>
-/// <remarks>
-/// Access arrives by two different routes and the lease has to serve both. A
-/// drop delivers an Avalonia storage item; a panel goes through the helper
-/// bundle and yields a resolved security-scoped URL with no storage item behind
-/// it. The canonical path is therefore what identifies a lease, rather than the
-/// object identity of a storage item that only one of the two routes produces.
-/// </remarks>
 internal sealed class MacStorageAccessLease : IDisposable
 {
     private readonly MacSecurityScopedResourceLease _nativeLease;
     private IStorageItem? _item;
-    private int _disposed;
 
-    private MacStorageAccessLease(string path, IStorageItem? item, MacSecurityScopedResourceLease nativeLease)
+    private MacStorageAccessLease(IStorageItem item, MacSecurityScopedResourceLease nativeLease)
     {
-        Path = path;
         _item = item;
         _nativeLease = nativeLease;
     }
 
-    /// <summary>Canonical path this lease grants access to.</summary>
-    internal string Path { get; }
+    internal IStorageItem Item => _item
+        ?? throw new ObjectDisposedException(nameof(MacStorageAccessLease));
 
-    /// <summary>The storage item, when the access came from a drop.</summary>
-    internal IStorageItem? Item => _item;
-
-    internal static MacStorageAccessLease Acquire(IStorageItem item, string path)
+    internal static MacStorageAccessLease Acquire(IStorageItem item)
     {
         MacSecurityScopedResourceLease nativeLease = MacSecurityScopedResourceLease.Acquire(item);
-        return new MacStorageAccessLease(path, item, nativeLease);
-    }
-
-    /// <summary>Wraps a selection the panel helper produced.</summary>
-    internal static MacStorageAccessLease FromResolvedSelection(string path, MacSecurityScopedResourceLease nativeLease)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(path);
-        ArgumentNullException.ThrowIfNull(nativeLease);
-        return new MacStorageAccessLease(path, item: null, nativeLease);
+        return new MacStorageAccessLease(item, nativeLease);
     }
 
     public void Dispose()
     {
-        if (Interlocked.Exchange(ref _disposed, 1) != 0)
+        IStorageItem? item = Interlocked.Exchange(ref _item, null);
+        if (item is null)
         {
             return;
         }
 
         _nativeLease.Dispose();
-        Interlocked.Exchange(ref _item, null)?.Dispose();
+        item.Dispose();
     }
 }

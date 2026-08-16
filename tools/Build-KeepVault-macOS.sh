@@ -477,6 +477,42 @@ while IFS= read -r -d '' candidate; do
 done < <(find ${macos_dir} -type f -print0)
 sign_macho ${macos_dir}/Keep\ Vault ${core_identifier} ${packaging_dir}/KeepVault.entitlements
 
+launcher_architectures=(arm64)
+[[ ${architecture} == universal ]] && launcher_architectures+=(x86_64)
+
+# QR scanner helper. Reading a printed key sheet's QR code needs a capture
+# session, and camera access under the hardened runtime is granted per process,
+# so it lives in a helper rather than in the core: the core holds the archive
+# keys and runs for as long as the app is open, and letting it look through the
+# camera for that whole time buys nothing.
+#
+# It ships as a plain Mach-O next to zpaq and argon2, not as a nested bundle. A
+# nested bundle is sealed as one, and sealing rewrites its main executable —
+# which would invalidate the hybrid signature over exactly that file. Every
+# executable Keep Vault ships carries the dual RSA-PSS + ML-DSA-87 signature,
+# and that must hold for this one too.
+scanner_thin=()
+for scanner_arch in ${launcher_architectures[@]}; do
+  thin_scanner=${build_root}/keep-vault-scanner-${scanner_arch}
+  xcrun swiftc \
+    -target ${scanner_arch}-apple-macos14.0 \
+    -O -whole-module-optimization -parse-as-library \
+    ${packaging_dir}/ScannerHelper.swift \
+    -framework AppKit -framework AVFoundation \
+    -o ${thin_scanner}
+  scanner_thin+=(${thin_scanner})
+done
+
+scanner_path=${macos_dir}/Native/keep-vault-scanner
+if (( ${#scanner_thin} > 1 )); then
+  xcrun lipo -create ${scanner_thin[@]} -output ${scanner_path}
+  xcrun lipo ${scanner_path} -verify_arch arm64 x86_64
+else
+  ditto ${scanner_thin[1]} ${scanner_path}
+fi
+chmod 0755 ${scanner_path}
+sign_macho ${scanner_path} ${bundle_identifier}.scanner ${packaging_dir}/ScannerHelper.entitlements
+
 signer_project=${packaging_dir}/HybridSigner/KeepVaultMac.HybridSigner.csproj
 (
   cd ${mac_project}
@@ -503,6 +539,7 @@ signer_arguments=(
   --target ${macos_dir}/Native/libargon2_ref.dylib
   --target ${macos_dir}/Native/libkalyna_ref.dylib
   --target ${macos_dir}/Native/libthreefish_ref.dylib
+  --target ${macos_dir}/Native/keep-vault-scanner
 )
 if [[ -n ${pfx_password_service} ]]; then
   signer_arguments+=(--pfx-password-keychain-service ${pfx_password_service})
@@ -514,9 +551,6 @@ fi
   cd ${mac_project}
   run_hybrid_signer ${signer_arguments[@]}
 )
-
-launcher_architectures=(arm64)
-[[ ${architecture} == universal ]] && launcher_architectures+=(x86_64)
 
 generate_cdhash_pins() {
   local signed_binary=$1
@@ -620,43 +654,6 @@ for launcher_arch in ${launcher_architectures[@]}; do
   launcher_thin+=(${thin_launcher})
 done
 
-# File-selection helper. macOS serves an open or save panel only to a process
-# that owns its sandbox, and the core does not: the launcher establishes the
-# sandbox and replaces itself with the core, which runs with
-# com.apple.security.inherit so that the launcher can verify it before a single
-# instruction of it runs. Rather than give that up, panels are delegated to this
-# helper, which is a bundle of its own and is therefore served normally. It
-# returns security-scoped bookmarks the core resolves through their shared
-# application group.
-helper_thin=()
-for helper_arch in ${launcher_architectures[@]}; do
-  thin_helper=${build_root}/Keep\ Vault\ Panels-${helper_arch}
-  xcrun swiftc \
-    -target ${helper_arch}-apple-macos14.0 \
-    -O -whole-module-optimization -parse-as-library \
-    ${packaging_dir}/PanelHelper.swift \
-    -framework AppKit \
-    -o ${thin_helper}
-  helper_thin+=(${thin_helper})
-done
-
-helper_app=${contents}/Library/Helpers/Keep\ Vault\ Panels.app
-helper_macos=${helper_app}/Contents/MacOS
-mkdir -p ${helper_macos}
-helper_path=${helper_macos}/Keep\ Vault\ Panels
-if (( ${#helper_thin} > 1 )); then
-  xcrun lipo -create ${helper_thin[@]} -output ${helper_path}
-  xcrun lipo ${helper_path} -verify_arch arm64 x86_64
-else
-  ditto ${helper_thin[1]} ${helper_path}
-fi
-chmod 0755 ${helper_path}
-sed \
-  -e "s/@@MARKETING_VERSION@@/${marketing_version}/g" \
-  -e "s/@@BUILD_VERSION@@/${build_version}/g" \
-  ${packaging_dir}/PanelHelper-Info.plist.template > ${helper_app}/Contents/Info.plist
-plutil -lint ${helper_app}/Contents/Info.plist
-
 launcher_path=${macos_dir}/Keep\ Vault\ Launcher
 if [[ ${architecture} == universal ]]; then
   xcrun lipo -create ${launcher_thin[@]} -output ${launcher_path}
@@ -693,18 +690,6 @@ if find ${macos_dir} -type f \( -name '*.sha3' -o -name '*.skein' -o -name '*.kh
   exit 1
 fi
 print "relocated_sidecars=${relocated_sidecars}"
-
-# The helper is a nested bundle, so it is sealed as one and must be signed
-# before the app that encloses it.
-codesign \
-  --force \
-  --sign ${identity} \
-  --options runtime \
-  ${timestamp_arguments[@]} \
-  --entitlements ${packaging_dir}/PanelHelper.entitlements \
-  --identifier ${bundle_identifier}.filepanels \
-  ${helper_app}
-codesign --verify --strict ${helper_app}
 
 sign_macho ${launcher_path} ${bundle_identifier}.launcher ${packaging_dir}/Launcher.entitlements
 

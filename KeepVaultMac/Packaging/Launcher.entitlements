@@ -1,21 +1,10 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+    Entitlements for the launcher, the bundle main executable that verifies the
+    core and then replaces itself with it. It needs no capability of its own;
+    see KeepVault.entitlements for why the App Sandbox is not used.
+-->
 <plist version="1.0">
-<dict>
-    <key>com.apple.security.app-sandbox</key>
-    <true/>
-    <key>com.apple.security.files.user-selected.read-write</key>
-    <true/>
-    <key>com.apple.security.print</key>
-    <true/>
-    <!--
-        Shared with the file-selection helper. The core inherits this sandbox,
-        and the group is what lets it resolve the security-scoped bookmarks the
-        helper mints for whatever the user picked in a panel.
-    -->
-    <key>com.apple.security.application-groups</key>
-    <array>
-        <string>2T6K9PGS55.de.michael-feinermann.keep-vault</string>
-    </array>
-</dict>
+<dict/>
 </plist>
