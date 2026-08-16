@@ -389,21 +389,6 @@ public sealed class KeySheetService
             Path.GetDirectoryName(data.CanonicalArchivePath) ?? data.CanonicalArchivePath,
             margin, bodyWidth, ref y);
 
-        graphics.DrawString(
-            en
-                ? $"Generated hexadecimal 512-bit factor {factorName}"
-                : $"Generierter hexadezimaler 512-Bit-Faktor {factorName}",
-            headingFont,
-            XBrushes.Black,
-            new XPoint(margin, y));
-        y += 24;
-        formatter.DrawString(
-            GroupGeneratedPassword(generatedPassword),
-            monoFont,
-            XBrushes.Black,
-            new XRect(margin, y, bodyWidth, 92));
-        y += 98;
-
         // Everything from the QR codes down is measured up from the bottom
         // edge. The fields above vary in height with the archive path, and the
         // codes and the download address are exactly the parts that must not be
@@ -424,18 +409,32 @@ public sealed class KeySheetService
             XBrushes.Black,
             new XPoint(margin, y));
 
-        // The writing lines take up whatever room is left between the heading
-        // and the QR block, so a long storage path shortens the lines rather
-        // than pushing them across the codes below.
-        double writingTop = y + 10;
-        double writingBottom = qrHeadingBaseline - 20;
-        const int writingLines = 3;
-        double writingSpacing = Math.Min(28, (writingBottom - writingTop) / writingLines);
-        for (int index = 0; index < writingLines && writingSpacing >= 14; index++)
+        // The password is written by hand and comes first: it is the part the
+        // owner supplies, and reading the sheet top to bottom should follow the
+        // order the factors are actually entered in.
+        y += 8;
+        for (int index = 0; index < 3; index++)
         {
-            double lineY = writingTop + (writingSpacing * (index + 1));
-            graphics.DrawLine(XPens.Black, margin, lineY, page.Width.Point - margin, lineY);
+            y += 24;
+            graphics.DrawLine(XPens.Black, margin, y, page.Width.Point - margin, y);
         }
+
+        y += 16;
+
+        graphics.DrawString(
+            en
+                ? $"Generated hexadecimal 512-bit factor {factorName}"
+                : $"Generierter hexadezimaler 512-Bit-Faktor {factorName}",
+            headingFont,
+            XBrushes.Black,
+            new XPoint(margin, y));
+        y += 22;
+        formatter.DrawString(
+            GroupGeneratedPassword(generatedPassword),
+            monoFont,
+            XBrushes.Black,
+            new XRect(margin, y, bodyWidth, 92));
+        y += 88;
 
         graphics.DrawString(
             en
