@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+    Entitlements for QR-Scanner.
+
+    The sandbox and the camera. Nothing else.
+
+    In particular there is no file access of any kind: no user-selected files,
+    no Downloads, no Pictures, no bookmarks. The app has nothing to read and
+    nothing to write, and the sandbox is what turns that intention into
+    something the system enforces rather than something the code promises.
+
+    Note what is absent as much as what is present. The entitlements that
+    weaken the hardened runtime — disable-library-validation,
+    allow-unsigned-executable-memory, allow-dyld-environment-variables,
+    get-task-allow — are the ones that let another process inject code into
+    this one and read the scanned value out of its memory. None of them are
+    here, and the build script refuses to sign if any of them appear.
+-->
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.app-sandbox</key>
+    <true/>
+    <key>com.apple.security.device.camera</key>
+    <true/>
+</dict>
+</plist>
