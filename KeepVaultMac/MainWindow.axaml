@@ -344,10 +344,8 @@
                   <TextBox x:Name="ExtractPasswordBox" MaxLength="128" PasswordChar="●" />
                   <TextBlock x:Name="ExtractGeneratedPasswordFirstLabel" Text="Faktor A vom Schlüsselzettel" Classes="label" Margin="0" />
                   <TextBox x:Name="ExtractGeneratedPasswordFirstBox" MaxLength="160" AcceptsReturn="True" TextWrapping="Wrap" FontFamily="Menlo" MinHeight="62" />
-                  <Button x:Name="ScanFirstFactorButton" Content="Faktor A per Kamera scannen" Classes="secondary" HorizontalAlignment="Left" Click="ScanFirstFactor_Click" />
                   <TextBlock x:Name="ExtractGeneratedPasswordSecondLabel" Text="Faktor B vom Schlüsselzettel" Classes="label" Margin="0" />
                   <TextBox x:Name="ExtractGeneratedPasswordSecondBox" MaxLength="160" AcceptsReturn="True" TextWrapping="Wrap" FontFamily="Menlo" MinHeight="62" />
-                  <Button x:Name="ScanSecondFactorButton" Content="Faktor B per Kamera scannen" Classes="secondary" HorizontalAlignment="Left" Click="ScanSecondFactor_Click" />
                 </StackPanel>
               </Border>
             </Grid>

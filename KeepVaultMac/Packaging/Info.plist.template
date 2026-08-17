@@ -49,15 +49,7 @@
     <string>Keep Vault Launcher</string>
     <key>CFBundleIconFile</key>
     <string>KeepVault</string>
-    <!--
-    The camera is opened by the scanner helper, never by this process. The
-    usage string still has to be here: TCC attributes a child's request to the
-    responsible process, which is this app, and refuses outright rather than
-    prompting when the responsible process cannot say what the camera is for.
-  -->
-  <key>NSCameraUsageDescription</key>
-  <string>Keep Vault liest den QR-Code eines gedruckten Schlüsselzettels, damit der 512-Bit-Faktor nicht von Hand eingetippt werden muss. Das Kamerabild wird nur währenddessen ausgewertet und nirgends gespeichert.</string>
-  <key>CFBundleIdentifier</key>
+    <key>CFBundleIdentifier</key>
     <string>de.michael-feinermann.keep-vault</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>

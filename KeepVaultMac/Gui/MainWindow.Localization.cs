@@ -342,14 +342,6 @@ public sealed partial class MainWindow
             "verifyCleanupFailed" => en
                 ? "The temporary verification copy could not be removed"
                 : "Die temporäre Prüfkopie konnte nicht entfernt werden",
-            "scanFactorATitle" => en ? "Scan factor A" : "Faktor A scannen",
-            "scanFactorBTitle" => en ? "Scan factor B" : "Faktor B scannen",
-            "scanSucceeded" => en
-                ? "A key-sheet factor was read from the camera."
-                : "Ein Schlüsselzettel-Faktor wurde per Kamera eingelesen.",
-            "scanFailed" => en
-                ? "The QR code could not be read."
-                : "Der QR-Code konnte nicht gelesen werden.",
             "threefishMissing" => en ? "Threefish reference library: unavailable" : "Threefish-Referenzbibliothek: nicht verfügbar",
             "notFound" => en ? "not found" : "nicht gefunden",
             "dropAddedInputs" => en ? "Added {0} dropped item(s)." : "{0} abgelegte Elemente hinzugefügt.",

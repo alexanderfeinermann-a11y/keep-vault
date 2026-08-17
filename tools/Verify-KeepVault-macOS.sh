@@ -216,28 +216,11 @@ launcher_entitlements=${entitlement_root}/launcher.plist
 zpaq_entitlements=${entitlement_root}/zpaq.plist
 argon_entitlements=${entitlement_root}/argon.plist
 supervisor_entitlements=${entitlement_root}/supervisor.plist
-scanner_entitlements=${entitlement_root}/scanner.plist
 extract_entitlements ${core} ${core_entitlements}
 extract_entitlements ${launcher} ${launcher_entitlements}
 extract_entitlements ${native_dir}/zpaq ${zpaq_entitlements}
 extract_entitlements ${native_dir}/argon2 ${argon_entitlements}
 extract_entitlements ${supervisor} ${supervisor_entitlements}
-# The scanner is a nested application, not a bare tool: macOS only grants
-# camera access to something it can name, and only a bundle has a name.
-scanner_app=${app_path}/Contents/Library/Helpers/Keep\ Vault\ Scanner.app
-scanner_binary=${scanner_app}/Contents/MacOS/Keep\ Vault\ Scanner
-if [[ ! -d ${scanner_app} || -L ${scanner_app} || ! -f ${scanner_binary} || -L ${scanner_binary} ]]; then
-  print -u2 "The nested scanner application is missing: ${scanner_app}"
-  exit 1
-fi
-if [[ $(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' ${scanner_app}/Contents/Info.plist) \
-    != de.michael-feinermann.keep-vault.scanner ]]; then
-  print -u2 'The nested scanner application has an unexpected bundle identifier.'
-  exit 1
-fi
-/usr/libexec/PlistBuddy -c 'Print :NSCameraUsageDescription' ${scanner_app}/Contents/Info.plist >/dev/null
-codesign --verify --strict --verbose=2 ${scanner_app}
-extract_entitlements ${scanner_binary} ${scanner_entitlements}
 
 # Keep Vault does not use the App Sandbox: it is mutually exclusive with the
 # integrity chain on macOS, because a sandboxed process is not served a file
@@ -249,7 +232,7 @@ extract_entitlements ${scanner_binary} ${scanner_entitlements}
 # sandbox is absent everywhere rather than letting it reappear unnoticed and
 # silently break panels again.
 for image_entitlements in ${core_entitlements} ${launcher_entitlements} \
-    ${zpaq_entitlements} ${argon_entitlements} ${supervisor_entitlements} ${scanner_entitlements}; do
+    ${zpaq_entitlements} ${argon_entitlements} ${supervisor_entitlements}; do
   for sandbox_key in com.apple.security.app-sandbox com.apple.security.inherit; do
     if /usr/libexec/PlistBuddy -c "Print :${sandbox_key}" ${image_entitlements} >/dev/null 2>&1; then
       print -u2 "The App Sandbox must not be declared: ${sandbox_key} in ${image_entitlements:t}"
@@ -258,18 +241,12 @@ for image_entitlements in ${core_entitlements} ${launcher_entitlements} \
   done
 done
 
-# Camera access is the only hardware capability anywhere in the bundle, and it
-# exists solely to read a printed key sheet. The scanner declares it because it
-# opens the device; the app declares it because macOS holds the responsible
-# process answerable for what its helpers do, and refuses rather than prompts
-# when that process claims nothing. Every other image ships with no capability
-# at all — the supervisor, the launcher and the compression tools never gain
-# the ability to look through it.
-[[ $(/usr/libexec/PlistBuddy -c 'Print :com.apple.security.device.camera' ${scanner_entitlements}) == true ]]
-[[ $(/usr/libexec/PlistBuddy -c 'Print :com.apple.security.device.camera' ${core_entitlements}) == true ]]
-for bare_entitlements in ${launcher_entitlements} ${zpaq_entitlements} ${argon_entitlements} ${supervisor_entitlements}; do
+# Nothing in this bundle reaches hardware any more. Reading a printed key sheet
+# by camera moved to a separate application, so no image here declares a device
+# capability at all — the core included.
+for bare_entitlements in ${core_entitlements} ${launcher_entitlements} ${zpaq_entitlements} ${argon_entitlements} ${supervisor_entitlements}; do
   if /usr/libexec/PlistBuddy -c 'Print :com.apple.security.device.camera' ${bare_entitlements} >/dev/null 2>&1; then
-    print -u2 "Only the app and its scanner may declare camera access: ${bare_entitlements:t}"
+    print -u2 "No component may declare camera access: ${bare_entitlements:t}"
     exit 1
   fi
 done

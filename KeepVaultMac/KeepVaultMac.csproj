@@ -92,15 +92,6 @@
   </ItemGroup>
 
   <ItemGroup>
-    <!--
-      Give the core binary its own Info.plist section. The bundle's main
-      executable is the launcher, so the running core is not resolvable to the
-      bundle and would otherwise have no usage descriptions of its own.
-    -->
-    <LinkerArg Include="-Wl,-sectcreate,__TEXT,__info_plist,$(MSBuildThisFileDirectory)Packaging/Core.Info.plist" />
-  </ItemGroup>
-
-  <ItemGroup>
     <EmbeddedResource Include="Packaging/Keys/mldsa87-public.key" LogicalName="KeepVault.MLDsa87.PublicKey" />
     <EmbeddedResource Include="Assets/KeepVaultLogo.png" LogicalName="KeepVault.Logo.png" />
     <Content Include="Native/osx-arm64/zpaq" CopyToOutputDirectory="PreserveNewest" TargetPath="Native/zpaq" />

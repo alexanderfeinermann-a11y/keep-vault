@@ -1133,49 +1133,6 @@ public sealed partial class MainWindow : Window, IDisposable
             _lifetime.Token);
     }
 
-    private async void ScanFirstFactor_Click(object? sender, RoutedEventArgs e)
-        => await ScanFactorIntoAsync(ExtractGeneratedPasswordFirstBox, T("scanFactorATitle"));
-
-    private async void ScanSecondFactor_Click(object? sender, RoutedEventArgs e)
-        => await ScanFactorIntoAsync(ExtractGeneratedPasswordSecondBox, T("scanFactorBTitle"));
-
-    /// <summary>
-    /// Reads one printed factor from the camera into <paramref name="target"/>.
-    /// </summary>
-    /// <remarks>
-    /// The value is a 512-bit key factor, so it is never written to the log —
-    /// only the fact that a scan happened is. It is grouped exactly as the key
-    /// sheet prints it so the user can compare it against the paper.
-    /// </remarks>
-    private async Task ScanFactorIntoAsync(TextBox target, string title)
-    {
-        if (_disposed || Volatile.Read(ref _operationActive) != 0)
-        {
-            return;
-        }
-
-        MacScannerBroker.ScanResult result = await MacScannerBroker.ScanFactorAsync(title, _lifetime.Token);
-        if (_disposed || result.Cancelled)
-        {
-            return;
-        }
-
-        if (result.Failure is { } failure)
-        {
-            Log($"{T("scanFailed")} — {failure}");
-            await ErrorAsync(T("scanFailed"));
-            return;
-        }
-
-        if (result.Factor is not { } factor)
-        {
-            return;
-        }
-
-        target.Text = KeySheetService.GroupGeneratedPassword(factor);
-        Log(T("scanSucceeded"));
-    }
-
     private async void ChooseEraseFile_Click(object? sender, RoutedEventArgs e)
     {
         IReadOnlyList<IStorageFile> files = await StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
