@@ -296,6 +296,95 @@ public sealed class PasswordKeyService
         }
     }
 
+    /// <summary>
+    /// Derives a two-round suite's key from two Argon2id passes over the same
+    /// password input with two different salts.
+    /// </summary>
+    /// <remarks>
+    /// The paranoia cascade needs 568 bytes and one Argon2id call is kept at
+    /// 384, so the material comes from two rounds laid end to end and truncated.
+    /// Both rounds use the same password and the same two factors — only the
+    /// salt differs, which is what makes the second round independent without
+    /// asking the user for more entropy.
+    ///
+    /// Truncating rather than sizing the second round to the remainder keeps
+    /// both calls identical in shape, so a reader cannot end up running a
+    /// differently parameterised second round than the writer did.
+    /// </remarks>
+    public async Task<DerivedKey> DeriveTwoRoundAsync(
+        string userPassword,
+        string firstGeneratedPassword,
+        string secondGeneratedPassword,
+        byte[] firstSalt,
+        byte[] secondSalt,
+        EncryptionSuite suite,
+        Argon2Profile profile,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(firstSalt);
+        ArgumentNullException.ThrowIfNull(secondSalt);
+        EncryptionSuiteParameters parameters = EncryptionSuiteCatalog.Get(suite);
+        if (!parameters.UsesTwoKdfRounds)
+        {
+            throw new ArgumentOutOfRangeException(nameof(suite), suite, "This suite derives a single Argon2id round.");
+        }
+
+        if (CryptographicOperations.FixedTimeEquals(firstSalt, secondSalt))
+        {
+            throw new CryptographicException("Both Argon2id rounds were given the same salt.");
+        }
+
+        string normalizedFirst = NormalizeGeneratedPassword(firstGeneratedPassword);
+        string normalizedSecond = NormalizeGeneratedPassword(secondGeneratedPassword);
+        ValidateUserPasswordForCreation(userPassword, normalizedFirst, normalizedSecond);
+
+        using LockedSensitiveBuffer argon2PasswordInput = CreateLockedArgon2PasswordInput(
+            userPassword,
+            normalizedFirst,
+            normalizedSecond,
+            suite);
+
+        using DerivedKey round1 = await DeriveFromPreHashAsync(
+            argon2PasswordInput.Bytes, firstSalt, CascadeDerivedKeySize, profile, cancellationToken)
+            .ConfigureAwait(false);
+        using DerivedKey round2 = await DeriveFromPreHashAsync(
+            argon2PasswordInput.Bytes, secondSalt, CascadeDerivedKeySize, round1.Profile, cancellationToken)
+            .ConfigureAwait(false);
+
+        int required = parameters.DerivedKeyBytes;
+        if (required > round1.Bytes.Length + round2.Bytes.Length)
+        {
+            throw new CryptographicException("Two Argon2id rounds do not cover this suite's key length.");
+        }
+
+        byte[] combined = new byte[required];
+        byte[] reportedSalt = (byte[])firstSalt.Clone();
+        IDisposable? combinedLock = null;
+        IDisposable? saltLock = null;
+        try
+        {
+            combinedLock = SecureMemory.TryLock(combined);
+            saltLock = SecureMemory.TryLock(reportedSalt);
+
+            int fromFirst = Math.Min(round1.Bytes.Length, required);
+            round1.Bytes[..fromFirst].CopyTo(combined);
+            if (required > fromFirst)
+            {
+                round2.Bytes[..(required - fromFirst)].CopyTo(combined.AsSpan(fromFirst));
+            }
+
+            return new DerivedKey(combined, reportedSalt, round1.Profile, combinedLock, saltLock);
+        }
+        catch
+        {
+            CryptographicOperations.ZeroMemory(combined);
+            CryptographicOperations.ZeroMemory(reportedSalt);
+            combinedLock?.Dispose();
+            saltLock?.Dispose();
+            throw;
+        }
+    }
+
     private static async Task<DerivedKey> DeriveDualSha3Async(
         string userPassword,
         string firstGeneratedPassword,

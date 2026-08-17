@@ -1423,21 +1423,50 @@ internal static partial class MacComprehensiveTests
             EncryptionSuiteParameters parameters = EncryptionSuiteCatalog.Get(suite);
             Require(header.GetProperty("Version").GetInt32() == 9, "Container version is not v9.");
 
-            // The second-round fields must be present and null for a
-            // single-round suite. Present-and-null is not cosmetic: the reader
-            // compares the header against its own canonical re-serialization,
-            // so a field that vanished would make the app reject containers it
-            // had just written.
-            Require(
-                header.TryGetProperty("SecondSalt", out JsonElement secondSalt)
-                && header.TryGetProperty("SecondNonce", out JsonElement secondNonce)
-                && secondSalt.ValueKind == JsonValueKind.Null
-                && secondNonce.ValueKind == JsonValueKind.Null,
-                "Container header does not carry null second-round material for a single-round suite.");
-            Require(
-                header.GetProperty("SecondSaltBits").GetInt32() == 0
-                && header.GetProperty("SecondNonceBits").GetInt32() == 0,
-                "Container header declares second-round sizes for a single-round suite.");
+            // The second-round fields are always present. Present-and-null is
+            // not cosmetic: the reader compares the header against its own
+            // canonical re-serialization, so a field that vanished would make
+            // the app reject containers it had just written.
+            bool hasSecondSalt = header.TryGetProperty("SecondSalt", out JsonElement secondSalt);
+            bool hasSecondNonce = header.TryGetProperty("SecondNonce", out JsonElement secondNonce);
+            Require(hasSecondSalt && hasSecondNonce, "Container header is missing the second-round fields.");
+
+            if (parameters.UsesTwoKdfRounds)
+            {
+                // A two-round suite must carry both rounds, or the archive is
+                // undecryptable by anyone — including the machine that wrote it.
+                Require(
+                    secondSalt.ValueKind == JsonValueKind.String
+                    && secondNonce.ValueKind == JsonValueKind.String,
+                    "Container header omits second-round material for a two-round suite.");
+                Require(
+                    header.GetProperty("SecondSaltBits").GetInt32() == PasswordKeyService.SaltSize * 8
+                    && header.GetProperty("SecondNonceBits").GetInt32() == parameters.NonceBytes * 8,
+                    "Container header declares wrong second-round sizes.");
+                Require(
+                    !string.Equals(
+                        header.GetProperty("Salt").GetString(),
+                        secondSalt.GetString(),
+                        StringComparison.Ordinal),
+                    "Container header reuses the first round's salt for the second.");
+                Require(
+                    !string.Equals(
+                        header.GetProperty("Nonce").GetString(),
+                        secondNonce.GetString(),
+                        StringComparison.Ordinal),
+                    "Container header reuses the first round's nonce for the second.");
+            }
+            else
+            {
+                Require(
+                    secondSalt.ValueKind == JsonValueKind.Null
+                    && secondNonce.ValueKind == JsonValueKind.Null,
+                    "Container header does not carry null second-round material for a single-round suite.");
+                Require(
+                    header.GetProperty("SecondSaltBits").GetInt32() == 0
+                    && header.GetProperty("SecondNonceBits").GetInt32() == 0,
+                    "Container header declares second-round sizes for a single-round suite.");
+            }
             Require(header.GetProperty("Algorithm").GetString() == parameters.Algorithm, "Container algorithm label mismatch.");
             Require(header.GetProperty("CounterEndian").GetString() == EncryptionSuiteCatalog.CounterEndian, "Container counter endian mismatch.");
             Require(header.GetProperty("Argon2MemoryKiB").GetInt32() == Argon2Profile.DefaultMemoryKiB, "Container Argon2 memory is not 1 GiB.");
@@ -1464,6 +1493,16 @@ internal static partial class MacComprehensiveTests
                 Require(header.GetProperty("EncryptionKeyBits").GetInt32() == 192 * 8, "Cascade key is not 192 bytes.");
                 Require(header.GetProperty("NonceBits").GetInt32() == 192 * 8, "Cascade nonce is not 192 bytes.");
                 Require(header.GetProperty("Argon2OutputBits").GetInt32() == 384 * 8, "Cascade Argon2 output is not 384 bytes.");
+            }
+
+            if (suite == EncryptionSuite.ParanoiaCascade)
+            {
+                // Six layers: 32+56+64+64+128+32 key bytes and 16+16+32+64+128+12
+                // nonce bytes, with 376 cipher-key bytes plus the two MAC keys
+                // covered by two Argon2id rounds.
+                Require(header.GetProperty("EncryptionKeyBits").GetInt32() == 376 * 8, "Paranoia key is not 376 bytes.");
+                Require(header.GetProperty("NonceBits").GetInt32() == 268 * 8, "Paranoia nonce is not 268 bytes.");
+                Require(header.GetProperty("Argon2OutputBits").GetInt32() == 568 * 8, "Paranoia Argon2 output is not 568 bytes.");
             }
             Require(input.Length - input.Position > 64 + 128, "Container lacks two tags and ciphertext.");
         }

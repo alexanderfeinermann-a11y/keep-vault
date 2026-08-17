@@ -176,9 +176,25 @@ public sealed partial class KalynaContainerService
             throw new DirectoryNotFoundException($"The encrypted archive target directory does not exist: {targetDirectory}");
         }
 
+        // A two-round suite needs two salts and two nonces, and both halves have
+        // to reach the header: an archive whose header carries only the first
+        // round cannot be decrypted by anyone, including the machine that wrote
+        // it.
         LockedSensitiveBuffer saltBuffer;
         LockedSensitiveBuffer nonceBuffer;
-        if (preparedEntropy is null)
+        TwoRoundEncryptionParameters? twoRound = null;
+        if (parameters.UsesTwoKdfRounds)
+        {
+            twoRound = preparedEntropy is null
+                ? EntropyMixer.CreateTwoRoundEncryptionParameters(suite)
+                : preparedEntropy.ConsumeTwoRoundEncryptionParameters(
+                    suite,
+                    firstGeneratedPassword,
+                    secondGeneratedPassword);
+            saltBuffer = twoRound.FirstSalt;
+            nonceBuffer = twoRound.FirstNonce;
+        }
+        else if (preparedEntropy is null)
         {
             (saltBuffer, nonceBuffer) = EntropyMixer.CreateEncryptionParameters(suite);
         }
@@ -192,7 +208,11 @@ public sealed partial class KalynaContainerService
 
         byte[] salt = saltBuffer.Bytes;
         byte[] nonce = nonceBuffer.Bytes;
+        byte[] secondSalt = twoRound?.SecondSalt.Bytes ?? [];
+        byte[] secondNonce = twoRound?.SecondNonce.Bytes ?? [];
+        byte[] chunkNonceBase = [];
         byte[] kdfSalt = [];
+        byte[] kdfSecondSalt = [];
         SuiteKeyMaterial? keyMaterial = null;
         byte[] tweak = [];
         byte[] counter = [];
@@ -200,23 +220,37 @@ public sealed partial class KalynaContainerService
         try
         {
             kdfSalt = (byte[])salt.Clone();
+            kdfSecondSalt = secondSalt.Length == 0 ? [] : (byte[])secondSalt.Clone();
             try
             {
-                using DerivedKey key = await _passwords.DeriveAsync(
-                    userPassword,
-                    firstGeneratedPassword,
-                    secondGeneratedPassword,
-                    kdfSalt,
-                    suite,
-                    argon2Profile,
-                    cancellationToken).ConfigureAwait(false);
+                using DerivedKey key = parameters.UsesTwoKdfRounds
+                    ? await _passwords.DeriveTwoRoundAsync(
+                        userPassword,
+                        firstGeneratedPassword,
+                        secondGeneratedPassword,
+                        kdfSalt,
+                        kdfSecondSalt,
+                        suite,
+                        argon2Profile,
+                        cancellationToken).ConfigureAwait(false)
+                    : await _passwords.DeriveAsync(
+                        userPassword,
+                        firstGeneratedPassword,
+                        secondGeneratedPassword,
+                        kdfSalt,
+                        suite,
+                        argon2Profile,
+                        cancellationToken).ConfigureAwait(false);
                 keyMaterial = SuiteKeyMaterial.Create(key.Bytes, parameters);
                 effectiveProfile = key.Profile;
             }
             finally
             {
                 CryptographicOperations.ZeroMemory(kdfSalt);
+                CryptographicOperations.ZeroMemory(kdfSecondSalt);
             }
+
+            chunkNonceBase = BuildChunkNonceBase(nonce, secondNonce);
 
             tweak = CreateSuiteTweak(suite, nonce);
             counter = (byte[])nonce.Clone();
@@ -249,7 +283,11 @@ public sealed partial class KalynaContainerService
                 "UserPassword+GeneratedHex512x2",
                 EncryptionSuiteCatalog.KdfInputMode,
                 1024,
-                2);
+                2,
+                secondSalt.Length == 0 ? 0 : PasswordKeyService.SaltSize * 8,
+                secondSalt.Length == 0 ? null : Convert.ToBase64String(secondSalt),
+                secondNonce.Length == 0 ? 0 : parameters.NonceBytes * 8,
+                secondNonce.Length == 0 ? null : Convert.ToBase64String(secondNonce));
             byte[] headerBytes = JsonSerializer.SerializeToUtf8Bytes(header, ContainerJsonContext.Default.ContainerHeader);
             if (headerBytes.Length > MaxHeaderSize)
             {
@@ -299,7 +337,7 @@ public sealed partial class KalynaContainerService
                         while ((read = await ReadChunkAsync(plainZpaqStream, plainChunk, cancellationToken).ConfigureAwait(false)) > 0)
                         {
                             plaintextBytes = checked(plaintextBytes + read);
-                            DeriveChunkNonce(nonce, chunkIndex, counter);
+                            DeriveChunkNonce(chunkNonceBase, chunkIndex, counter);
                             XCrypt(parameters, keyMaterial.EncryptionKey, tweak, counter, plainChunk, cipherChunk, read);
 
                             byte[]? chunkTag = null;
@@ -313,7 +351,7 @@ public sealed partial class KalynaContainerService
                                 (byte[] aeadKey, byte[] aeadNonce) =
                                     SplitAeadMaterial(aeadLayout, keyMaterial.EncryptionKey, counter);
                                 byte[] associated =
-                                    BuildChunkAssociatedData(parameters, nonce, chunkIndex, read);
+                                    BuildChunkAssociatedData(parameters, chunkNonceBase, chunkIndex, read);
                                 try
                                 {
                                     NativeChaChaPoly.Encrypt(
@@ -399,13 +437,24 @@ public sealed partial class KalynaContainerService
         finally
         {
             CryptographicOperations.ZeroMemory(kdfSalt);
+            CryptographicOperations.ZeroMemory(kdfSecondSalt);
+            CryptographicOperations.ZeroMemory(chunkNonceBase);
             keyMaterial?.Dispose();
             CryptographicOperations.ZeroMemory(counter);
             CryptographicOperations.ZeroMemory(tweak);
             CryptographicOperations.ZeroMemory(nonce);
             CryptographicOperations.ZeroMemory(salt);
-            nonceBuffer.Dispose();
-            saltBuffer.Dispose();
+            // A two-round set owns all four buffers, so disposing it covers the
+            // salt and nonce aliases taken from it.
+            if (twoRound is not null)
+            {
+                twoRound.Dispose();
+            }
+            else
+            {
+                nonceBuffer.Dispose();
+                saltBuffer.Dispose();
+            }
         }
     }
 
@@ -434,6 +483,9 @@ public sealed partial class KalynaContainerService
         byte[]? expectedSkeinTag = null;
         byte[]? salt = null;
         byte[]? nonce = null;
+        byte[]? secondSalt = null;
+        byte[]? secondNonce = null;
+        byte[]? chunkNonceBase = null;
         byte[]? tweak = null;
         byte[]? actualSha3Tag = null;
         byte[]? actualSkeinTag = null;
@@ -473,16 +525,29 @@ public sealed partial class KalynaContainerService
 
             salt = Convert.FromBase64String(header.Salt);
             nonce = Convert.FromBase64String(header.Nonce);
+            secondSalt = string.IsNullOrEmpty(header.SecondSalt) ? [] : Convert.FromBase64String(header.SecondSalt);
+            secondNonce = string.IsNullOrEmpty(header.SecondNonce) ? [] : Convert.FromBase64String(header.SecondNonce);
+            chunkNonceBase = BuildChunkNonceBase(nonce, secondNonce);
             tweak = string.IsNullOrEmpty(header.Tweak) ? [] : Convert.FromBase64String(header.Tweak);
             Argon2Profile argon2Profile = GetArgon2Profile(header);
-            using (DerivedKey key = await _passwords.DeriveAsync(
-                userPassword,
-                firstGeneratedPassword,
-                secondGeneratedPassword,
-                salt,
-                parameters.Suite,
-                argon2Profile,
-                cancellationToken).ConfigureAwait(false))
+            using (DerivedKey key = parameters.UsesTwoKdfRounds
+                ? await _passwords.DeriveTwoRoundAsync(
+                    userPassword,
+                    firstGeneratedPassword,
+                    secondGeneratedPassword,
+                    salt,
+                    secondSalt,
+                    parameters.Suite,
+                    argon2Profile,
+                    cancellationToken).ConfigureAwait(false)
+                : await _passwords.DeriveAsync(
+                    userPassword,
+                    firstGeneratedPassword,
+                    secondGeneratedPassword,
+                    salt,
+                    parameters.Suite,
+                    argon2Profile,
+                    cancellationToken).ConfigureAwait(false))
             {
                 keyMaterial = SuiteKeyMaterial.Create(key.Bytes, parameters);
             }
@@ -530,7 +595,7 @@ public sealed partial class KalynaContainerService
                 long chunkIndex = 0;
                 while ((read = await ReadChunkAsync(input, cipherChunk, cancellationToken).ConfigureAwait(false)) > 0)
                 {
-                    DeriveChunkNonce(nonce, chunkIndex, counter);
+                    DeriveChunkNonce(chunkNonceBase, chunkIndex, counter);
 
                     if (parameters.Cascade is { OutermostIsAead: true } aeadLayout)
                     {
@@ -550,7 +615,7 @@ public sealed partial class KalynaContainerService
                         (byte[] aeadKey, byte[] aeadNonce) =
                             SplitAeadMaterial(aeadLayout, keyMaterial.EncryptionKey, counter);
                         byte[] associated =
-                            BuildChunkAssociatedData(parameters, nonce, chunkIndex, payload);
+                            BuildChunkAssociatedData(parameters, chunkNonceBase, chunkIndex, payload);
                         try
                         {
                             NativeChaChaPoly.Decrypt(
@@ -593,6 +658,9 @@ public sealed partial class KalynaContainerService
             ZeroIfNotNull(counter);
             ZeroIfNotNull(tweak);
             ZeroIfNotNull(nonce);
+            ZeroIfNotNull(secondSalt);
+            ZeroIfNotNull(secondNonce);
+            ZeroIfNotNull(chunkNonceBase);
             ZeroIfNotNull(salt);
             ZeroIfNotNull(magic);
             ZeroIfNotNull(headerLengthBytes);
@@ -1015,6 +1083,27 @@ public sealed partial class KalynaContainerService
     /// sequence identical for every suite and removes a branch that could put
     /// a reader and a writer on different derivations.
     /// </remarks>
+    /// <summary>
+    /// The material every chunk nonce hangs off.
+    /// </summary>
+    /// <remarks>
+    /// One-round suites use their single nonce. A two-round suite uses both,
+    /// laid end to end, so each chunk nonce depends on the entropy of both
+    /// rounds and neither of the two stored nonces is dead weight in the header.
+    /// </remarks>
+    private static byte[] BuildChunkNonceBase(byte[] nonce, byte[] secondNonce)
+    {
+        if (secondNonce.Length == 0)
+        {
+            return (byte[])nonce.Clone();
+        }
+
+        byte[] combined = new byte[checked(nonce.Length + secondNonce.Length)];
+        nonce.CopyTo(combined, 0);
+        secondNonce.CopyTo(combined, nonce.Length);
+        return combined;
+    }
+
     private static void DeriveChunkNonce(
         byte[] baseNonce,
         long chunkIndex,
