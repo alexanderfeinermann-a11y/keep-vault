@@ -412,14 +412,16 @@ public sealed class KeySheetService
         // The password is written by hand and comes first: it is the part the
         // owner supplies, and reading the sheet top to bottom should follow the
         // order the factors are actually entered in.
-        y += 8;
+        y += 4;
         for (int index = 0; index < 3; index++)
         {
-            y += 24;
+            y += 22;
             graphics.DrawLine(XPens.Black, margin, y, page.Width.Point - margin, y);
         }
 
-        y += 16;
+        // Same breathing space as between every other block above, so the three
+        // sheets read as one document rather than three different ones.
+        y += 30;
 
         graphics.DrawString(
             en
@@ -434,7 +436,7 @@ public sealed class KeySheetService
             monoFont,
             XBrushes.Black,
             new XRect(margin, y, bodyWidth, 92));
-        y += 88;
+        y += 80;
 
         graphics.DrawString(
             en
