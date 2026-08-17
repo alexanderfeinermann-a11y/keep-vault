@@ -32,8 +32,12 @@ public sealed partial class KalynaContainerService
     {
         return suite switch
         {
+            // threefish_ref also provides Skein for the second MAC, so every
+            // suite needs it; Kalyna is needed by its own suite and by the
+            // cascade that runs it underneath Threefish.
             EncryptionSuite.Kalyna512_512 => IsNativeKalynaAvailable && IsNativeThreefishAvailable,
             EncryptionSuite.Threefish1024 => IsNativeThreefishAvailable,
+            EncryptionSuite.ThreefishOverKalyna => IsNativeKalynaAvailable && IsNativeThreefishAvailable,
             _ => false,
         };
     }

@@ -1292,6 +1292,17 @@ internal static partial class MacComprehensiveTests
             EncryptionSuiteCatalog.Default == EncryptionSuite.ThreefishOverKalyna,
             "The cascade is not the default suite.");
 
+        // Every suite the catalogue knows must also report itself as usable,
+        // or the GUI offers a suite it then refuses to run — and the default
+        // suite is the one that would fail first.
+        var containerService = new KalynaContainerService();
+        foreach (EncryptionSuite candidate in Enum.GetValues<EncryptionSuite>())
+        {
+            Require(
+                containerService.IsNativeSuiteAvailable(candidate),
+                $"{candidate} is offered by the catalogue but reports no native support.");
+        }
+
         // A payload with structure an attacker would recognise instantly.
         byte[] marker = "KZPAQ1\0KEEP-VAULT-PLAINTEXT-MARKER"u8.ToArray();
         byte[] plaintext = new byte[64 * 1024];
