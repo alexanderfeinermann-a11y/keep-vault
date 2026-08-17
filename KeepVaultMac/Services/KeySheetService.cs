@@ -685,15 +685,17 @@ public sealed class KeySheetService
         DrawSteps(graphics, normalFont, margin, bodyWidth, ref y, en
             ? [
                 "1. Download the macOS release from the page above.",
-                "2. Extract the ZIP file. The .khsig files belong next to the app and must stay there.",
+                "2. Extract the ZIP file. The .khsig files belong next to Keep Vault.app and must stay there.",
                 "3. Run tools/Install-KeepVault-macOS.sh; it installs the app and creates a Desktop alias.",
-                "4. The app checks Apple's signature and its own dual signature at every start.",
+                "4. QR-Scanner.app in the same package reads the codes above. Keep Vault never uses the camera.",
+                "5. The app checks Apple's signature and its own dual signature at every start.",
             ]
             : [
                 "1. macOS-Release von der oben genannten Seite herunterladen.",
-                "2. Die ZIP-Datei entpacken. Die .khsig-Dateien gehören neben die App und müssen dort bleiben.",
+                "2. Die ZIP-Datei entpacken. Die .khsig-Dateien gehören neben Keep Vault.app und müssen dort bleiben.",
                 "3. tools/Install-KeepVault-macOS.sh ausführen; es installiert die App und legt ein Alias an.",
-                "4. Die App prüft bei jedem Start Apples Signatur und ihre eigene duale Signatur.",
+                "4. QR-Scanner.app aus demselben Paket liest die Codes oben. Keep Vault nutzt die Kamera nie.",
+                "5. Die App prüft bei jedem Start Apples Signatur und ihre eigene duale Signatur.",
             ]);
 
         string footer = en

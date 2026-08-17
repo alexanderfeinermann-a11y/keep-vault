@@ -23,6 +23,9 @@ duerfen nicht getrennt werden.
 
 ### Windows
 
+Der QR-Scanner ist derzeit nur fuer macOS verfuegbar; unter Windows werden die
+Faktoren von Hand eingetippt.
+
 1. `Keep Vault-portable-win-x64.zip` herunterladen.
 2. Vor dem Entpacken in den Dateieigenschaften **Zulassen** setzen, sonst
    blockiert Windows die enthaltenen Programme.
@@ -38,14 +41,21 @@ duerfen nicht getrennt werden.
 Voraussetzung: macOS 14 oder neuer, Apple Silicon oder Intel (universelles
 Binary).
 
+Das macOS-Paket enthaelt **beide Anwendungen**: `Keep Vault.app` und
+`QR-Scanner.app`. Die zweite liest die QR-Codes von den gedruckten
+Schluesselzetteln; sie ist ein eigenstaendiges, sandboxed Programm mit eigener
+Kennung und eigener Signatur. Keep Vault selbst fordert keinen Kamerazugriff an.
+
 1. `Keep Vault-portable-macOS.zip` herunterladen und entpacken.
-2. Die Dateien `Keep Vault.app.launcher.*` gehoeren **neben** die App und
-   muessen dort bleiben: der Launcher prueft bei jedem Start seine eigene duale
-   Signatur und startet ohne diese Dateien nicht.
+2. Die Dateien `Keep Vault.app.launcher.*` gehoeren **neben** `Keep Vault.app`
+   und muessen dort bleiben: der Launcher prueft bei jedem Start seine eigene
+   duale Signatur und startet ohne diese Dateien nicht.
 3. `tools/Install-KeepVault-macOS.sh` ausfuehren. Das Skript prueft die
    Signaturen, installiert nach `/Applications` und legt ein Alias auf dem
    Schreibtisch an. Es darf **nicht** mit `sudo` laufen.
-4. Optional vorab pruefen:
+4. `QR-Scanner.app` nach Belieben ebenfalls nach `/Applications` legen. Beim
+   ersten Start fragt macOS einmal nach der Kamera.
+5. Optional vorab pruefen:
    `"./Keep Vault Release Verifier" "Keep Vault.app"`
 
 Beim Start prueft die App Apples Code-Signatur, die eingebetteten CDHash-Pins

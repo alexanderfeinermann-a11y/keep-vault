@@ -156,6 +156,19 @@ for launcher_sidecar_suffix in .sha3 .skein .khsig .sha3.khsig .skein.khsig; do
 done
 ditto ${verifier_path} ${portable_dir}/Keep\ Vault\ Release\ Verifier
 
+# The QR scanner rides along when it has been built. It is a separate program
+# with its own identifier, signature and sandbox, and shares no code with Keep
+# Vault — it travels in the same package only because the two are used together
+# and should be versioned together.
+scanner_app=${repo_root}/QrCodeScanner/dist/QR-Scanner.app
+if [[ -d ${scanner_app} && ! -L ${scanner_app} ]]; then
+  ditto ${scanner_app} ${portable_dir}/QR-Scanner.app
+  codesign --verify --strict --verbose=2 ${portable_dir}/QR-Scanner.app
+  print "bundled_scanner=${portable_dir}/QR-Scanner.app"
+else
+  print -u2 'QR-Scanner.app was not built; the package will contain Keep Vault only.'
+fi
+
 props=${mac_project}/Directory.Build.props
 read_pin() {
   /usr/bin/sed -n "s|.*<$1>\(.*\)</$1>.*|\1|p" ${props} | head -1
@@ -168,6 +181,10 @@ Keep Vault Portable (macOS)
 Start:
   Keep Vault.app
   Keep Vault.app.launcher.khsig (plus .sha3/.skein sidecars)
+
+Reading the printed QR codes:
+  QR-Scanner.app — a separate, sandboxed program. Keep Vault itself never
+  touches the camera and declares no hardware capability at all.
 
 This folder is self-contained for macOS ${architecture} and requires no
 installer and no .NET runtime. Keep the app bundle, the verifier, and the
