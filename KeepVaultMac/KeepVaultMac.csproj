@@ -89,6 +89,7 @@
     <Compile Include="../KalynaArchiver.Signing/HybridSignatureService.cs" Link="Signing/HybridSignatureService.cs" />
     <Compile Include="../KalynaArchiver.Signing/Mldsa87.cs" Link="Signing/Mldsa87.cs" />
     <Compile Include="../KalynaArchiver.Signing/Sha3_512Compat.cs" Link="Signing/Sha3_512Compat.cs" />
+    <Compile Include="../KalynaArchiver.Signing/Sha512Compat.cs" Link="Signing/Sha512Compat.cs" />
   </ItemGroup>
 
   <ItemGroup>

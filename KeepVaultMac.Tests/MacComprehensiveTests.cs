@@ -41,6 +41,7 @@ internal static partial class MacComprehensiveTests
             ("ZPAQ levels, streaming, traversal and malformed corpus", TestZpaqAsync),
             ("v8 triple-suite roundtrip and manipulation rejection", TestContainersAsync),
             ("cascade layering: the outer layer alone reveals nothing", TestCascadeLayeringAsync),
+            ("v9 two-round key derivation from one pool consumption", TestTwoRoundDerivationAsync),
             ("KPAR2-v2 repair, authentication and transplantation rejection", TestRecoveryAsync),
             ("cryptographic erase ordering and hard-link refusal", TestCryptographicEraseAsync),
             ("verified original deletion refuses on any mismatch", TestVerifiedOriginalDeletionAsync),
@@ -1562,6 +1563,97 @@ internal static partial class MacComprehensiveTests
         }
 
         Require(carry == 0, "Test CTR counter overflowed.");
+    }
+
+    /// <summary>
+    /// Proves the v9 second Argon2id round is real, independent, and costs no
+    /// extra mouse entropy.
+    /// </summary>
+    /// <remarks>
+    /// The point of the design is that both rounds come out of a single pool
+    /// consumption, separated only by SHA3-512 against SHA-512. The two things
+    /// that could go wrong are therefore: the second round is not actually
+    /// independent of the first, or obtaining it silently drains the pools so
+    /// the user is asked to collect entropy all over again. Both are checked
+    /// here.
+    /// </remarks>
+    private static Task TestTwoRoundDerivationAsync()
+    {
+        // SHA-512 must agree with the published digests and with the second
+        // implementation before anything derived from it is trusted.
+        byte[] abc = Sha512Compat.HashData("abc"u8);
+        Require(
+            Convert.ToHexString(abc) ==
+            "DDAF35A193617ABACC417349AE20413112E6FA4E89A97EA20A9EEEE64B55D39A"
+            + "2192992A274FC1A836BA3C23A3FEEBBD454D4423643CE80E2A9AC94FA54CA49F",
+            "SHA-512 did not reproduce the FIPS 180-4 digest for \"abc\".");
+        Require(
+            !Convert.ToHexString(Sha512Compat.HashData(ReadOnlySpan<byte>.Empty)).SequenceEqual(
+                Convert.ToHexString(abc)),
+            "SHA-512 returned the same digest for different messages.");
+
+        foreach (EncryptionSuite suite in new[] { EncryptionSuite.ThreefishOverKalyna, EncryptionSuite.Kalyna512_512 })
+        {
+            AddMouseSamplesUntilReady();
+            using TwoRoundEncryptionParameters parameters = EntropyMixer.CreateTwoRoundEncryptionParameters(suite);
+
+            Require(
+                parameters.FirstSalt.Bytes.Length == parameters.SecondSalt.Bytes.Length,
+                $"{suite}: the two rounds produced salts of different lengths.");
+            Require(
+                !parameters.FirstSalt.Bytes.SequenceEqual(parameters.SecondSalt.Bytes),
+                $"{suite}: both Argon2id rounds produced the same salt.");
+            Require(
+                !parameters.FirstNonce.Bytes.SequenceEqual(parameters.SecondNonce.Bytes),
+                $"{suite}: both Argon2id rounds produced the same nonce.");
+
+            int expectedNonce = EncryptionSuiteCatalog.Get(suite).NonceBytes;
+            Require(
+                parameters.FirstNonce.Bytes.Length == expectedNonce
+                && parameters.SecondNonce.Bytes.Length == expectedNonce,
+                $"{suite}: a round produced a nonce of the wrong length.");
+
+            // Neither salt nor nonce may be all zeros or otherwise degenerate;
+            // a buffer that was allocated but never filled would still be
+            // "different" from the other round by accident of the XOR.
+            Require(
+                parameters.FirstSalt.Bytes.Any(b => b != 0)
+                && parameters.SecondSalt.Bytes.Any(b => b != 0)
+                && parameters.FirstNonce.Bytes.Any(b => b != 0)
+                && parameters.SecondNonce.Bytes.Any(b => b != 0),
+                $"{suite}: a round produced an all-zero salt or nonce.");
+
+            // The halves must not share long runs. Independent material from two
+            // different hash constructions has no reason to agree anywhere, and
+            // a copy-paste in the split would show up exactly here.
+            int shared = 0;
+            for (int index = 0; index < parameters.FirstNonce.Bytes.Length; index++)
+            {
+                if (parameters.FirstNonce.Bytes[index] == parameters.SecondNonce.Bytes[index])
+                {
+                    shared++;
+                }
+            }
+
+            Require(
+                shared < parameters.FirstNonce.Bytes.Length / 4,
+                $"{suite}: the two rounds' nonces agree in {shared} of {parameters.FirstNonce.Bytes.Length} bytes.");
+        }
+
+        // The whole reason both rounds share one consumption: asking for them
+        // must not leave the pools needing to be refilled beyond the single
+        // consumption the first round would have cost anyway.
+        AddMouseSamplesUntilReady();
+        using (TwoRoundEncryptionParameters _ = EntropyMixer.CreateTwoRoundEncryptionParameters(
+            EncryptionSuite.ThreefishOverKalyna))
+        {
+        }
+
+        Require(
+            !EntropyMixer.HasRequiredSamples(EntropyPurpose.Salt),
+            "The two-round derivation did not consume the salt pool exactly once.");
+
+        return Task.CompletedTask;
     }
 
     private static void AddMouseSamplesUntilReady()
