@@ -157,6 +157,22 @@ build_architecture() {
     ${link_flags[@]}
 
   ${cxx} ${common_flags[@]} ${cryptopp_flags[@]} -dynamiclib -pthread \
+    -install_name @rpath/libaes_ref.dylib \
+    -o ${output_dir}/libaes_ref.dylib \
+    -I${cryptopp_dir} \
+    ${repo_root}/native/aes_ref_export.cpp \
+    ${cryptopp_archive} \
+    ${link_flags[@]}
+
+  ${cxx} ${common_flags[@]} ${cryptopp_flags[@]} -dynamiclib -pthread \
+    -install_name @rpath/libchachapoly_ref.dylib \
+    -o ${output_dir}/libchachapoly_ref.dylib \
+    -I${cryptopp_dir} \
+    ${repo_root}/native/chachapoly_ref_export.cpp \
+    ${cryptopp_archive} \
+    ${link_flags[@]}
+
+  ${cxx} ${common_flags[@]} ${cryptopp_flags[@]} -dynamiclib -pthread \
     -install_name @rpath/libshacal2_ref.dylib \
     -o ${output_dir}/libshacal2_ref.dylib \
     -I${cryptopp_dir} \
@@ -237,7 +253,7 @@ build_architecture x86_64 osx-x64
 
 universal_dir=${output_root}/osx-universal
 mkdir -p -- ${universal_dir}
-artifacts=(zpaq argon2 libargon2_ref.dylib libkalyna_ref.dylib libmars_ref.dylib libmldsa87_ref.dylib libshacal2_ref.dylib libsha3_ref.dylib libthreefish_ref.dylib)
+artifacts=(zpaq argon2 libaes_ref.dylib libargon2_ref.dylib libchachapoly_ref.dylib libkalyna_ref.dylib libmars_ref.dylib libmldsa87_ref.dylib libshacal2_ref.dylib libsha3_ref.dylib libthreefish_ref.dylib)
 for artifact_name in ${artifacts[@]}; do
   xcrun lipo -create \
     ${output_root}/osx-arm64/${artifact_name} \

@@ -100,6 +100,8 @@
     <Content Include="Native/osx-arm64/argon2" CopyToOutputDirectory="PreserveNewest" TargetPath="Native/argon2" />
     <Content Include="Native/osx-arm64/libargon2_ref.dylib" CopyToOutputDirectory="PreserveNewest" TargetPath="Native/libargon2_ref.dylib" />
     <Content Include="Native/osx-arm64/libkalyna_ref.dylib" CopyToOutputDirectory="PreserveNewest" TargetPath="Native/libkalyna_ref.dylib" />
+    <Content Include="Native/osx-arm64/libaes_ref.dylib" CopyToOutputDirectory="PreserveNewest" TargetPath="Native/libaes_ref.dylib" />
+    <Content Include="Native/osx-arm64/libchachapoly_ref.dylib" CopyToOutputDirectory="PreserveNewest" TargetPath="Native/libchachapoly_ref.dylib" />
     <Content Include="Native/osx-arm64/libmars_ref.dylib" CopyToOutputDirectory="PreserveNewest" TargetPath="Native/libmars_ref.dylib" />
     <Content Include="Native/osx-arm64/libshacal2_ref.dylib" CopyToOutputDirectory="PreserveNewest" TargetPath="Native/libshacal2_ref.dylib" />
     <Content Include="Native/osx-arm64/libthreefish_ref.dylib" CopyToOutputDirectory="PreserveNewest" TargetPath="Native/libthreefish_ref.dylib" />

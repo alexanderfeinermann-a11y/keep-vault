@@ -258,3 +258,273 @@ internal static unsafe class NativeShacal2
         }
     }
 }
+
+internal static unsafe class NativeAes
+{
+    private const string DllName = "aes_ref.dll";
+    private const int KeyBytes = 32;
+
+    internal const int BlockBytes = 16;
+
+    private static readonly object LoadGate = new();
+    private static nint _libraryHandle;
+    private static delegate* unmanaged[Cdecl]<byte*, byte*, byte*, byte*, nuint, int> _xcryptCtr;
+    private static delegate* unmanaged[Cdecl]<byte*, nuint, byte*, byte*, int> _encryptBlock;
+
+    public static string? LastLoadError { get; private set; }
+
+    public static bool IsAvailable()
+    {
+        try
+        {
+            EnsureLoaded();
+            LastLoadError = null;
+            return true;
+        }
+        catch (Exception ex)
+        {
+            LastLoadError = $"{ex.GetType().Name}: {ex.Message}";
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// The reference AES, used when the platform implementation is unavailable
+    /// and by the tests to check the platform against something independent.
+    /// </summary>
+    /// <remarks>
+    /// This is the slow path on purpose. Production AES runs on the platform,
+    /// which reaches AES-NI and the Apple silicon crypto extensions; this one
+    /// is compiled with Crypto++'s assembly paths switched off.
+    /// </remarks>
+    public static void XCryptCtr256(byte[] key, byte[] nonce, byte[] input, byte[] output, int length)
+    {
+        if (key.Length != KeyBytes || nonce.Length != BlockBytes
+            || length < 0 || input.Length < length || output.Length < length)
+        {
+            throw new ArgumentException(
+                $"AES-256 requires a {KeyBytes}-byte key, a {BlockBytes}-byte nonce, and sufficiently large buffers.");
+        }
+
+        EnsureLoaded();
+        int result;
+        fixed (byte* keyPointer = key)
+        fixed (byte* noncePointer = nonce)
+        fixed (byte* inputPointer = input)
+        fixed (byte* outputPointer = output)
+        {
+            result = _xcryptCtr(keyPointer, noncePointer, inputPointer, outputPointer, (nuint)length);
+        }
+
+        if (result != 0)
+        {
+            throw new CryptographicException($"AES reference library returned error {result}.");
+        }
+    }
+
+    internal static void EncryptBlock(byte[] key, byte[] input, byte[] output)
+    {
+        if (input.Length != BlockBytes || output.Length < BlockBytes)
+        {
+            throw new ArgumentException($"AES operates on {BlockBytes}-byte blocks.");
+        }
+
+        EnsureLoaded();
+        int result;
+        fixed (byte* keyPointer = key)
+        fixed (byte* inputPointer = input)
+        fixed (byte* outputPointer = output)
+        {
+            result = _encryptBlock(keyPointer, (nuint)key.Length, inputPointer, outputPointer);
+        }
+
+        if (result != 0)
+        {
+            throw new CryptographicException($"AES reference library returned error {result}.");
+        }
+    }
+
+    private static void EnsureLoaded()
+    {
+        lock (LoadGate)
+        {
+            if (_libraryHandle != 0)
+            {
+                return;
+            }
+
+            nint handle = NativeToolIntegrity.LoadTrustedLibrary(DllName);
+            try
+            {
+                _xcryptCtr = (delegate* unmanaged[Cdecl]<byte*, byte*, byte*, byte*, nuint, int>)
+                    NativeLibrary.GetExport(handle, "aes_256_ctr_xcrypt");
+                _encryptBlock = (delegate* unmanaged[Cdecl]<byte*, nuint, byte*, byte*, int>)
+                    NativeLibrary.GetExport(handle, "aes_encrypt_block");
+                _libraryHandle = handle;
+            }
+            catch
+            {
+                NativeLibrary.Free(handle);
+                _xcryptCtr = null;
+                _encryptBlock = null;
+                throw;
+            }
+        }
+    }
+}
+
+internal static unsafe class NativeChaChaPoly
+{
+    private const string DllName = "chachapoly_ref.dll";
+
+    internal const int KeyBytes = 32;
+    internal const int NonceBytes = 12;
+    internal const int TagBytes = 16;
+
+    private static readonly object LoadGate = new();
+    private static nint _libraryHandle;
+    private static delegate* unmanaged[Cdecl]<byte*, byte*, byte*, nuint, byte*, byte*, nuint, byte*, int> _encrypt;
+    private static delegate* unmanaged[Cdecl]<byte*, byte*, byte*, nuint, byte*, byte*, nuint, byte*, int> _decrypt;
+
+    public static string? LastLoadError { get; private set; }
+
+    public static bool IsAvailable()
+    {
+        try
+        {
+            EnsureLoaded();
+            LastLoadError = null;
+            return true;
+        }
+        catch (Exception ex)
+        {
+            LastLoadError = $"{ex.GetType().Name}: {ex.Message}";
+            return false;
+        }
+    }
+
+    public static void Encrypt(
+        byte[] key,
+        byte[] nonce,
+        ReadOnlySpan<byte> associatedData,
+        byte[] plaintext,
+        byte[] ciphertext,
+        int length,
+        byte[] tag)
+    {
+        Validate(key, nonce, tag, plaintext, ciphertext, length);
+
+        EnsureLoaded();
+        int result;
+        fixed (byte* keyPointer = key)
+        fixed (byte* noncePointer = nonce)
+        fixed (byte* aadPointer = associatedData)
+        fixed (byte* inputPointer = plaintext)
+        fixed (byte* outputPointer = ciphertext)
+        fixed (byte* tagPointer = tag)
+        {
+            result = _encrypt(
+                keyPointer, noncePointer, aadPointer, (nuint)associatedData.Length,
+                inputPointer, outputPointer, (nuint)length, tagPointer);
+        }
+
+        ThrowOnError(result);
+    }
+
+    /// <summary>
+    /// Verifies the tag and decrypts, or throws.
+    /// </summary>
+    /// <remarks>
+    /// A failed tag is reported as its own exception rather than folded into a
+    /// generic error. It is the one outcome that means the ciphertext was
+    /// altered, and a caller that cannot tell it apart from a missing library
+    /// cannot react correctly to either.
+    /// </remarks>
+    public static void Decrypt(
+        byte[] key,
+        byte[] nonce,
+        ReadOnlySpan<byte> associatedData,
+        byte[] ciphertext,
+        byte[] plaintext,
+        int length,
+        byte[] tag)
+    {
+        Validate(key, nonce, tag, ciphertext, plaintext, length);
+
+        EnsureLoaded();
+        int result;
+        fixed (byte* keyPointer = key)
+        fixed (byte* noncePointer = nonce)
+        fixed (byte* aadPointer = associatedData)
+        fixed (byte* inputPointer = ciphertext)
+        fixed (byte* outputPointer = plaintext)
+        fixed (byte* tagPointer = tag)
+        {
+            result = _decrypt(
+                keyPointer, noncePointer, aadPointer, (nuint)associatedData.Length,
+                inputPointer, outputPointer, (nuint)length, tagPointer);
+        }
+
+        if (result == 6)
+        {
+            throw new CryptographicException(
+                "The ChaCha20-Poly1305 authentication tag does not match; the ciphertext was altered.");
+        }
+
+        ThrowOnError(result);
+    }
+
+    private static void Validate(byte[] key, byte[] nonce, byte[] tag, byte[] input, byte[] output, int length)
+    {
+        if (key.Length != KeyBytes || nonce.Length != NonceBytes || tag.Length != TagBytes
+            || length < 0 || input.Length < length || output.Length < length)
+        {
+            throw new ArgumentException(
+                $"ChaCha20-Poly1305 requires a {KeyBytes}-byte key, a {NonceBytes}-byte nonce, "
+                + $"a {TagBytes}-byte tag, and sufficiently large buffers.");
+        }
+    }
+
+    private static void ThrowOnError(int result)
+    {
+        if (result == 0)
+        {
+            return;
+        }
+
+        throw new CryptographicException(result switch
+        {
+            1 => "ChaCha20-Poly1305 reference library received invalid buffers.",
+            5 => "ChaCha20-Poly1305 reference library failed internally.",
+            _ => $"ChaCha20-Poly1305 reference library returned error {result}.",
+        });
+    }
+
+    private static void EnsureLoaded()
+    {
+        lock (LoadGate)
+        {
+            if (_libraryHandle != 0)
+            {
+                return;
+            }
+
+            nint handle = NativeToolIntegrity.LoadTrustedLibrary(DllName);
+            try
+            {
+                _encrypt = (delegate* unmanaged[Cdecl]<byte*, byte*, byte*, nuint, byte*, byte*, nuint, byte*, int>)
+                    NativeLibrary.GetExport(handle, "chacha20poly1305_encrypt");
+                _decrypt = (delegate* unmanaged[Cdecl]<byte*, byte*, byte*, nuint, byte*, byte*, nuint, byte*, int>)
+                    NativeLibrary.GetExport(handle, "chacha20poly1305_decrypt");
+                _libraryHandle = handle;
+            }
+            catch
+            {
+                NativeLibrary.Free(handle);
+                _encrypt = null;
+                _decrypt = null;
+                throw;
+            }
+        }
+    }
+}

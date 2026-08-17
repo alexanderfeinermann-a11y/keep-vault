@@ -1650,6 +1650,75 @@ internal static partial class MacComprehensiveTests
             "SHACAL-2");
         Require(shacalChecked >= 1000, $"Only {shacalChecked} SHACAL-2 vectors were exercised.");
 
+
+        Require(NativeAes.IsAvailable(), $"AES reference library unavailable: {NativeAes.LastLoadError}");
+        Require(NativeChaChaPoly.IsAvailable(), $"ChaCha20-Poly1305 library unavailable: {NativeChaChaPoly.LastLoadError}");
+
+        // FIPS-197 C.3: the published AES-256 known-answer.
+        byte[] fipsKey = Enumerable.Range(0, 32).Select(i => (byte)i).ToArray();
+        byte[] fipsBlock = Convert.FromHexString("00112233445566778899AABBCCDDEEFF");
+        byte[] fipsActual = new byte[NativeAes.BlockBytes];
+        NativeAes.EncryptBlock(fipsKey, fipsBlock, fipsActual);
+        Require(
+            Convert.ToHexString(fipsActual) == "8EA2B7CA516745BFEAFC49904B496089",
+            $"AES-256 does not reproduce the FIPS-197 vector: {Convert.ToHexString(fipsActual)}.");
+
+        // The platform AES and the reference must agree. The platform path is
+        // what production uses; the reference is what it can be checked
+        // against, and a disagreement means one of them is wrong.
+        for (int trial = 0; trial < 16; trial++)
+        {
+            byte[] key = RandomNumberGenerator.GetBytes(32);
+            byte[] block = RandomNumberGenerator.GetBytes(NativeAes.BlockBytes);
+            byte[] reference = new byte[NativeAes.BlockBytes];
+            NativeAes.EncryptBlock(key, block, reference);
+
+            using var platform = Aes.Create();
+            platform.Key = key;
+            platform.Mode = CipherMode.ECB;
+            platform.Padding = PaddingMode.None;
+            byte[] managed = platform.EncryptEcb(block, PaddingMode.None);
+
+            Require(
+                reference.AsSpan().SequenceEqual(managed),
+                $"The platform AES and the reference AES disagree: "
+                + $"{Convert.ToHexString(managed)} against {Convert.ToHexString(reference)}.");
+        }
+
+        // RFC 8439 section 2.8.2, ciphertext and tag.
+        byte[] aeadKey = Convert.FromHexString(
+            "808182838485868788898A8B8C8D8E8F909192939495969798999A9B9C9D9E9F");
+        byte[] aeadNonce = Convert.FromHexString("070000004041424344454647");
+        byte[] aeadAad = Convert.FromHexString("50515253C0C1C2C3C4C5C6C7");
+        byte[] aeadPlain = System.Text.Encoding.ASCII.GetBytes(
+            "Ladies and Gentlemen of the class of '99: If I could offer you only one tip for the future, sunscreen would be it.");
+        byte[] aeadCipher = new byte[aeadPlain.Length];
+        byte[] aeadTag = new byte[NativeChaChaPoly.TagBytes];
+        NativeChaChaPoly.Encrypt(aeadKey, aeadNonce, aeadAad, aeadPlain, aeadCipher, aeadPlain.Length, aeadTag);
+        Require(
+            Convert.ToHexString(aeadTag) == "1AE10B594F09E26A7E902ECBD0600691",
+            $"ChaCha20-Poly1305 does not reproduce the RFC 8439 tag: {Convert.ToHexString(aeadTag)}.");
+
+        byte[] aeadRestored = new byte[aeadPlain.Length];
+        NativeChaChaPoly.Decrypt(aeadKey, aeadNonce, aeadAad, aeadCipher, aeadRestored, aeadPlain.Length, aeadTag);
+        Require(aeadRestored.AsSpan().SequenceEqual(aeadPlain), "ChaCha20-Poly1305 did not round trip.");
+
+        // An AEAD that decrypts a tampered ciphertext is not an AEAD. Both the
+        // tag and the associated data must be refused when altered.
+        byte[] brokenTag = (byte[])aeadTag.Clone();
+        brokenTag[0] ^= 1;
+        RequireThrows<CryptographicException>(
+            () => NativeChaChaPoly.Decrypt(
+                aeadKey, aeadNonce, aeadAad, aeadCipher, aeadRestored, aeadPlain.Length, brokenTag),
+            "ChaCha20-Poly1305 accepted a flipped authentication tag.");
+
+        byte[] brokenAad = (byte[])aeadAad.Clone();
+        brokenAad[0] ^= 1;
+        RequireThrows<CryptographicException>(
+            () => NativeChaChaPoly.Decrypt(
+                aeadKey, aeadNonce, brokenAad, aeadCipher, aeadRestored, aeadPlain.Length, aeadTag),
+            "ChaCha20-Poly1305 accepted altered associated data.");
+
         // CTR is its own inverse and must not depend on how many threads ran.
         // The sizes straddle the block width, the 256 KiB claim and the 1 MiB
         // threshold at which the driver starts handing work to other cores.
