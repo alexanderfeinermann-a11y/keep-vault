@@ -53,7 +53,8 @@ internal sealed record EncryptionSuiteParameters(
     int Sha3MacKeyBytes,
     int SkeinMacKeyBytes,
     int TweakBytes,
-    CascadeLayout? Cascade = null)
+    CascadeLayout? Cascade = null,
+    bool UsesTwoKdfRounds = false)
 {
     public int DerivedKeyBytes => checked(EncryptionKeyBytes + Sha3MacKeyBytes + SkeinMacKeyBytes);
 }

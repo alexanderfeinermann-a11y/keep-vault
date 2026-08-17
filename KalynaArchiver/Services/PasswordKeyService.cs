@@ -30,19 +30,19 @@ public sealed class PasswordKeyService
 
     private const double EntropySafetyFactor = 0.72;
     private static readonly UTF8Encoding StrictUtf8 = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
-    private static readonly byte[] KalynaFactorADomain = "Kalyna-ZPAQ/v8/Kalyna-512-512/SHA3-512/User+Factor-A"u8.ToArray();
-    private static readonly byte[] KalynaFactorBDomain = "Kalyna-ZPAQ/v8/Kalyna-512-512/SHA3-512/User+Factor-B"u8.ToArray();
-    private static readonly byte[] ThreefishFactorADomain = "Kalyna-ZPAQ/v8/Threefish-1024/SHA3-512/User+Factor-A"u8.ToArray();
-    private static readonly byte[] ThreefishFactorBDomain = "Kalyna-ZPAQ/v8/Threefish-1024/SHA3-512/User+Factor-B"u8.ToArray();
+    private static readonly byte[] KalynaFactorADomain = "Kalyna-ZPAQ/v9/Kalyna-512-512/SHA3-512/User+Factor-A"u8.ToArray();
+    private static readonly byte[] KalynaFactorBDomain = "Kalyna-ZPAQ/v9/Kalyna-512-512/SHA3-512/User+Factor-B"u8.ToArray();
+    private static readonly byte[] ThreefishFactorADomain = "Kalyna-ZPAQ/v9/Threefish-1024/SHA3-512/User+Factor-A"u8.ToArray();
+    private static readonly byte[] ThreefishFactorBDomain = "Kalyna-ZPAQ/v9/Threefish-1024/SHA3-512/User+Factor-B"u8.ToArray();
 
     // The cascade gets its own domain rather than reusing either layer's. Two
     // containers built from the same password and factors but different suites
     // must not share a derived key, or a weakness found in one suite would
     // carry over to the other.
     private static readonly byte[] CascadeFactorADomain =
-        "Kalyna-ZPAQ/v8/Threefish-1024-over-Kalyna-512-512/SHA3-512/User+Factor-A"u8.ToArray();
+        "Kalyna-ZPAQ/v9/Threefish-1024-over-Kalyna-512-512/SHA3-512/User+Factor-A"u8.ToArray();
     private static readonly byte[] CascadeFactorBDomain =
-        "Kalyna-ZPAQ/v8/Threefish-1024-over-Kalyna-512-512/SHA3-512/User+Factor-B"u8.ToArray();
+        "Kalyna-ZPAQ/v9/Threefish-1024-over-Kalyna-512-512/SHA3-512/User+Factor-B"u8.ToArray();
     private static readonly string[] CommonPasswordTerms =
     [
         "PASSWORD", "PASSWORT", "LETMEIN", "WELCOME", "ADMIN", "CORRECTHORSEBATTERY",
@@ -263,7 +263,7 @@ public sealed class PasswordKeyService
         {
             throw new ArgumentOutOfRangeException(
                 nameof(profile),
-                $"Argon2id must use the fixed v8 profile: {Argon2Profile.DefaultMemoryKiB} KiB, "
+                $"Argon2id must use the fixed v9 profile: {Argon2Profile.DefaultMemoryKiB} KiB, "
                 + $"{Argon2Profile.DefaultIterations} iterations, parallelism {Argon2Profile.DefaultParallelism}.");
         }
     }

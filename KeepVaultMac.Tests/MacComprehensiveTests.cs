@@ -39,9 +39,10 @@ internal static partial class MacComprehensiveTests
             ("randomised differential testing against every reference library", TestReferenceDifferentialAsync),
             ("Argon2id fixed 1 GiB profile and independent equivalence", TestArgon2Async),
             ("ZPAQ levels, streaming, traversal and malformed corpus", TestZpaqAsync),
-            ("v8 triple-suite roundtrip and manipulation rejection", TestContainersAsync),
+            ("v9 triple-suite roundtrip and manipulation rejection", TestContainersAsync),
             ("cascade layering: the outer layer alone reveals nothing", TestCascadeLayeringAsync),
             ("v9 two-round key derivation from one pool consumption", TestTwoRoundDerivationAsync),
+            ("v9 per-chunk nonces across a multi-chunk archive", TestPerChunkNoncesAsync),
             ("KPAR2-v2 repair, authentication and transplantation rejection", TestRecoveryAsync),
             ("cryptographic erase ordering and hard-link refusal", TestCryptographicEraseAsync),
             ("verified original deletion refuses on any mismatch", TestVerifiedOriginalDeletionAsync),
@@ -986,7 +987,7 @@ internal static partial class MacComprehensiveTests
         Require(!entropy.HasPendingEncryptionParameters, $"{suite} did not consume prepared entropy exactly once.");
         ValidateContainerHeader(path, suite);
         KalynaContainerInfo info = await containers.ReadContainerInfoAsync(path, CancellationToken.None).ConfigureAwait(false);
-        Require(info.Version == 8 && info.Suite == suite && info.GeneratedPasswordFactorCount == 2 && info.GeneratedPasswordBits == 1024, $"{suite} v8 header metadata mismatch.");
+        Require(info.Version == 9 && info.Suite == suite && info.GeneratedPasswordFactorCount == 2 && info.GeneratedPasswordBits == 1024, $"{suite} v9 header metadata mismatch.");
 
         using var output = new MemoryStream();
         await containers.DecryptToStreamAsync(path, UserPassword, factorA, factorB, output, null, CancellationToken.None).ConfigureAwait(false);
@@ -1021,13 +1022,13 @@ internal static partial class MacComprehensiveTests
             () => containers.ReadContainerInfoAsync(nonCanonical, CancellationToken.None),
             $"{suite} accepted noncanonical header JSON.").ConfigureAwait(false);
 
-        // v8 is a clean break. A container claiming any other version must be
+        // v9 is a clean break. A container claiming any other version must be
         // refused outright rather than read on a compatibility path, and the
         // refusal must not depend on the MACs noticing the edit afterwards.
-        foreach (int rejected in new[] { 7, 6, 9 })
+        foreach (int rejected in new[] { 7, 8, 10 })
         {
             string downgraded = CopyContainer(path, root, $"{suite}-version-{rejected}.kzpaq");
-            ReplaceHeaderToken(downgraded, "\"Version\":8", $"\"Version\":{rejected}");
+            ReplaceHeaderToken(downgraded, "\"Version\":9", $"\"Version\":{rejected}");
             await RequireThrowsAsync<InvalidDataException>(
                 () => containers.ReadContainerInfoAsync(downgraded, CancellationToken.None),
                 $"{suite} accepted a container claiming version {rejected}.").ConfigureAwait(false);
@@ -1384,7 +1385,23 @@ internal static partial class MacComprehensiveTests
             using JsonDocument document = JsonDocument.Parse(headerBytes);
             JsonElement header = document.RootElement;
             EncryptionSuiteParameters parameters = EncryptionSuiteCatalog.Get(suite);
-            Require(header.GetProperty("Version").GetInt32() == 8, "Container version is not v8.");
+            Require(header.GetProperty("Version").GetInt32() == 9, "Container version is not v9.");
+
+            // The second-round fields must be present and null for a
+            // single-round suite. Present-and-null is not cosmetic: the reader
+            // compares the header against its own canonical re-serialization,
+            // so a field that vanished would make the app reject containers it
+            // had just written.
+            Require(
+                header.TryGetProperty("SecondSalt", out JsonElement secondSalt)
+                && header.TryGetProperty("SecondNonce", out JsonElement secondNonce)
+                && secondSalt.ValueKind == JsonValueKind.Null
+                && secondNonce.ValueKind == JsonValueKind.Null,
+                "Container header does not carry null second-round material for a single-round suite.");
+            Require(
+                header.GetProperty("SecondSaltBits").GetInt32() == 0
+                && header.GetProperty("SecondNonceBits").GetInt32() == 0,
+                "Container header declares second-round sizes for a single-round suite.");
             Require(header.GetProperty("Algorithm").GetString() == parameters.Algorithm, "Container algorithm label mismatch.");
             Require(header.GetProperty("CounterEndian").GetString() == EncryptionSuiteCatalog.CounterEndian, "Container counter endian mismatch.");
             Require(header.GetProperty("Argon2MemoryKiB").GetInt32() == Argon2Profile.DefaultMemoryKiB, "Container Argon2 memory is not 1 GiB.");
@@ -1577,6 +1594,110 @@ internal static partial class MacComprehensiveTests
     /// the user is asked to collect entropy all over again. Both are checked
     /// here.
     /// </remarks>
+    /// <summary>
+    /// Encrypts a payload spanning several chunks and checks that identical
+    /// plaintext chunks do not produce identical ciphertext.
+    /// </summary>
+    /// <remarks>
+    /// This is the property per-chunk nonces exist for. Under one continuous
+    /// counter the keystream never repeats either — until the counter wraps,
+    /// which is precisely the case an arbitrarily large archive can reach. The
+    /// test cannot write an archive that large, so it checks the mechanism
+    /// instead: the plaintext is the same 16 MiB block repeated, so if every
+    /// chunk were encrypted under the same counter start the ciphertext chunks
+    /// would be byte-identical.
+    ///
+    /// A roundtrip is done as well, because a nonce derivation that the writer
+    /// and the reader disagree about would still produce different ciphertext
+    /// per chunk and would still pass the first check.
+    /// </remarks>
+    private static async Task TestPerChunkNoncesAsync()
+    {
+        const int chunkSize = 16 * 1024 * 1024;
+        string root = CreateTempRoot("keep-vault-chunk-nonce-");
+        try
+        {
+            // Encryption runs directly on the ZPAQ stream, so no compression
+            // sits between this payload and the cipher: two identical 16 MiB
+            // halves reach the cipher as exactly two identical chunks.
+            byte[] half = new byte[chunkSize];
+            for (int index = 0; index < half.Length; index++)
+            {
+                half[index] = (byte)(index & 0xFF);
+            }
+
+            byte[] payload = new byte[2 * chunkSize];
+            half.CopyTo(payload, 0);
+            half.CopyTo(payload, chunkSize);
+
+            foreach (EncryptionSuite suite in Enum.GetValues<EncryptionSuite>())
+            {
+                AddMouseSamplesUntilReady();
+                using GeneratedArchiveEntropy entropy = EntropyMixer.CreateArchiveEntropy();
+                var containers = new KalynaContainerService();
+                string archive = Path.Combine(root, $"{suite}.kzpaq");
+
+                await using (var input = new MemoryStream(payload, writable: false))
+                {
+                    await containers.EncryptZpaqStreamWithPreparedEntropyAsync(
+                        input,
+                        archive,
+                        UserPassword,
+                        entropy.FirstPassword,
+                        entropy.SecondPassword,
+                        suite,
+                        entropy,
+                        null,
+                        null,
+                        CancellationToken.None).ConfigureAwait(false);
+                }
+
+                byte[] container = await File.ReadAllBytesAsync(archive).ConfigureAwait(false);
+                Require(
+                    container.LongLength > chunkSize,
+                    $"{suite}: the container is only {container.LongLength} bytes and cannot span two chunks.");
+
+                // The last 1 MiB of the ciphertext against the 1 MiB exactly one
+                // chunk earlier. The plaintext under both is identical, so with a
+                // single counter running across the archive these would differ
+                // only by the counter — and with a per-chunk nonce they differ
+                // completely. Identical here would mean the nonce never moved.
+                const int span = 1 << 20;
+                ReadOnlySpan<byte> first = container.AsSpan(container.Length - chunkSize - span, span);
+                ReadOnlySpan<byte> second = container.AsSpan(container.Length - span, span);
+                Require(
+                    !first.SequenceEqual(second),
+                    $"{suite}: two ciphertext regions one chunk apart are identical; the chunk nonce did not change.");
+
+                // A derivation the reader disagrees with would also produce
+                // different ciphertext per chunk and would still pass the check
+                // above, so the roundtrip is what proves both sides agree.
+                await using var output = new MemoryStream();
+                await containers.DecryptToStreamAsync(
+                    archive,
+                    UserPassword,
+                    entropy.FirstPassword,
+                    entropy.SecondPassword,
+                    output,
+                    null,
+                    CancellationToken.None).ConfigureAwait(false);
+
+                Require(
+                    output.Length == payload.LongLength,
+                    $"{suite}: the restored payload is {output.Length} bytes rather than {payload.LongLength}.");
+                Require(
+                    output.ToArray().AsSpan().SequenceEqual(payload),
+                    $"{suite}: the restored multi-chunk payload does not match the original.");
+
+                File.Delete(archive);
+            }
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
     private static Task TestTwoRoundDerivationAsync()
     {
         // SHA-512 must agree with the published digests and with the second

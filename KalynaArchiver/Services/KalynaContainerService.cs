@@ -11,12 +11,12 @@ namespace KalynaArchiver.Services;
 public sealed partial class KalynaContainerService
 {
     private static readonly byte[] Magic = "KZPAQ1\0"u8.ToArray();
-    private static readonly byte[] ThreefishTweakDomain = "Kalyna-ZPAQ/v8/Threefish-1024/CTR-Tweak"u8.ToArray();
+    private static readonly byte[] ThreefishTweakDomain = "Kalyna-ZPAQ/v9/Threefish-1024/CTR-Tweak"u8.ToArray();
     // Version 8 introduces the cascade suite and drops every earlier version.
     // There is deliberately no reader for v7: a format this app writes once and
     // reads years later is safer with one shape than with a compatibility path
     // that is exercised rarely and audited less.
-    private const int CurrentVersion = 8;
+    private const int CurrentVersion = 9;
     private const int BufferSize = 16 * 1024 * 1024;
     private const int Sha3TagSize = 64;
     private const int SkeinTagSize = 128;
@@ -290,13 +290,15 @@ public sealed partial class KalynaContainerService
                     {
                         int read;
                         long plaintextBytes = 0;
+                        long chunkIndex = 0;
                         while ((read = await ReadChunkAsync(plainZpaqStream, plainChunk, cancellationToken).ConfigureAwait(false)) > 0)
                         {
                             plaintextBytes = checked(plaintextBytes + read);
+                            DeriveChunkNonce(nonce, chunkIndex, counter);
                             XCrypt(parameters, keyMaterial.EncryptionKey, tweak, counter, plainChunk, cipherChunk, read);
                             await output.WriteAsync(cipherChunk.AsMemory(0, read), cancellationToken).ConfigureAwait(false);
                             AppendAuthentication(hmac, skeinMac, cipherChunk.AsSpan(0, read));
-                            AdvanceCounter(parameters, counter, read);
+                            chunkIndex = checked(chunkIndex + 1);
                             CryptographicOperations.ZeroMemory(plainChunk.AsSpan(0, read));
                             CryptographicOperations.ZeroMemory(cipherChunk.AsSpan(0, read));
                         }
@@ -475,11 +477,13 @@ public sealed partial class KalynaContainerService
             try
             {
                 int read;
+                long chunkIndex = 0;
                 while ((read = await ReadChunkAsync(input, cipherChunk, cancellationToken).ConfigureAwait(false)) > 0)
                 {
+                    DeriveChunkNonce(nonce, chunkIndex, counter);
                     XCrypt(parameters, keyMaterial.EncryptionKey, tweak, counter, cipherChunk, plainChunk, read);
                     await plainZpaqDestination.WriteAsync(plainChunk.AsMemory(0, read), cancellationToken).ConfigureAwait(false);
-                    AdvanceCounter(parameters, counter, read);
+                    chunkIndex = checked(chunkIndex + 1);
                     CryptographicOperations.ZeroMemory(cipherChunk.AsSpan(0, read));
                     CryptographicOperations.ZeroMemory(plainChunk.AsSpan(0, read));
                 }
@@ -769,7 +773,7 @@ public sealed partial class KalynaContainerService
             {
                 if (!headerBytes.AsSpan().SequenceEqual(canonicalHeader))
                 {
-                    throw new InvalidDataException("Container header is not in the unique canonical v8 JSON representation.");
+                    throw new InvalidDataException("Container header is not in the unique canonical v9 JSON representation.");
                 }
             }
             finally
@@ -787,7 +791,7 @@ public sealed partial class KalynaContainerService
         }
         catch (JsonException ex)
         {
-            throw new InvalidDataException("Container header is not valid canonical v8 JSON.", ex);
+            throw new InvalidDataException("Container header is not valid canonical v9 JSON.", ex);
         }
     }
 
@@ -899,6 +903,70 @@ public sealed partial class KalynaContainerService
     /// cores read each byte before writing the same index and never declare
     /// their buffers restricted, so the aliasing is defined.
     /// </remarks>
+    private static readonly byte[] ChunkNonceDomain = "Kalyna-ZPAQ/v9/chunk-nonce"u8.ToArray();
+
+    /// <summary>
+    /// Gives every chunk its own nonce instead of running one counter across
+    /// the whole archive.
+    /// </summary>
+    /// <remarks>
+    /// A single CTR stream over an archive of unbounded size is the case where
+    /// counter blocks eventually repeat, and a repeated counter block under the
+    /// same key hands an observer the XOR of two plaintexts. Re-deriving the
+    /// nonce for every chunk keeps each chunk's counter space to one chunk, so
+    /// archive size stops being what decides whether that is reachable.
+    ///
+    /// The per-chunk value is derived, not drawn. Fresh randomness per chunk
+    /// could not be reproduced when reading unless it were stored per chunk,
+    /// which is exactly the overhead an arbitrarily large archive cannot carry.
+    /// The chunk index is bound into the hash, so the nonces are independent of
+    /// each other while both sides compute the same sequence.
+    ///
+    /// SHA3-512 does this for every suite, including the two-round paranoia
+    /// cascade. The two hashes separate the *key derivation* rounds, where two
+    /// independent expansions of one entropy snapshot are the whole point;
+    /// chunk nonces need no such separation, because the base nonce they hang
+    /// off is already per-archive and per-suite. Using one hash here keeps the
+    /// sequence identical for every suite and removes a branch that could put
+    /// a reader and a writer on different derivations.
+    /// </remarks>
+    private static void DeriveChunkNonce(
+        byte[] baseNonce,
+        long chunkIndex,
+        byte[] destination)
+    {
+        Span<byte> indexBytes = stackalloc byte[sizeof(long)];
+        BinaryPrimitives.WriteInt64BigEndian(indexBytes, chunkIndex);
+        Span<byte> blockBytes = stackalloc byte[sizeof(uint)];
+        Span<byte> digest = stackalloc byte[Sha3_512Compat.HashSizeInBytes];
+
+        int messageLength = ChunkNonceDomain.Length + baseNonce.Length + indexBytes.Length + blockBytes.Length;
+        byte[] message = new byte[messageLength];
+        try
+        {
+            ChunkNonceDomain.CopyTo(message, 0);
+            baseNonce.CopyTo(message, ChunkNonceDomain.Length);
+            indexBytes.CopyTo(message.AsSpan(ChunkNonceDomain.Length + baseNonce.Length));
+            int blockOffset = ChunkNonceDomain.Length + baseNonce.Length + indexBytes.Length;
+
+            int written = 0;
+            for (uint block = 0; written < destination.Length; block++)
+            {
+                BinaryPrimitives.WriteUInt32BigEndian(message.AsSpan(blockOffset, sizeof(uint)), block);
+                _ = Sha3_512Compat.HashData(message, digest);
+
+                int count = Math.Min(digest.Length, destination.Length - written);
+                digest[..count].CopyTo(destination.AsSpan(written));
+                written += count;
+            }
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(message);
+            CryptographicOperations.ZeroMemory(digest);
+        }
+    }
+
     private static void XCrypt(
         EncryptionSuiteParameters parameters,
         byte[] encryptionKey,
@@ -972,31 +1040,6 @@ public sealed partial class KalynaContainerService
             CryptographicOperations.ZeroMemory(innerCounter);
             CryptographicOperations.ZeroMemory(outerCounter);
         }
-    }
-
-    /// <summary>
-    /// Advances the suite's counter past <paramref name="length"/> bytes.
-    /// </summary>
-    /// <remarks>
-    /// The cascade carries two counters in one buffer and they advance at
-    /// different rates, because a Kalyna block is half a Threefish block.
-    /// Advancing them together by a single block count would silently reuse
-    /// keystream on the very next chunk.
-    /// </remarks>
-    private static void AdvanceCounter(EncryptionSuiteParameters parameters, byte[] counter, int length)
-    {
-        if (parameters.Cascade is { } layout)
-        {
-            IncrementCounter(
-                counter.AsSpan(0, layout.InnerNonceBytes),
-                BlocksForLength(length, layout.InnerBlockBytes));
-            IncrementCounter(
-                counter.AsSpan(layout.InnerNonceBytes, layout.OuterNonceBytes),
-                BlocksForLength(length, layout.OuterBlockBytes));
-            return;
-        }
-
-        IncrementCounter(counter, BlocksForLength(length, parameters.BlockBytes));
     }
 
     /// <summary>
@@ -1095,14 +1138,14 @@ public sealed partial class KalynaContainerService
                 StringComparison.Ordinal)
             || header.Argon2OutputBits != parameters.DerivedKeyBytes * 8)
         {
-            throw new InvalidDataException("Container header contains invalid v8 suite parameters.");
+            throw new InvalidDataException("Container header contains invalid v9 suite parameters.");
         }
 
         ValidatePasswordMode(header);
         Argon2Profile profile = GetArgon2Profile(header);
         if (profile != Argon2Profile.Default)
         {
-            throw new InvalidDataException("Container header does not use the fixed v8 Argon2id profile.");
+            throw new InvalidDataException("Container header does not use the fixed v9 Argon2id profile.");
         }
 
         if (header.Hint is { Length: > 180 } || header.Hint?.Any(char.IsControl) == true)
@@ -1114,6 +1157,8 @@ public sealed partial class KalynaContainerService
         {
             throw new InvalidDataException("Container header contains no salt or nonce.");
         }
+
+        ValidateSecondRound(header, parameters);
 
         byte[]? salt = null;
         byte[]? nonce = null;
@@ -1150,6 +1195,82 @@ public sealed partial class KalynaContainerService
         }
     }
 
+    /// <summary>
+    /// Checks the second Argon2id round's salt and nonce against the suite.
+    /// </summary>
+    /// <remarks>
+    /// Whether a second round exists is a property of the suite, not something
+    /// the header may assert on its own: a header claiming a second round for a
+    /// single-round suite would derive a key nobody can reproduce, and a
+    /// two-round suite missing either value cannot be opened at all — not even
+    /// by the machine that wrote it, because neither the second salt nor the
+    /// second nonce is derivable from the first.
+    ///
+    /// Both are therefore required together and refused together, and the
+    /// second salt is rejected if it repeats the first: that can only mean the
+    /// writer used one round's material for both, which silently collapses the
+    /// second round back onto the first.
+    /// </remarks>
+    private static void ValidateSecondRound(ContainerHeader header, EncryptionSuiteParameters parameters)
+    {
+        bool expected = parameters.UsesTwoKdfRounds;
+        bool present = header.SecondSalt is not null || header.SecondNonce is not null;
+
+        if (!expected)
+        {
+            if (present || header.SecondSaltBits != 0 || header.SecondNonceBits != 0)
+            {
+                throw new InvalidDataException(
+                    "Container header carries second-round key material for a suite that derives one round.");
+            }
+
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(header.SecondSalt) || string.IsNullOrWhiteSpace(header.SecondNonce))
+        {
+            throw new InvalidDataException(
+                "Container header is missing the second Argon2id round's salt or nonce.");
+        }
+
+        if (header.SecondSaltBits != PasswordKeyService.SaltSize * 8
+            || header.SecondNonceBits != parameters.NonceBytes * 8)
+        {
+            throw new InvalidDataException("Container header contains invalid second-round parameter lengths.");
+        }
+
+        byte[]? secondSalt = null;
+        byte[]? secondNonce = null;
+        byte[]? firstSalt = null;
+        try
+        {
+            secondSalt = Convert.FromBase64String(header.SecondSalt);
+            secondNonce = Convert.FromBase64String(header.SecondNonce);
+            firstSalt = Convert.FromBase64String(header.Salt!);
+
+            if (secondSalt.Length != PasswordKeyService.SaltSize
+                || secondNonce.Length != parameters.NonceBytes)
+            {
+                throw new InvalidDataException("Container header contains invalid second-round lengths.");
+            }
+
+            if (CryptographicOperations.FixedTimeEquals(firstSalt, secondSalt))
+            {
+                throw new InvalidDataException("Container header reuses the first round's salt for the second.");
+            }
+        }
+        catch (FormatException ex)
+        {
+            throw new InvalidDataException("Container header contains invalid Base64 second-round parameters.", ex);
+        }
+        finally
+        {
+            ZeroIfNotNull(secondSalt);
+            ZeroIfNotNull(secondNonce);
+            ZeroIfNotNull(firstSalt);
+        }
+    }
+
     private static void ValidatePasswordMode(ContainerHeader header)
     {
         if (header.GeneratedPasswordFactorCount != 2
@@ -1157,7 +1278,7 @@ public sealed partial class KalynaContainerService
             || !string.Equals(header.PasswordMode, "UserPassword+GeneratedHex512x2", StringComparison.Ordinal)
             || !string.Equals(header.KdfInputMode, EncryptionSuiteCatalog.KdfInputMode, StringComparison.Ordinal))
         {
-            throw new InvalidDataException("Container header contains no valid v8 dual-factor KDF model.");
+            throw new InvalidDataException("Container header contains no valid v9 dual-factor KDF model.");
         }
     }
 
@@ -1267,7 +1388,22 @@ public sealed partial class KalynaContainerService
         string? PasswordMode,
         string? KdfInputMode,
         int GeneratedPasswordBits,
-        int GeneratedPasswordFactorCount = 0);
+        int GeneratedPasswordFactorCount = 0,
+
+        // The second Argon2id round, present only for suites that run one.
+        //
+        // Both values have to survive into the header or the archive cannot be
+        // opened by anybody, including the machine that wrote it: the second
+        // round's salt is not derivable from the first, and its nonce is not
+        // derivable from the first either. They are nullable rather than absent
+        // because the header is compared against its own canonical
+        // re-serialization — a field that disappeared for single-round suites
+        // would change the byte layout and the reader would reject containers
+        // this app had just written.
+        int SecondSaltBits = 0,
+        string? SecondSalt = null,
+        int SecondNonceBits = 0,
+        string? SecondNonce = null);
 
     [JsonSourceGenerationOptions(
         PropertyNameCaseInsensitive = false,

@@ -259,7 +259,7 @@ public sealed class KeySheetService
         using var sha3 = new Sha3_512Incremental();
         using var skein = new Skein1024Digest();
 
-        AppendFingerprintPart(sha3, skein, "Kalyna-ZPAQ/v8/key-sheet-fingerprint"u8);
+        AppendFingerprintPart(sha3, skein, "Kalyna-ZPAQ/v9/key-sheet-fingerprint"u8);
         AppendFingerprintPart(sha3, skein, pathBytes.Bytes);
         AppendFingerprintPart(sha3, skein, suiteBytes.Bytes);
         AppendFingerprintPart(sha3, skein, firstBytes.Bytes);
