@@ -152,8 +152,8 @@ public sealed partial class MainWindow
                 : "24 bis 128 Zeichen, mindestens 3 Zeichengruppen, 12 verschiedene und 12 Nicht-Hex-Zeichen, keine Hex-Folge ab 8 Zeichen und mindestens 128 Bit konservative Bewertung.",
             "generatorTitle" => en ? "Two independent 512-bit factors" : "Zwei unabhängige 512-Bit-Faktoren",
             "generatorHelp" => en
-                ? "Five separate entropy pools need at least 512 mouse samples each. Generation atomically creates factors A/B, salt and both nonce parts, then consumes all source pools."
-                : "Fünf getrennte Entropiepools benötigen je mindestens 512 Maus-Samples. Generieren erzeugt Faktoren A/B, Salt und beide Nonce-Teile atomar und verbraucht danach alle Quellpools.",
+                ? "Six separate entropy pools need at least 512 mouse samples each. Generation atomically creates factors A/B, the salt and all three nonce parts, then consumes all source pools."
+                : "Sechs getrennte Entropiepools benötigen je mindestens 512 Maus-Samples. Generieren erzeugt Faktoren A/B, Salt und alle drei Nonce-Teile atomar und verbraucht danach alle Quellpools.",
             "factorA" => en ? "Generated factor A" : "Generierter Faktor A",
             "factorB" => en ? "Generated factor B" : "Generierter Faktor B",
             "printKeySheets" => en ? "Print separately" : "Getrennt drucken",
@@ -166,14 +166,14 @@ public sealed partial class MainWindow
             "generatePassword" => en ? "Generate" : "Generieren",
             "regeneratePassword" => en ? "Regenerate" : "Neu generieren",
             "entropyCollecting" => en
-                ? "Collecting: total {0}; A {1}/{6}; B {2}/{6}; salt {3}/{6}; nonce 1 {4}/{6}; nonce 2 {5}/{6}"
-                : "Sammlung: gesamt {0}; A {1}/{6}; B {2}/{6}; Salt {3}/{6}; Nonce 1 {4}/{6}; Nonce 2 {5}/{6}",
+                ? "Collecting: total {0}; A {1}/{7}; B {2}/{7}; salt {3}/{7}; nonce 1 {4}/{7}; nonce 2 {5}/{7}; nonce 3 {6}/{7}"
+                : "Sammlung: gesamt {0}; A {1}/{7}; B {2}/{7}; Salt {3}/{7}; Nonce 1 {4}/{7}; Nonce 2 {5}/{7}; Nonce 3 {6}/{7}",
             "entropyPrepared" => en
-                ? "Ready and source pools consumed. Fresh pools: total {0}; A {1}/{6}; B {2}/{6}; salt {3}/{6}; nonce 1 {4}/{6}; nonce 2 {5}/{6}"
-                : "Bereit und Quellpools verbraucht. Frische Pools: gesamt {0}; A {1}/{6}; B {2}/{6}; Salt {3}/{6}; Nonce 1 {4}/{6}; Nonce 2 {5}/{6}",
+                ? "Ready and source pools consumed. Fresh pools: total {0}; A {1}/{7}; B {2}/{7}; salt {3}/{7}; nonce 1 {4}/{7}; nonce 2 {5}/{7}; nonce 3 {6}/{7}"
+                : "Bereit und Quellpools verbraucht. Frische Pools: gesamt {0}; A {1}/{7}; B {2}/{7}; Salt {3}/{7}; Nonce 1 {4}/{7}; Nonce 2 {5}/{7}; Nonce 3 {6}/{7}",
             "entropyRetry" => en
-                ? "Factors remain valid; a retry needs fresh salt/nonces: total {0}; A {1}/{6}; B {2}/{6}; salt {3}/{6}; nonce 1 {4}/{6}; nonce 2 {5}/{6}"
-                : "Faktoren bleiben gültig; ein Wiederholungsversuch benötigt frischen Salt/Nonces: gesamt {0}; A {1}/{6}; B {2}/{6}; Salt {3}/{6}; Nonce 1 {4}/{6}; Nonce 2 {5}/{6}",
+                ? "Factors remain valid; a retry needs fresh salt/nonces: total {0}; A {1}/{7}; B {2}/{7}; salt {3}/{7}; nonce 1 {4}/{7}; nonce 2 {5}/{7}; nonce 3 {6}/{7}"
+                : "Faktoren bleiben gültig; ein Wiederholungsversuch benötigt frischen Salt/Nonces: gesamt {0}; A {1}/{7}; B {2}/{7}; Salt {3}/{7}; Nonce 1 {4}/{7}; Nonce 2 {5}/{7}; Nonce 3 {6}/{7}",
             "passwordEntropy" => en ? "Conservative entropy: {0:0.0} / {1:0} bits" : "Konservative Entropie: {0:0.0} / {1:0} Bit",
             "passwordAccepted" => en ? "All user-password requirements are met." : "Alle Anforderungen an das Userpasswort sind erfüllt.",
             "passwordTooShort" => en ? "Use at least {0} characters." : "Mindestens {0} Zeichen verwenden.",
@@ -366,7 +366,7 @@ public sealed partial class MainWindow
         string? value = _settingsStore.Read(CipherSuiteSettingsFile)?.Trim();
         return Enum.TryParse(value, ignoreCase: false, out EncryptionSuite suite) && Enum.IsDefined(suite)
             ? suite
-            : EncryptionSuite.Threefish1024;
+            : EncryptionSuiteCatalog.Default;
     }
 
     private int LoadCompression()

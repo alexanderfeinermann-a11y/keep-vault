@@ -20,14 +20,29 @@ public sealed class PasswordKeyService
     public const int Argon2PasswordInputSize = 128;
     public const int KalynaDerivedKeySize = 256;
     public const int ThreefishDerivedKeySize = 320;
+
+    /// <summary>
+    /// 192 bytes of cipher key — 64 for the inner Kalyna layer, 128 for the
+    /// outer Threefish layer — plus the two MAC keys.
+    /// </summary>
+    public const int CascadeDerivedKeySize = 384;
     public const int KeySize = KalynaDerivedKeySize;
 
     private const double EntropySafetyFactor = 0.72;
     private static readonly UTF8Encoding StrictUtf8 = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
-    private static readonly byte[] KalynaFactorADomain = "Kalyna-ZPAQ/v7/Kalyna-512-512/SHA3-512/User+Factor-A"u8.ToArray();
-    private static readonly byte[] KalynaFactorBDomain = "Kalyna-ZPAQ/v7/Kalyna-512-512/SHA3-512/User+Factor-B"u8.ToArray();
-    private static readonly byte[] ThreefishFactorADomain = "Kalyna-ZPAQ/v7/Threefish-1024/SHA3-512/User+Factor-A"u8.ToArray();
-    private static readonly byte[] ThreefishFactorBDomain = "Kalyna-ZPAQ/v7/Threefish-1024/SHA3-512/User+Factor-B"u8.ToArray();
+    private static readonly byte[] KalynaFactorADomain = "Kalyna-ZPAQ/v8/Kalyna-512-512/SHA3-512/User+Factor-A"u8.ToArray();
+    private static readonly byte[] KalynaFactorBDomain = "Kalyna-ZPAQ/v8/Kalyna-512-512/SHA3-512/User+Factor-B"u8.ToArray();
+    private static readonly byte[] ThreefishFactorADomain = "Kalyna-ZPAQ/v8/Threefish-1024/SHA3-512/User+Factor-A"u8.ToArray();
+    private static readonly byte[] ThreefishFactorBDomain = "Kalyna-ZPAQ/v8/Threefish-1024/SHA3-512/User+Factor-B"u8.ToArray();
+
+    // The cascade gets its own domain rather than reusing either layer's. Two
+    // containers built from the same password and factors but different suites
+    // must not share a derived key, or a weakness found in one suite would
+    // carry over to the other.
+    private static readonly byte[] CascadeFactorADomain =
+        "Kalyna-ZPAQ/v8/Threefish-1024-over-Kalyna-512-512/SHA3-512/User+Factor-A"u8.ToArray();
+    private static readonly byte[] CascadeFactorBDomain =
+        "Kalyna-ZPAQ/v8/Threefish-1024-over-Kalyna-512-512/SHA3-512/User+Factor-B"u8.ToArray();
     private static readonly string[] CommonPasswordTerms =
     [
         "PASSWORD", "PASSWORT", "LETMEIN", "WELCOME", "ADMIN", "CORRECTHORSEBATTERY",
@@ -248,7 +263,7 @@ public sealed class PasswordKeyService
         {
             throw new ArgumentOutOfRangeException(
                 nameof(profile),
-                $"Argon2id must use the fixed v7 profile: {Argon2Profile.DefaultMemoryKiB} KiB, "
+                $"Argon2id must use the fixed v8 profile: {Argon2Profile.DefaultMemoryKiB} KiB, "
                 + $"{Argon2Profile.DefaultIterations} iterations, parallelism {Argon2Profile.DefaultParallelism}.");
         }
     }
@@ -418,7 +433,7 @@ public sealed class PasswordKeyService
             throw new ArgumentOutOfRangeException(nameof(argon2PasswordInput), $"Der Argon2id-Passworteingang muss {Argon2PasswordInputSize} Byte lang sein.");
         }
 
-        if (outputLength is not (KalynaDerivedKeySize or ThreefishDerivedKeySize))
+        if (outputLength is not (KalynaDerivedKeySize or ThreefishDerivedKeySize or CascadeDerivedKeySize))
         {
             throw new ArgumentOutOfRangeException(nameof(outputLength), "Unsupported suite key length.");
         }
@@ -668,6 +683,8 @@ public sealed class PasswordKeyService
             (EncryptionSuite.Kalyna512_512, false) => KalynaFactorBDomain,
             (EncryptionSuite.Threefish1024, true) => ThreefishFactorADomain,
             (EncryptionSuite.Threefish1024, false) => ThreefishFactorBDomain,
+            (EncryptionSuite.ThreefishOverKalyna, true) => CascadeFactorADomain,
+            (EncryptionSuite.ThreefishOverKalyna, false) => CascadeFactorBDomain,
             _ => throw new ArgumentOutOfRangeException(nameof(suite), suite, "Unknown encryption suite."),
         };
     }

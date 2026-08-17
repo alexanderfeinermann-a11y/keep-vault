@@ -96,7 +96,7 @@ public sealed partial class MainWindow : Window, IDisposable
                 return suite;
             }
 
-            return EncryptionSuite.Threefish1024;
+            return EncryptionSuiteCatalog.Default;
         }
     }
 
@@ -508,6 +508,7 @@ public sealed partial class MainWindow : Window, IDisposable
                     EnsureEntropyReady(EntropyPurpose.Salt);
                     EnsureEntropyReady(EntropyPurpose.NonceFirst);
                     EnsureEntropyReady(EntropyPurpose.NonceSecond);
+                    EnsureEntropyReady(EntropyPurpose.NonceThird);
                 }
             }
 
@@ -1405,6 +1406,7 @@ public sealed partial class MainWindow : Window, IDisposable
             status.Salt,
             status.NonceFirst,
             status.NonceSecond,
+            status.NonceThird,
             EntropyMixer.RequiredMouseSamplesPerPurpose);
         EntropyStatusText.Foreground = Brush.Parse(key == "entropyPrepared" ? "#7EE2B8" : key == "entropyRetry" ? "#F2BD55" : "#5DE4EC");
     }

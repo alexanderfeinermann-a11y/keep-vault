@@ -208,9 +208,28 @@ internal static class MacGuiTests
         MacComprehensiveTests.Require(
             !string.Equals(status.Text ?? string.Empty, textAtThreshold, StringComparison.Ordinal),
             "The entropy status line froze at the minimum instead of reporting the additional samples.");
+        // The readout is refreshed when the pool minimum moves, which happens
+        // once per full round across the pools rather than on every sample. It
+        // may therefore trail the running total by up to one round; what it must
+        // not do is stop catching up. Sampling until it agrees checks exactly
+        // that, without assuming a particular number of pools.
+        long reportedTotal = 0;
+        for (int round = 0; round < 16; round++)
+        {
+            reportedTotal = EntropyMixer.GetPoolStatus().Total;
+            if ((status.Text ?? string.Empty).Contains(
+                    reportedTotal.ToString(CultureInfo.CurrentCulture),
+                    StringComparison.Ordinal))
+            {
+                break;
+            }
+
+            MoveMouse(window, 1);
+        }
+
         MacComprehensiveTests.Require(
-            (status.Text ?? string.Empty).Contains(beyond.Total.ToString(CultureInfo.CurrentCulture), StringComparison.Ordinal),
-            "The entropy status line does not report the current total sample count.");
+            (status.Text ?? string.Empty).Contains(reportedTotal.ToString(CultureInfo.CurrentCulture), StringComparison.Ordinal),
+            "The entropy status line never caught up with the current total sample count.");
 
         // The bar measures progress towards the minimum, so it stays full while
         // the reported counts keep climbing.

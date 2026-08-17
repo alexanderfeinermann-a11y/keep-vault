@@ -11,8 +11,12 @@ namespace KalynaArchiver.Services;
 public sealed partial class KalynaContainerService
 {
     private static readonly byte[] Magic = "KZPAQ1\0"u8.ToArray();
-    private static readonly byte[] ThreefishTweakDomain = "Kalyna-ZPAQ/v7/Threefish-1024/CTR-Tweak"u8.ToArray();
-    private const int CurrentVersion = 7;
+    private static readonly byte[] ThreefishTweakDomain = "Kalyna-ZPAQ/v8/Threefish-1024/CTR-Tweak"u8.ToArray();
+    // Version 8 introduces the cascade suite and drops every earlier version.
+    // There is deliberately no reader for v7: a format this app writes once and
+    // reads years later is safer with one shape than with a compatibility path
+    // that is exercised rarely and audited less.
+    private const int CurrentVersion = 8;
     private const int BufferSize = 16 * 1024 * 1024;
     private const int Sha3TagSize = 64;
     private const int SkeinTagSize = 128;
@@ -226,7 +230,7 @@ public sealed partial class KalynaContainerService
                 parameters.NonceBytes * 8,
                 Convert.ToBase64String(nonce),
                 parameters.TweakBytes * 8,
-                suite == EncryptionSuite.Threefish1024 ? EncryptionSuiteCatalog.ThreefishTweakMode : "None",
+                parameters.TweakBytes > 0 ? EncryptionSuiteCatalog.ThreefishTweakMode : "None",
                 tweak.Length == 0 ? null : Convert.ToBase64String(tweak),
                 hint,
                 effectiveProfile.MemoryKiB,
@@ -285,10 +289,10 @@ public sealed partial class KalynaContainerService
                         while ((read = await ReadChunkAsync(plainZpaqStream, plainChunk, cancellationToken).ConfigureAwait(false)) > 0)
                         {
                             plaintextBytes = checked(plaintextBytes + read);
-                            XCrypt(suite, keyMaterial.EncryptionKey, tweak, counter, plainChunk, cipherChunk, read);
+                            XCrypt(parameters, keyMaterial.EncryptionKey, tweak, counter, plainChunk, cipherChunk, read);
                             await output.WriteAsync(cipherChunk.AsMemory(0, read), cancellationToken).ConfigureAwait(false);
                             AppendAuthentication(hmac, skeinMac, cipherChunk.AsSpan(0, read));
-                            IncrementCounter(counter, BlocksForLength(read, parameters.BlockBytes));
+                            AdvanceCounter(parameters, counter, read);
                             CryptographicOperations.ZeroMemory(plainChunk.AsSpan(0, read));
                             CryptographicOperations.ZeroMemory(cipherChunk.AsSpan(0, read));
                         }
@@ -469,9 +473,9 @@ public sealed partial class KalynaContainerService
                 int read;
                 while ((read = await ReadChunkAsync(input, cipherChunk, cancellationToken).ConfigureAwait(false)) > 0)
                 {
-                    XCrypt(parameters.Suite, keyMaterial.EncryptionKey, tweak, counter, cipherChunk, plainChunk, read);
+                    XCrypt(parameters, keyMaterial.EncryptionKey, tweak, counter, cipherChunk, plainChunk, read);
                     await plainZpaqDestination.WriteAsync(plainChunk.AsMemory(0, read), cancellationToken).ConfigureAwait(false);
-                    IncrementCounter(counter, BlocksForLength(read, parameters.BlockBytes));
+                    AdvanceCounter(parameters, counter, read);
                     CryptographicOperations.ZeroMemory(cipherChunk.AsSpan(0, read));
                     CryptographicOperations.ZeroMemory(plainChunk.AsSpan(0, read));
                 }
@@ -761,7 +765,7 @@ public sealed partial class KalynaContainerService
             {
                 if (!headerBytes.AsSpan().SequenceEqual(canonicalHeader))
                 {
-                    throw new InvalidDataException("Container header is not in the unique canonical v7 JSON representation.");
+                    throw new InvalidDataException("Container header is not in the unique canonical v8 JSON representation.");
                 }
             }
             finally
@@ -779,7 +783,7 @@ public sealed partial class KalynaContainerService
         }
         catch (JsonException ex)
         {
-            throw new InvalidDataException("Container header is not valid canonical v7 JSON.", ex);
+            throw new InvalidDataException("Container header is not valid canonical v8 JSON.", ex);
         }
     }
 
@@ -857,6 +861,11 @@ public sealed partial class KalynaContainerService
 
     private static void IncrementCounter(byte[] counter, long blocks)
     {
+        IncrementCounter(counter.AsSpan(), blocks);
+    }
+
+    private static void IncrementCounter(Span<byte> counter, long blocks)
+    {
         if (blocks < 0)
         {
             throw new ArgumentOutOfRangeException(nameof(blocks), "Block count cannot be negative.");
@@ -876,8 +885,18 @@ public sealed partial class KalynaContainerService
         }
     }
 
+    /// <summary>
+    /// Applies the suite's keystream to <paramref name="length"/> bytes.
+    /// </summary>
+    /// <remarks>
+    /// Every suite here is a counter-mode keystream, so this one routine both
+    /// encrypts and decrypts. The cascade runs the inner layer into the output
+    /// buffer and then the outer layer over that buffer in place; the reference
+    /// cores read each byte before writing the same index and never declare
+    /// their buffers restricted, so the aliasing is defined.
+    /// </remarks>
     private static void XCrypt(
-        EncryptionSuite suite,
+        EncryptionSuiteParameters parameters,
         byte[] encryptionKey,
         byte[] tweak,
         byte[] counter,
@@ -885,7 +904,7 @@ public sealed partial class KalynaContainerService
         byte[] output,
         int length)
     {
-        switch (suite)
+        switch (parameters.Suite)
         {
             case EncryptionSuite.Kalyna512_512:
                 NativeKalyna.XCryptCtr512(encryptionKey, counter, input, output, length);
@@ -893,11 +912,98 @@ public sealed partial class KalynaContainerService
             case EncryptionSuite.Threefish1024:
                 NativeThreefish.XCryptCtr1024(encryptionKey, tweak, counter, input, output, length);
                 break;
+            case EncryptionSuite.ThreefishOverKalyna:
+                XCryptCascade(RequireCascade(parameters), encryptionKey, tweak, counter, input, output, length);
+                break;
             default:
-                throw new ArgumentOutOfRangeException(nameof(suite), suite, "Unknown encryption suite.");
+                throw new ArgumentOutOfRangeException(
+                    nameof(parameters),
+                    parameters.Suite,
+                    "Unknown encryption suite.");
         }
     }
 
+    private static CascadeLayout RequireCascade(EncryptionSuiteParameters parameters)
+    {
+        return parameters.Cascade
+            ?? throw new CryptographicException("The cascade suite is missing its layer layout.");
+    }
+
+    private static void XCryptCascade(
+        CascadeLayout layout,
+        byte[] encryptionKey,
+        byte[] tweak,
+        byte[] counter,
+        byte[] input,
+        byte[] output,
+        int length)
+    {
+        if (encryptionKey.Length != layout.TotalKeyBytes || counter.Length != layout.TotalNonceBytes)
+        {
+            throw new CryptographicException("The cascade received key or counter material of the wrong length.");
+        }
+
+        byte[] innerKey = new byte[layout.InnerKeyBytes];
+        byte[] outerKey = new byte[layout.OuterKeyBytes];
+        byte[] innerCounter = new byte[layout.InnerNonceBytes];
+        byte[] outerCounter = new byte[layout.OuterNonceBytes];
+        using IDisposable innerKeyLock = SecureMemory.TryLock(innerKey);
+        using IDisposable outerKeyLock = SecureMemory.TryLock(outerKey);
+        using IDisposable innerCounterLock = SecureMemory.TryLock(innerCounter);
+        using IDisposable outerCounterLock = SecureMemory.TryLock(outerCounter);
+        try
+        {
+            encryptionKey.AsSpan(0, layout.InnerKeyBytes).CopyTo(innerKey);
+            encryptionKey.AsSpan(layout.InnerKeyBytes, layout.OuterKeyBytes).CopyTo(outerKey);
+            counter.AsSpan(0, layout.InnerNonceBytes).CopyTo(innerCounter);
+            counter.AsSpan(layout.InnerNonceBytes, layout.OuterNonceBytes).CopyTo(outerCounter);
+
+            NativeKalyna.XCryptCtr512(innerKey, innerCounter, input, output, length);
+            NativeThreefish.XCryptCtr1024(outerKey, tweak, outerCounter, output, output, length);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(innerKey);
+            CryptographicOperations.ZeroMemory(outerKey);
+            CryptographicOperations.ZeroMemory(innerCounter);
+            CryptographicOperations.ZeroMemory(outerCounter);
+        }
+    }
+
+    /// <summary>
+    /// Advances the suite's counter past <paramref name="length"/> bytes.
+    /// </summary>
+    /// <remarks>
+    /// The cascade carries two counters in one buffer and they advance at
+    /// different rates, because a Kalyna block is half a Threefish block.
+    /// Advancing them together by a single block count would silently reuse
+    /// keystream on the very next chunk.
+    /// </remarks>
+    private static void AdvanceCounter(EncryptionSuiteParameters parameters, byte[] counter, int length)
+    {
+        if (parameters.Cascade is { } layout)
+        {
+            IncrementCounter(
+                counter.AsSpan(0, layout.InnerNonceBytes),
+                BlocksForLength(length, layout.InnerBlockBytes));
+            IncrementCounter(
+                counter.AsSpan(layout.InnerNonceBytes, layout.OuterNonceBytes),
+                BlocksForLength(length, layout.OuterBlockBytes));
+            return;
+        }
+
+        IncrementCounter(counter, BlocksForLength(length, parameters.BlockBytes));
+    }
+
+    /// <summary>
+    /// Derives the Threefish tweak for the suites that use one.
+    /// </summary>
+    /// <remarks>
+    /// The tweak is bound to the whole nonce, so for the cascade it commits to
+    /// both layers' nonces at once. Deriving it rather than storing an
+    /// independent value keeps the header from carrying a parameter an attacker
+    /// could vary on its own.
+    /// </remarks>
     private static byte[] CreateSuiteTweak(EncryptionSuite suite, byte[] nonce)
     {
         if (suite == EncryptionSuite.Kalyna512_512)
@@ -905,7 +1011,7 @@ public sealed partial class KalynaContainerService
             return [];
         }
 
-        if (suite != EncryptionSuite.Threefish1024)
+        if (suite is not (EncryptionSuite.Threefish1024 or EncryptionSuite.ThreefishOverKalyna))
         {
             throw new ArgumentOutOfRangeException(nameof(suite), suite, "Unknown encryption suite.");
         }
@@ -933,10 +1039,13 @@ public sealed partial class KalynaContainerService
 
     private static void EnsureNativeAvailable(EncryptionSuite suite)
     {
+        // Every suite needs threefish_ref, because it also provides Skein for
+        // the second MAC. Kalyna is needed by its own suite and by the cascade.
         bool available = suite switch
         {
             EncryptionSuite.Kalyna512_512 => NativeKalyna.IsAvailable() && NativeThreefish.IsAvailable(),
             EncryptionSuite.Threefish1024 => NativeThreefish.IsAvailable(),
+            EncryptionSuite.ThreefishOverKalyna => NativeKalyna.IsAvailable() && NativeThreefish.IsAvailable(),
             _ => false,
         };
         if (!available)
@@ -978,18 +1087,18 @@ public sealed partial class KalynaContainerService
             || header.TweakBits != parameters.TweakBytes * 8
             || !string.Equals(
                 header.TweakMode,
-                parameters.Suite == EncryptionSuite.Threefish1024 ? EncryptionSuiteCatalog.ThreefishTweakMode : "None",
+                parameters.TweakBytes > 0 ? EncryptionSuiteCatalog.ThreefishTweakMode : "None",
                 StringComparison.Ordinal)
             || header.Argon2OutputBits != parameters.DerivedKeyBytes * 8)
         {
-            throw new InvalidDataException("Container header contains invalid v7 suite parameters.");
+            throw new InvalidDataException("Container header contains invalid v8 suite parameters.");
         }
 
         ValidatePasswordMode(header);
         Argon2Profile profile = GetArgon2Profile(header);
         if (profile != Argon2Profile.Default)
         {
-            throw new InvalidDataException("Container header does not use the fixed v7 Argon2id profile.");
+            throw new InvalidDataException("Container header does not use the fixed v8 Argon2id profile.");
         }
 
         if (header.Hint is { Length: > 180 } || header.Hint?.Any(char.IsControl) == true)
@@ -1044,7 +1153,7 @@ public sealed partial class KalynaContainerService
             || !string.Equals(header.PasswordMode, "UserPassword+GeneratedHex512x2", StringComparison.Ordinal)
             || !string.Equals(header.KdfInputMode, EncryptionSuiteCatalog.KdfInputMode, StringComparison.Ordinal))
         {
-            throw new InvalidDataException("Container header contains no valid v7 dual-factor KDF model.");
+            throw new InvalidDataException("Container header contains no valid v8 dual-factor KDF model.");
         }
     }
 

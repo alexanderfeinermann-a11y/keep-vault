@@ -71,7 +71,7 @@ public sealed partial class MainWindow : Window, IDisposable
                 return suite;
             }
 
-            return EncryptionSuite.Threefish1024;
+            return EncryptionSuiteCatalog.Default;
         }
     }
 
@@ -428,6 +428,8 @@ public sealed partial class MainWindow : Window, IDisposable
                     EnsureEntropyReady(EntropyPurpose.Salt);
                     EnsureEntropyReady(EntropyPurpose.NonceFirst);
                     EnsureEntropyReady(EntropyPurpose.NonceSecond);
+        EnsureEntropyReady(EntropyPurpose.NonceThird);
+                    EnsureEntropyReady(EntropyPurpose.NonceThird);
                 }
 
                 EnsureKeySheetHandled(archivePath);
@@ -1283,6 +1285,7 @@ public sealed partial class MainWindow : Window, IDisposable
             EntropyPurpose.Salt => T("entropySalt"),
             EntropyPurpose.NonceFirst => T("entropyNonceFirst"),
             EntropyPurpose.NonceSecond => T("entropyNonceSecond"),
+            EntropyPurpose.NonceThird => T("entropyNonceThird"),
             _ => purpose.ToString(),
         };
         long current = EntropyMixer.GetSampleCount(purpose);
@@ -1399,7 +1402,7 @@ public sealed partial class MainWindow : Window, IDisposable
         using LockedSensitiveBuffer skeinFingerprint = LockedSensitiveBuffer.Create(Skein1024Digest.DigestSize);
         using IncrementalHash hasher = IncrementalHash.CreateHash(HashAlgorithmName.SHA3_512);
         using var skein = new Skein1024Digest();
-        AppendFingerprintPart(hasher, skein, "Kalyna-ZPAQ/v7/key-sheet-fingerprint"u8);
+        AppendFingerprintPart(hasher, skein, "Kalyna-ZPAQ/v8/key-sheet-fingerprint"u8);
         AppendFingerprintPart(hasher, skein, pathBytes.Bytes);
         AppendFingerprintPart(hasher, skein, suiteBytes.Bytes);
         AppendFingerprintPart(hasher, skein, firstBytes.Bytes);
@@ -1555,6 +1558,7 @@ public sealed partial class MainWindow : Window, IDisposable
             status.Salt,
             status.NonceFirst,
             status.NonceSecond,
+            status.NonceThird,
             EntropyMixer.RequiredMouseSamplesPerPurpose);
         EntropyStatusText.Foreground = statusKey == "entropyStatusPrepared"
             ? System.Windows.Media.Brushes.LightGreen
@@ -2314,14 +2318,15 @@ public sealed partial class MainWindow : Window, IDisposable
             ("en", "createPasswordSetupHelp") => "Extraction requires the user password plus two independently generated 512-bit hexadecimal passwords.",
             ("en", "passwordGeneratorTitle") => "Two independent generated 512-bit passwords",
             ("en", "passwordGeneratorHelp") => "Factor A, factor B, salt, nonce 1, and nonce 2 each require at least 512 different samples from evenly filled independent mouse pools. Generate creates all five outputs atomically and then securely consumes every pool; zero counters afterward mean used, not insufficient. Key = Argon2id(SHA3-512(UserPassword, A) || SHA3-512(UserPassword, B), Salt). Inputs are length-prefixed and domain-separated.",
-            ("en", "entropyStatusCollecting") => "Collecting archive entropy: total {0}; factor A {1}/{6}; factor B {2}/{6}; salt {3}/{6}; nonce 1 {4}/{6}; nonce 2 {5}/{6}",
-            ("en", "entropyStatusPrepared") => "Archive entropy ready: factors A/B, salt, and nonces were generated; their source samples were securely consumed. Fresh pools: total {0}; factor A {1}/{6}; factor B {2}/{6}; salt {3}/{6}; nonce 1 {4}/{6}; nonce 2 {5}/{6}",
-            ("en", "entropyStatusRetry") => "Factors A/B remain valid because their source entropy was already consumed. Fresh salt/nonces are required only for a retry: total {0}; factor A {1}/{6}; factor B {2}/{6}; salt {3}/{6}; nonce 1 {4}/{6}; nonce 2 {5}/{6}",
+            ("en", "entropyStatusCollecting") => "Collecting archive entropy: total {0}; factor A {1}/{7}; factor B {2}/{7}; salt {3}/{7}; nonce 1 {4}/{7}; nonce 2 {5}/{7}; nonce 3 {6}/{7}",
+            ("en", "entropyStatusPrepared") => "Archive entropy ready: factors A/B, salt, and nonces were generated; their source samples were securely consumed. Fresh pools: total {0}; factor A {1}/{7}; factor B {2}/{7}; salt {3}/{7}; nonce 1 {4}/{7}; nonce 2 {5}/{7}; nonce 3 {6}/{7}",
+            ("en", "entropyStatusRetry") => "Factors A/B remain valid because their source entropy was already consumed. Fresh salt/nonces are required only for a retry: total {0}; factor A {1}/{7}; factor B {2}/{7}; salt {3}/{7}; nonce 1 {4}/{7}; nonce 2 {5}/{7}; nonce 3 {6}/{7}",
             ("en", "entropyGeneratedPasswordFirst") => "generated password A",
             ("en", "entropyGeneratedPasswordSecond") => "generated password B",
             ("en", "entropySalt") => "salt",
             ("en", "entropyNonceFirst") => "nonce 1",
             ("en", "entropyNonceSecond") => "nonce 2",
+            ("en", "entropyNonceThird") => "nonce 3",
             ("en", "entropyNotReady") => "Not enough mouse entropy samples for {0}. Required: {1}; current: {2}; missing: {3}. Move the mouse over the app window and try again.",
             ("en", "generatePassword") => "Generate",
             ("en", "regeneratePassword") => "Regenerate",
@@ -2479,14 +2484,15 @@ public sealed partial class MainWindow : Window, IDisposable
             (_, "createPasswordSetupHelp") => "Zum Entpacken werden das Userpasswort sowie zwei unabhängig generierte 512-Bit-Hex-Passwörter benötigt.",
             (_, "passwordGeneratorTitle") => "Zwei unabhängige generierte 512-Bit-Passwörter",
             (_, "passwordGeneratorHelp") => "Faktor A, Faktor B, Salt, Nonce 1 und Nonce 2 benötigen jeweils mindestens 512 verschiedene Samples aus gleichmäßig gefüllten, getrennten Mauspools. Generieren erzeugt alle fünf Ausgaben atomar und verbraucht danach jeden Pool sicher; Zähler null bedeutet anschließend verbraucht, nicht unzureichend. Schlüssel = Argon2id(SHA3-512(Userpasswort, A) || SHA3-512(Userpasswort, B), Salt). Die Eingaben werden längencodiert und domänengetrennt.",
-            (_, "entropyStatusCollecting") => "Archiv-Entropie wird gesammelt: gesamt {0}; Faktor A {1}/{6}; Faktor B {2}/{6}; Salt {3}/{6}; Nonce 1 {4}/{6}; Nonce 2 {5}/{6}",
-            (_, "entropyStatusPrepared") => "Archiv-Entropie bereit: Faktoren A/B, Salt und Nonces wurden erzeugt; ihre Quell-Samples sind sicher verbraucht. Frische Pools: gesamt {0}; Faktor A {1}/{6}; Faktor B {2}/{6}; Salt {3}/{6}; Nonce 1 {4}/{6}; Nonce 2 {5}/{6}",
-            (_, "entropyStatusRetry") => "Faktoren A/B bleiben gültig, da ihre Quell-Entropie bereits verbraucht wurde. Nur für einen Wiederholungsversuch werden frischer Salt und frische Nonces benötigt: gesamt {0}; Faktor A {1}/{6}; Faktor B {2}/{6}; Salt {3}/{6}; Nonce 1 {4}/{6}; Nonce 2 {5}/{6}",
+            (_, "entropyStatusCollecting") => "Archiv-Entropie wird gesammelt: gesamt {0}; Faktor A {1}/{7}; Faktor B {2}/{7}; Salt {3}/{7}; Nonce 1 {4}/{7}; Nonce 2 {5}/{7}; Nonce 3 {6}/{7}",
+            (_, "entropyStatusPrepared") => "Archiv-Entropie bereit: Faktoren A/B, Salt und Nonces wurden erzeugt; ihre Quell-Samples sind sicher verbraucht. Frische Pools: gesamt {0}; Faktor A {1}/{7}; Faktor B {2}/{7}; Salt {3}/{7}; Nonce 1 {4}/{7}; Nonce 2 {5}/{7}; Nonce 3 {6}/{7}",
+            (_, "entropyStatusRetry") => "Faktoren A/B bleiben gültig, da ihre Quell-Entropie bereits verbraucht wurde. Nur für einen Wiederholungsversuch werden frischer Salt und frische Nonces benötigt: gesamt {0}; Faktor A {1}/{7}; Faktor B {2}/{7}; Salt {3}/{7}; Nonce 1 {4}/{7}; Nonce 2 {5}/{7}; Nonce 3 {6}/{7}",
             (_, "entropyGeneratedPasswordFirst") => "generiertes Passwort A",
             (_, "entropyGeneratedPasswordSecond") => "generiertes Passwort B",
             (_, "entropySalt") => "Salt",
             (_, "entropyNonceFirst") => "Nonce 1",
             (_, "entropyNonceSecond") => "Nonce 2",
+            (_, "entropyNonceThird") => "Nonce 3",
             (_, "entropyNotReady") => "Nicht genug Maus-Entropie-Samples für {0}. Erforderlich: {1}; aktuell: {2}; fehlend: {3}. Bewege die Maus über dem App-Fenster und versuche es erneut.",
             (_, "generatePassword") => "Generieren",
             (_, "regeneratePassword") => "Neu generieren",
@@ -2668,7 +2674,7 @@ public sealed partial class MainWindow : Window, IDisposable
         string? value = _settingsStore.Read(CipherSuiteSettingsFile)?.Trim();
         return Enum.TryParse(value, ignoreCase: false, out EncryptionSuite suite) && Enum.IsDefined(suite)
             ? suite
-            : EncryptionSuite.Threefish1024;
+            : EncryptionSuiteCatalog.Default;
     }
 
     private void SaveCipherSuite(EncryptionSuite suite)

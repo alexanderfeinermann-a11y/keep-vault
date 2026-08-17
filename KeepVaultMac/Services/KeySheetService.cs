@@ -259,7 +259,7 @@ public sealed class KeySheetService
         using var sha3 = new Sha3_512Incremental();
         using var skein = new Skein1024Digest();
 
-        AppendFingerprintPart(sha3, skein, "Kalyna-ZPAQ/v7/key-sheet-fingerprint"u8);
+        AppendFingerprintPart(sha3, skein, "Kalyna-ZPAQ/v8/key-sheet-fingerprint"u8);
         AppendFingerprintPart(sha3, skein, pathBytes.Bytes);
         AppendFingerprintPart(sha3, skein, suiteBytes.Bytes);
         AppendFingerprintPart(sha3, skein, firstBytes.Bytes);
@@ -496,18 +496,25 @@ public sealed class KeySheetService
             new XPoint(margin, y));
         y += 30;
 
-        formatter.DrawString(
+        // Flowed rather than clipped into a fixed rectangle: the two variants
+        // differ in length and translate differently, and a warning that loses
+        // its last line is worse than no warning at all.
+        y += 4;
+        DrawWrappedValue(
+            graphics,
+            warningFont,
             separatedByBlankPage
                 ? (en
                     ? "Keep this key sheet separate from the other one. The page between A and B separates the two factors on purpose."
                     : "Diesen Schlüsselzettel getrennt vom anderen aufbewahren. Die Seite zwischen A und B trennt beide Faktoren absichtlich.")
                 : (en
-                    ? "Keep this key sheet separate from the other one. The other factor is in its own file and must be stored elsewhere."
-                    : "Diesen Schlüsselzettel getrennt vom anderen aufbewahren. Der andere Faktor liegt in einer eigenen Datei und gehört an einen anderen Ort."),
-            warningFont,
-            XBrushes.DarkRed,
-            new XRect(margin, y, bodyWidth, 46));
-        y += 56;
+                    ? "Keep this key sheet separate from the other one. The other factor is in its own file."
+                    : "Diesen Schlüsselzettel getrennt vom anderen aufbewahren. Der andere Faktor liegt in einer eigenen Datei."),
+            margin,
+            bodyWidth,
+            ref y,
+            XBrushes.DarkRed);
+        y += 10;
 
         graphics.DrawString(
             en ? "DO NOT THROW AWAY!" : "NICHT WEGSCHMEISSEN!",
@@ -752,12 +759,14 @@ public sealed class KeySheetService
         string value,
         double x,
         double width,
-        ref double y)
+        ref double y,
+        XBrush? brush = null)
     {
         const double lineHeight = 20;
+        XBrush ink = brush ?? XBrushes.Black;
         foreach (string line in WrapToWidth(graphics, font, value, width))
         {
-            graphics.DrawString(line, font, XBrushes.Black, new XPoint(x, y));
+            graphics.DrawString(line, font, ink, new XPoint(x, y));
             y += lineHeight;
         }
     }

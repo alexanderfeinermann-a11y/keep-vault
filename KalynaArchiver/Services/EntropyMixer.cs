@@ -13,7 +13,12 @@ namespace KalynaArchiver.Services;
 public static partial class EntropyMixer
 {
     private const int BcryptUseSystemPreferredRng = 0x00000002;
-    private const int PurposeCount = 5;
+    // Six pools: two factors, the salt, and three nonce parts. The third nonce
+    // pool exists for the cascade, whose two layers each need their own nonce —
+    // 64 bytes for Kalyna and 128 for Threefish. Deriving the second nonce from
+    // the first would make one layer's keystream a function of the other's, and
+    // the whole point of the cascade is that the two are independent.
+    private const int PurposeCount = 6;
     public const long RequiredMouseSamplesPerPurpose = 512;
     private static readonly object Gate = new();
     private static readonly EntropyPurpose[] SamplePurposes =
@@ -23,6 +28,7 @@ public static partial class EntropyMixer
         EntropyPurpose.Salt,
         EntropyPurpose.NonceFirst,
         EntropyPurpose.NonceSecond,
+        EntropyPurpose.NonceThird,
     ];
     private static readonly LockedSensitiveBuffer[] MousePools = CreateMousePools();
     private static readonly long[] PurposeSampleCounts = new long[PurposeCount];
@@ -38,6 +44,7 @@ public static partial class EntropyMixer
     public static long SaltSampleCount => GetSampleCount(EntropyPurpose.Salt);
     public static long NonceFirstSampleCount => GetSampleCount(EntropyPurpose.NonceFirst);
     public static long NonceSecondSampleCount => GetSampleCount(EntropyPurpose.NonceSecond);
+    public static long NonceThirdSampleCount => GetSampleCount(EntropyPurpose.NonceThird);
     internal static long SystemRandomCallCountForTests => Interlocked.Read(ref _systemRandomCallCount);
     internal static int LastSystemRandomRequestBytesForTests => Volatile.Read(ref _lastSystemRandomRequestBytes);
     public static bool HasRequiredSamples(EntropyPurpose purpose) => GetSampleCount(purpose) >= RequiredMouseSamplesPerPurpose;
@@ -59,7 +66,8 @@ public static partial class EntropyMixer
                 PurposeSampleCounts[(int)EntropyPurpose.GeneratedPasswordSecond],
                 PurposeSampleCounts[(int)EntropyPurpose.Salt],
                 PurposeSampleCounts[(int)EntropyPurpose.NonceFirst],
-                PurposeSampleCounts[(int)EntropyPurpose.NonceSecond]);
+                PurposeSampleCounts[(int)EntropyPurpose.NonceSecond],
+                PurposeSampleCounts[(int)EntropyPurpose.NonceThird]);
         }
     }
 
@@ -218,11 +226,11 @@ public static partial class EntropyMixer
                 salt.Bytes,
                 mouseBytes.Bytes.AsSpan(2 * Sha3_512Compat.HashSizeInBytes, Sha3_512Compat.HashSizeInBytes));
 
-            fullNonce = LockedSensitiveBuffer.Create(2 * Sha3_512Compat.HashSizeInBytes);
+            fullNonce = LockedSensitiveBuffer.Create(3 * Sha3_512Compat.HashSizeInBytes);
             FillSystemRandom(fullNonce.Bytes);
             XorInPlace(
                 fullNonce.Bytes,
-                mouseBytes.Bytes.AsSpan(3 * Sha3_512Compat.HashSizeInBytes, 2 * Sha3_512Compat.HashSizeInBytes));
+                mouseBytes.Bytes.AsSpan(3 * Sha3_512Compat.HashSizeInBytes, 3 * Sha3_512Compat.HashSizeInBytes));
 
             string firstPassword = Convert.ToHexString(
                 passwordBytes.Bytes.AsSpan(0, Sha3_512Compat.HashSizeInBytes));
@@ -247,7 +255,7 @@ public static partial class EntropyMixer
 
     internal static (LockedSensitiveBuffer Salt, LockedSensitiveBuffer Nonce) CreateEncryptionParameters(EncryptionSuite suite)
     {
-        if (suite is not (EncryptionSuite.Kalyna512_512 or EncryptionSuite.Threefish1024))
+        if (!EncryptionSuiteCatalog.IsKnown(suite))
         {
             throw new ArgumentOutOfRangeException(nameof(suite), suite, "Unbekanntes Verschluesselungsverfahren.");
         }
@@ -258,6 +266,7 @@ public static partial class EntropyMixer
                 EntropyPurpose.Salt,
                 EntropyPurpose.NonceFirst,
                 EntropyPurpose.NonceSecond,
+                EntropyPurpose.NonceThird,
             ]);
         LockedSensitiveBuffer? salt = null;
         LockedSensitiveBuffer? fullNonce = null;
@@ -270,21 +279,22 @@ public static partial class EntropyMixer
                 salt.Bytes,
                 mouseBytes.Bytes.AsSpan(0, Sha3_512Compat.HashSizeInBytes));
 
-            fullNonce = LockedSensitiveBuffer.Create(2 * Sha3_512Compat.HashSizeInBytes);
+            fullNonce = LockedSensitiveBuffer.Create(3 * Sha3_512Compat.HashSizeInBytes);
             FillSystemRandom(fullNonce.Bytes);
             XorInPlace(
                 fullNonce.Bytes,
-                mouseBytes.Bytes.AsSpan(Sha3_512Compat.HashSizeInBytes, 2 * Sha3_512Compat.HashSizeInBytes));
+                mouseBytes.Bytes.AsSpan(Sha3_512Compat.HashSizeInBytes, 3 * Sha3_512Compat.HashSizeInBytes));
 
-            if (suite == EncryptionSuite.Threefish1024)
+            int nonceBytes = EncryptionSuiteCatalog.Get(suite).NonceBytes;
+            if (nonceBytes == fullNonce.Bytes.Length)
             {
                 selectedNonce = fullNonce;
                 fullNonce = null;
             }
             else
             {
-                selectedNonce = LockedSensitiveBuffer.Create(Sha3_512Compat.HashSizeInBytes);
-                fullNonce.Bytes.AsSpan(0, selectedNonce.Bytes.Length).CopyTo(selectedNonce.Bytes);
+                selectedNonce = LockedSensitiveBuffer.Create(nonceBytes);
+                fullNonce.Bytes.AsSpan(0, nonceBytes).CopyTo(selectedNonce.Bytes);
             }
 
             (LockedSensitiveBuffer Salt, LockedSensitiveBuffer Nonce) result = (salt, selectedNonce);
@@ -537,15 +547,16 @@ public readonly record struct EntropyPoolStatus(
     long GeneratedPasswordSecond,
     long Salt,
     long NonceFirst,
-    long NonceSecond)
+    long NonceSecond,
+    long NonceThird)
 {
     public long Minimum => Math.Min(
         Math.Min(GeneratedPasswordFirst, GeneratedPasswordSecond),
-        Math.Min(Salt, Math.Min(NonceFirst, NonceSecond)));
+        Math.Min(Salt, Math.Min(NonceFirst, Math.Min(NonceSecond, NonceThird))));
 
     public long Maximum => Math.Max(
         Math.Max(GeneratedPasswordFirst, GeneratedPasswordSecond),
-        Math.Max(Salt, Math.Max(NonceFirst, NonceSecond)));
+        Math.Max(Salt, Math.Max(NonceFirst, Math.Max(NonceSecond, NonceThird))));
 
     public bool IsBalanced => Maximum - Minimum <= 1;
 }
@@ -557,6 +568,7 @@ public enum EntropyPurpose
     Salt = 2,
     NonceFirst = 3,
     NonceSecond = 4,
+    NonceThird = 5,
 }
 
 internal sealed class GeneratedArchiveEntropy : IDisposable
@@ -577,8 +589,11 @@ internal sealed class GeneratedArchiveEntropy : IDisposable
         _secondPassword = secondPassword ?? throw new ArgumentNullException(nameof(secondPassword));
         _salt = salt ?? throw new ArgumentNullException(nameof(salt));
         _fullNonce = fullNonce ?? throw new ArgumentNullException(nameof(fullNonce));
+        // Three nonce parts: 64 bytes for the cascade's inner Kalyna layer and
+        // 128 for its outer Threefish layer. The single-cipher suites take the
+        // leading 64 or 128 bytes of the same material.
         if (_salt.Bytes.Length != Sha3_512Compat.HashSizeInBytes
-            || _fullNonce.Bytes.Length != 2 * Sha3_512Compat.HashSizeInBytes)
+            || _fullNonce.Bytes.Length != 3 * Sha3_512Compat.HashSizeInBytes)
         {
             throw new ArgumentException("Prepared archive entropy has an invalid length.");
         }
@@ -622,7 +637,7 @@ internal sealed class GeneratedArchiveEntropy : IDisposable
         string firstPassword,
         string secondPassword)
     {
-        if (suite is not (EncryptionSuite.Kalyna512_512 or EncryptionSuite.Threefish1024))
+        if (!EncryptionSuiteCatalog.IsKnown(suite))
         {
             throw new ArgumentOutOfRangeException(nameof(suite), suite, "Unbekanntes Verschluesselungsverfahren.");
         }
@@ -647,7 +662,8 @@ internal sealed class GeneratedArchiveEntropy : IDisposable
             _fullNonce = null;
         }
 
-        if (suite == EncryptionSuite.Threefish1024)
+        int nonceBytes = EncryptionSuiteCatalog.Get(suite).NonceBytes;
+        if (nonceBytes == fullNonce.Bytes.Length)
         {
             return (salt, fullNonce);
         }
@@ -655,8 +671,8 @@ internal sealed class GeneratedArchiveEntropy : IDisposable
         LockedSensitiveBuffer? selectedNonce = null;
         try
         {
-            selectedNonce = LockedSensitiveBuffer.Create(Sha3_512Compat.HashSizeInBytes);
-            fullNonce.Bytes.AsSpan(0, selectedNonce.Bytes.Length).CopyTo(selectedNonce.Bytes);
+            selectedNonce = LockedSensitiveBuffer.Create(nonceBytes);
+            fullNonce.Bytes.AsSpan(0, nonceBytes).CopyTo(selectedNonce.Bytes);
             fullNonce.Dispose();
             return (salt, selectedNonce);
         }

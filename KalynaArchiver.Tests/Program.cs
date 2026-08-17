@@ -210,6 +210,8 @@ static void RunSettingsPersistenceTests()
             EntropyMixer.SaltSampleCount,
             EntropyMixer.NonceFirstSampleCount,
             EntropyMixer.NonceSecondSampleCount,
+        EntropyMixer.NonceThirdSampleCount,
+            EntropyMixer.NonceThirdSampleCount,
         ];
         for (int index = 0; index < 10; index++)
         {
@@ -232,6 +234,8 @@ static void RunSettingsPersistenceTests()
             EntropyMixer.SaltSampleCount,
             EntropyMixer.NonceFirstSampleCount,
             EntropyMixer.NonceSecondSampleCount,
+        EntropyMixer.NonceThirdSampleCount,
+            EntropyMixer.NonceThirdSampleCount,
         ];
         Assert(
             purposeCountsAfterTabMoves.Zip(purposeCountsBeforeTabMoves, (after, before) => after - before).All(delta => delta == 2),
@@ -600,12 +604,14 @@ static void AddMouseSamplesUntilEntropyReady()
         + EntropyMixer.MissingSamples(EntropyPurpose.Salt)
         + EntropyMixer.MissingSamples(EntropyPurpose.NonceFirst)
         + EntropyMixer.MissingSamples(EntropyPurpose.NonceSecond)
+        + EntropyMixer.MissingSamples(EntropyPurpose.NonceThird)
         + 5;
     while (!EntropyMixer.HasRequiredSamples(EntropyPurpose.GeneratedPasswordFirst)
         || !EntropyMixer.HasRequiredSamples(EntropyPurpose.GeneratedPasswordSecond)
         || !EntropyMixer.HasRequiredSamples(EntropyPurpose.Salt)
         || !EntropyMixer.HasRequiredSamples(EntropyPurpose.NonceFirst)
-        || !EntropyMixer.HasRequiredSamples(EntropyPurpose.NonceSecond))
+        || !EntropyMixer.HasRequiredSamples(EntropyPurpose.NonceSecond)
+        || !EntropyMixer.HasRequiredSamples(EntropyPurpose.NonceThird))
     {
         EntropyMixer.AddMouseSample(
             10 + (i % 257),
@@ -620,7 +626,8 @@ static void AddMouseSamplesUntilEntropyReady()
                 + status.GeneratedPasswordSecond
                 + status.Salt
                 + status.NonceFirst
-                + status.NonceSecond)
+                + status.NonceSecond
+                + status.NonceThird)
         {
             throw new InvalidOperationException("Mouse entropy pools diverged while filling a test epoch.");
         }
@@ -639,6 +646,7 @@ static void AddMouseSamplesUntilEntropyReady()
         EntropyMixer.SaltSampleCount,
         EntropyMixer.NonceFirstSampleCount,
         EntropyMixer.NonceSecondSampleCount,
+        EntropyMixer.NonceThirdSampleCount,
     ];
     Assert(
         counts.All(count => count >= EntropyMixer.RequiredMouseSamplesPerPurpose),
@@ -1578,7 +1586,8 @@ static async Task RunEntropyGeneratorTestsAsync()
         && afterPasswordPair.GeneratedPasswordSecond == 0
         && afterPasswordPair.Salt == 0
         && afterPasswordPair.NonceFirst == 0
-        && afterPasswordPair.NonceSecond == 0,
+        && afterPasswordPair.NonceSecond == 0
+        && afterPasswordPair.NonceThird == 0,
         "archive-entropy generation atomically replaces all five pools with a fresh empty epoch");
     AssertThrows<InvalidOperationException>(
         () => generatedArchiveEntropy.ConsumeEncryptionParameters(
@@ -2506,8 +2515,8 @@ static byte[] BuildDualSha3Argon2InputForTest(
         EncryptionSuite.Threefish1024 => "Threefish-1024",
         _ => throw new ArgumentOutOfRangeException(nameof(suite)),
     };
-    byte[] firstDomain = Encoding.ASCII.GetBytes($"Kalyna-ZPAQ/v7/{suiteName}/SHA3-512/User+Factor-A");
-    byte[] secondDomain = Encoding.ASCII.GetBytes($"Kalyna-ZPAQ/v7/{suiteName}/SHA3-512/User+Factor-B");
+    byte[] firstDomain = Encoding.ASCII.GetBytes($"Kalyna-ZPAQ/v8/{suiteName}/SHA3-512/User+Factor-A");
+    byte[] secondDomain = Encoding.ASCII.GetBytes($"Kalyna-ZPAQ/v8/{suiteName}/SHA3-512/User+Factor-B");
     byte[] firstMessage = BuildLengthPrefixedMessageForTest(firstDomain, userPasswordBytes, firstGeneratedPasswordBytes);
     byte[] secondMessage = BuildLengthPrefixedMessageForTest(secondDomain, userPasswordBytes, secondGeneratedPasswordBytes);
     byte[] firstHash = SHA3_512.HashData(firstMessage);
@@ -2657,10 +2666,10 @@ static async Task RunPdfRoundTripTestsAsync()
         Assert(info.RequiresGeneratedPassword
             && info.GeneratedPasswordBits == 1024
             && info.GeneratedPasswordFactorCount == 2
-            && info.Version == 7
+            && info.Version == 8
             && info.Suite == EncryptionSuite.Kalyna512_512
             && info.Hint == "test hint",
-            "v7 Kalyna container declares two generated 512-bit factors");
+            "v8 Kalyna container declares two generated 512-bit factors");
 
         string v6HeaderArchive = Path.Combine(root, "legacy-version.kzpaq");
         File.Copy(encryptedArchive, v6HeaderArchive);
@@ -2707,21 +2716,21 @@ static async Task RunPdfRoundTripTestsAsync()
         ReplaceContainerHeaderToken(invalidSaltBitsArchive, "\"SaltBits\":512", "\"SaltBits\":511");
         await AssertThrowsAsync<InvalidDataException>(
             () => kalyna.ReadContainerInfoAsync(invalidSaltBitsArchive, CancellationToken.None),
-            "v7 container header requires a 512-bit salt declaration");
+            "v8 container header requires a 512-bit salt declaration");
 
         string manipulatedArgon2MemoryArchive = Path.Combine(root, "argon2-legacy-memory.kzpaq");
         File.Copy(encryptedArchive, manipulatedArgon2MemoryArchive);
         ReplaceContainerHeaderToken(manipulatedArgon2MemoryArchive, "\"Argon2MemoryKiB\":1048576", "\"Argon2MemoryKiB\":262144");
         await AssertThrowsAsync<InvalidDataException>(
             () => kalyna.ReadContainerInfoAsync(manipulatedArgon2MemoryArchive, CancellationToken.None),
-            "v7 rejects the legacy 256 MiB Argon2 cost before deriving a key");
+            "v8 rejects the legacy 256 MiB Argon2 cost before deriving a key");
 
         string manipulatedArgon2IterationsArchive = Path.Combine(root, "argon2-t3.kzpaq");
         File.Copy(encryptedArchive, manipulatedArgon2IterationsArchive);
         ReplaceContainerHeaderToken(manipulatedArgon2IterationsArchive, "\"Argon2Iterations\":4", "\"Argon2Iterations\":3");
         await AssertThrowsAsync<InvalidDataException>(
             () => kalyna.ReadContainerInfoAsync(manipulatedArgon2IterationsArchive, CancellationToken.None),
-            "v7 rejects weakened Argon2 iterations before deriving a key");
+            "v8 rejects weakened Argon2 iterations before deriving a key");
 
         string duplicateHeaderPropertyArchive = Path.Combine(root, "duplicate-header-property.kzpaq");
         File.Copy(encryptedArchive, duplicateHeaderPropertyArchive);
@@ -2731,14 +2740,14 @@ static async Task RunPdfRoundTripTestsAsync()
             "\"Argon2Iterations\":4,\"Argon2Iterations\":4");
         await AssertThrowsAsync<InvalidDataException>(
             () => kalyna.ReadContainerInfoAsync(duplicateHeaderPropertyArchive, CancellationToken.None),
-            "v7 rejects duplicate JSON properties even when both values are identical");
+            "v8 rejects duplicate JSON properties even when both values are identical");
 
         string manipulatedArgon2Archive = Path.Combine(root, "argon2-p3.kzpaq");
         File.Copy(encryptedArchive, manipulatedArgon2Archive);
         ReplaceContainerHeaderToken(manipulatedArgon2Archive, "\"Argon2Parallelism\":4", "\"Argon2Parallelism\":3");
         await AssertThrowsAsync<InvalidDataException>(
             () => kalyna.ReadContainerInfoAsync(manipulatedArgon2Archive, CancellationToken.None),
-            "v7 rejects weakened Argon2 parallelism before deriving a key");
+            "v8 rejects weakened Argon2 parallelism before deriving a key");
 
         await AssertThrowsCryptographicAsync(
             () => kalyna.DecryptToStreamAsync(encryptedArchive, password + "x", firstGeneratedPassword, secondGeneratedPassword, Stream.Null, null, CancellationToken.None),
@@ -2811,7 +2820,7 @@ static async Task RunPdfRoundTripTestsAsync()
             && threefishInfo.Suite == EncryptionSuite.Threefish1024
             && threefishInfo.NonceBits == 1024
             && threefishInfo.SaltBits == 512,
-            "v7 Threefish suite metadata");
+            "v8 Threefish suite metadata");
 
         ProcessResult threefishList = await zpaq.ListStreamingAsync(
             (zpaqInput, ct) => kalyna.DecryptToStreamAsync(threefishArchive, password, firstGeneratedPassword, secondGeneratedPassword, zpaqInput, null, ct),
@@ -3650,7 +3659,7 @@ static async Task RunCryptographicEraseTestsAsync()
         string magicOnly = Path.Combine(root, "magic-only.kzpaq");
         await File.WriteAllBytesAsync(magicOnly, [.. "KZPAQ1\0"u8, 0, 0, 0, 0]);
         CryptoEraseAnalysis magicOnlyAnalysis = await erase.AnalyzeAsync(magicOnly, CancellationToken.None);
-        Assert(magicOnlyAnalysis.Exists && !magicOnlyAnalysis.IsEncryptedContainer, "magic bytes without a valid v7 header are not cryptographically erasable");
+        Assert(magicOnlyAnalysis.Exists && !magicOnlyAnalysis.IsEncryptedContainer, "magic bytes without a valid v8 header are not cryptographically erasable");
 
         string malformedHeader = Path.Combine(root, "malformed-header.kzpaq");
         byte[] malformedBytes = [.. "KZPAQ1\0"u8, 1, 0, 0, 0, (byte)'{'];

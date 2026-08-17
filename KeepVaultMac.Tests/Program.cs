@@ -52,7 +52,7 @@ if (sheetIndex >= 0 && sheetIndex + 1 < args.Length)
         service.SaveTestPdf(
             new KeySheetData(
                 Path.Combine(outputDirectory, "beispiel-archiv.kzpaq"),
-                EncryptionSuite.Threefish1024,
+                EncryptionSuite.ThreefishOverKalyna,
                 first,
                 second,
                 DateTime.Now,

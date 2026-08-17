@@ -39,7 +39,8 @@ internal static partial class MacComprehensiveTests
             ("randomised differential testing against every reference library", TestReferenceDifferentialAsync),
             ("Argon2id fixed 1 GiB profile and independent equivalence", TestArgon2Async),
             ("ZPAQ levels, streaming, traversal and malformed corpus", TestZpaqAsync),
-            ("v7 dual-suite roundtrip and manipulation rejection", TestContainersAsync),
+            ("v8 triple-suite roundtrip and manipulation rejection", TestContainersAsync),
+            ("cascade layering: the outer layer alone reveals nothing", TestCascadeLayeringAsync),
             ("KPAR2-v2 repair, authentication and transplantation rejection", TestRecoveryAsync),
             ("cryptographic erase ordering and hard-link refusal", TestCryptographicEraseAsync),
             ("verified original deletion refuses on any mismatch", TestVerifiedOriginalDeletionAsync),
@@ -984,7 +985,7 @@ internal static partial class MacComprehensiveTests
         Require(!entropy.HasPendingEncryptionParameters, $"{suite} did not consume prepared entropy exactly once.");
         ValidateContainerHeader(path, suite);
         KalynaContainerInfo info = await containers.ReadContainerInfoAsync(path, CancellationToken.None).ConfigureAwait(false);
-        Require(info.Version == 7 && info.Suite == suite && info.GeneratedPasswordFactorCount == 2 && info.GeneratedPasswordBits == 1024, $"{suite} v7 header metadata mismatch.");
+        Require(info.Version == 8 && info.Suite == suite && info.GeneratedPasswordFactorCount == 2 && info.GeneratedPasswordBits == 1024, $"{suite} v8 header metadata mismatch.");
 
         using var output = new MemoryStream();
         await containers.DecryptToStreamAsync(path, UserPassword, factorA, factorB, output, null, CancellationToken.None).ConfigureAwait(false);
@@ -1019,13 +1020,33 @@ internal static partial class MacComprehensiveTests
             () => containers.ReadContainerInfoAsync(nonCanonical, CancellationToken.None),
             $"{suite} accepted noncanonical header JSON.").ConfigureAwait(false);
 
+        // v8 is a clean break. A container claiming any other version must be
+        // refused outright rather than read on a compatibility path, and the
+        // refusal must not depend on the MACs noticing the edit afterwards.
+        foreach (int rejected in new[] { 7, 6, 9 })
+        {
+            string downgraded = CopyContainer(path, root, $"{suite}-version-{rejected}.kzpaq");
+            ReplaceHeaderToken(downgraded, "\"Version\":8", $"\"Version\":{rejected}");
+            await RequireThrowsAsync<InvalidDataException>(
+                () => containers.ReadContainerInfoAsync(downgraded, CancellationToken.None),
+                $"{suite} accepted a container claiming version {rejected}.").ConfigureAwait(false);
+            await RequireFailureWithoutOutputAsync(
+                containers,
+                downgraded,
+                UserPassword,
+                factorA,
+                factorB,
+                typeof(InvalidDataException),
+                $"{suite} decrypted a container claiming version {rejected}").ConfigureAwait(false);
+        }
+
         string reducedProfile = CopyContainer(path, root, $"{suite}-reduced-profile.kzpaq");
         ReplaceHeaderToken(reducedProfile, "\"Argon2Iterations\":4", "\"Argon2Iterations\":1");
         await RequireThrowsAsync<InvalidDataException>(
             () => containers.ReadContainerInfoAsync(reducedProfile, CancellationToken.None),
             $"{suite} accepted a reduced Argon2 profile.").ConfigureAwait(false);
 
-        if (suite == EncryptionSuite.Threefish1024)
+        if (suite is EncryptionSuite.Threefish1024 or EncryptionSuite.ThreefishOverKalyna)
         {
             foreach ((string label, Action<string> mutate, Type expected) in new[]
             {
@@ -1035,7 +1056,7 @@ internal static partial class MacComprehensiveTests
                 ("ciphertext", new Action<string>(candidate => FlipByte(candidate, new FileInfo(candidate).Length - 1)), typeof(CryptographicException)),
             })
             {
-                string candidate = CopyContainer(path, root, $"Threefish-{label.Replace(' ', '-')}.kzpaq");
+                string candidate = CopyContainer(path, root, $"{suite}-{label.Replace(' ', '-')}.kzpaq");
                 mutate(candidate);
                 await RequireFailureWithoutOutputAsync(
                     containers,
@@ -1249,6 +1270,91 @@ internal static partial class MacComprehensiveTests
         }
     }
 
+    /// <summary>
+    /// Proves that defeating the outer layer alone yields nothing usable.
+    /// </summary>
+    /// <remarks>
+    /// The cascade is only worth its second pass if both ciphers must fall. An
+    /// attacker who breaks Threefish recovers the outer keystream and can strip
+    /// it — and must then be left holding Kalyna ciphertext, not plaintext and
+    /// not the archive's structure. This drives the two layers directly with
+    /// known keys so the property is checked, not argued.
+    /// </remarks>
+    private static Task TestCascadeLayeringAsync()
+    {
+        EncryptionSuiteParameters parameters = EncryptionSuiteCatalog.Get(EncryptionSuite.ThreefishOverKalyna);
+        CascadeLayout layout = parameters.Cascade
+            ?? throw new InvalidOperationException("The cascade suite lost its layer layout.");
+        Require(layout.InnerKeyBytes == 64 && layout.OuterKeyBytes == 128, "Cascade key split is not 64/128.");
+        Require(layout.InnerNonceBytes == 64 && layout.OuterNonceBytes == 128, "Cascade nonce split is not 64/128.");
+        Require(parameters.DerivedKeyBytes == 384, "Cascade derived key is not 384 bytes.");
+        Require(
+            EncryptionSuiteCatalog.Default == EncryptionSuite.ThreefishOverKalyna,
+            "The cascade is not the default suite.");
+
+        // A payload with structure an attacker would recognise instantly.
+        byte[] marker = "KZPAQ1\0KEEP-VAULT-PLAINTEXT-MARKER"u8.ToArray();
+        byte[] plaintext = new byte[64 * 1024];
+        for (int offset = 0; offset + marker.Length <= plaintext.Length; offset += marker.Length)
+        {
+            marker.CopyTo(plaintext, offset);
+        }
+
+        byte[] innerKey = RandomNumberGenerator.GetBytes(layout.InnerKeyBytes);
+        byte[] outerKey = RandomNumberGenerator.GetBytes(layout.OuterKeyBytes);
+        byte[] innerNonce = RandomNumberGenerator.GetBytes(layout.InnerNonceBytes);
+        byte[] outerNonce = RandomNumberGenerator.GetBytes(layout.OuterNonceBytes);
+        byte[] tweak = RandomNumberGenerator.GetBytes(parameters.TweakBytes);
+        byte[] innerCiphertext = new byte[plaintext.Length];
+        byte[] cascadeCiphertext = new byte[plaintext.Length];
+        byte[] outerStripped = new byte[plaintext.Length];
+        byte[] recovered = new byte[plaintext.Length];
+        try
+        {
+            NativeKalyna.XCryptCtr512(innerKey, innerNonce, plaintext, innerCiphertext, plaintext.Length);
+            NativeThreefish.XCryptCtr1024(outerKey, tweak, outerNonce, innerCiphertext, cascadeCiphertext, plaintext.Length);
+
+            Require(!FixedEqual(plaintext, cascadeCiphertext), "The cascade left the plaintext unchanged.");
+            Require(!FixedEqual(innerCiphertext, cascadeCiphertext), "The outer layer did nothing.");
+            Require(!ContainsSequence(cascadeCiphertext, marker), "The cascade ciphertext still shows the plaintext marker.");
+
+            // The attacker's best case: the outer keystream is known and removed.
+            NativeThreefish.XCryptCtr1024(outerKey, tweak, outerNonce, cascadeCiphertext, outerStripped, plaintext.Length);
+            Require(FixedEqual(outerStripped, innerCiphertext), "Stripping the outer layer did not reproduce the inner ciphertext.");
+            Require(!FixedEqual(outerStripped, plaintext), "Stripping the outer layer revealed the plaintext.");
+            Require(!ContainsSequence(outerStripped, marker), "Stripping the outer layer revealed plaintext structure.");
+
+            // Only with the inner key as well does the plaintext come back.
+            NativeKalyna.XCryptCtr512(innerKey, innerNonce, outerStripped, recovered, plaintext.Length);
+            Require(FixedEqual(recovered, plaintext), "Both layers together did not reproduce the plaintext.");
+
+            // A wrong inner key after a correct outer strip stays garbage.
+            byte[] wrongInner = RandomNumberGenerator.GetBytes(layout.InnerKeyBytes);
+            byte[] wrongRecovery = new byte[plaintext.Length];
+            try
+            {
+                NativeKalyna.XCryptCtr512(wrongInner, innerNonce, outerStripped, wrongRecovery, plaintext.Length);
+                Require(!ContainsSequence(wrongRecovery, marker), "A wrong inner key still revealed plaintext structure.");
+            }
+            finally
+            {
+                Zero(wrongInner, wrongRecovery);
+            }
+        }
+        finally
+        {
+            Zero(plaintext, innerKey, outerKey, innerNonce, outerNonce, tweak,
+                innerCiphertext, cascadeCiphertext, outerStripped, recovered);
+        }
+
+        return Task.CompletedTask;
+    }
+
+    private static bool ContainsSequence(ReadOnlySpan<byte> haystack, ReadOnlySpan<byte> needle)
+    {
+        return needle.Length != 0 && haystack.IndexOf(needle) >= 0;
+    }
+
     private static void ValidateContainerHeader(string path, EncryptionSuite suite)
     {
         using FileStream input = File.OpenRead(path);
@@ -1266,7 +1372,7 @@ internal static partial class MacComprehensiveTests
             using JsonDocument document = JsonDocument.Parse(headerBytes);
             JsonElement header = document.RootElement;
             EncryptionSuiteParameters parameters = EncryptionSuiteCatalog.Get(suite);
-            Require(header.GetProperty("Version").GetInt32() == 7, "Container version is not v7.");
+            Require(header.GetProperty("Version").GetInt32() == 8, "Container version is not v8.");
             Require(header.GetProperty("Algorithm").GetString() == parameters.Algorithm, "Container algorithm label mismatch.");
             Require(header.GetProperty("CounterEndian").GetString() == EncryptionSuiteCatalog.CounterEndian, "Container counter endian mismatch.");
             Require(header.GetProperty("Argon2MemoryKiB").GetInt32() == Argon2Profile.DefaultMemoryKiB, "Container Argon2 memory is not 1 GiB.");
@@ -1274,6 +1380,26 @@ internal static partial class MacComprehensiveTests
             Require(header.GetProperty("Argon2Parallelism").GetInt32() == Argon2Profile.DefaultParallelism, "Container Argon2 parallelism mismatch.");
             Require(header.GetProperty("GeneratedPasswordFactorCount").GetInt32() == 2, "Container factor count mismatch.");
             Require(header.GetProperty("GeneratedPasswordBits").GetInt32() == 1024, "Container generated-factor bits mismatch.");
+            Require(
+                header.GetProperty("EncryptionKeyBits").GetInt32() == parameters.EncryptionKeyBytes * 8,
+                "Container encryption key size mismatch.");
+            Require(
+                header.GetProperty("NonceBits").GetInt32() == parameters.NonceBytes * 8,
+                "Container nonce size mismatch.");
+            Require(
+                header.GetProperty("Argon2OutputBits").GetInt32() == parameters.DerivedKeyBytes * 8,
+                "Container Argon2 output size mismatch.");
+            if (suite == EncryptionSuite.ThreefishOverKalyna)
+            {
+                // The split the whole construction rests on, asserted against
+                // the numbers rather than against the catalog that produced
+                // them: 64 bytes of key and nonce for the inner Kalyna layer,
+                // 128 for the outer Threefish layer, and an Argon2id output of
+                // 192 cipher-key bytes plus the two MAC keys.
+                Require(header.GetProperty("EncryptionKeyBits").GetInt32() == 192 * 8, "Cascade key is not 192 bytes.");
+                Require(header.GetProperty("NonceBits").GetInt32() == 192 * 8, "Cascade nonce is not 192 bytes.");
+                Require(header.GetProperty("Argon2OutputBits").GetInt32() == 384 * 8, "Cascade Argon2 output is not 384 bytes.");
+            }
             Require(input.Length - input.Position > 64 + 128, "Container lacks two tags and ciphertext.");
         }
         finally
@@ -1434,7 +1560,8 @@ internal static partial class MacComprehensiveTests
             || !EntropyMixer.HasRequiredSamples(EntropyPurpose.GeneratedPasswordSecond)
             || !EntropyMixer.HasRequiredSamples(EntropyPurpose.Salt)
             || !EntropyMixer.HasRequiredSamples(EntropyPurpose.NonceFirst)
-            || !EntropyMixer.HasRequiredSamples(EntropyPurpose.NonceSecond))
+            || !EntropyMixer.HasRequiredSamples(EntropyPurpose.NonceSecond)
+            || !EntropyMixer.HasRequiredSamples(EntropyPurpose.NonceThird))
         {
             EntropyMixer.AddMouseSample(
                 100.125 + (index * 0.003),
