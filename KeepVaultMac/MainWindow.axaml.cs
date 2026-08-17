@@ -958,9 +958,17 @@ public sealed partial class MainWindow : Window, IDisposable
                 return;
             }
 
-            _keySheets.SaveExplicitTestPdf(data, path);
+            // Two files, one per factor: exporting both into a single document
+            // would put the whole key in one object, which is exactly what the
+            // separated sheets exist to prevent.
+            string directory = Path.GetDirectoryName(path) ?? Environment.CurrentDirectory;
+            string stem = Path.GetFileNameWithoutExtension(path);
+            string firstPath = Path.Combine(directory, $"{stem}-Faktor-A.pdf");
+            string secondPath = Path.Combine(directory, $"{stem}-Faktor-B.pdf");
+            _keySheets.SaveExplicitTestPdf(data, firstPath, secondPath);
             MarkKeySheetHandled(data);
-            Log(string.Format(CultureInfo.CurrentCulture, T("keySheetTestPdfSavedLog"), path));
+            Log(string.Format(CultureInfo.CurrentCulture, T("keySheetTestPdfSavedLog"), firstPath));
+            Log(string.Format(CultureInfo.CurrentCulture, T("keySheetTestPdfSavedLog"), secondPath));
         }
         catch (Exception exception)
         {
@@ -1047,6 +1055,13 @@ public sealed partial class MainWindow : Window, IDisposable
             Log(T("verifyingBeforeDelete"));
             OperationStatusText.Text = T("verifyingBeforeDelete");
 
+            // Pin which archive this verification is about, before a single byte
+            // of it is read back. Deleting the originals is the one step here
+            // that cannot be undone, so it must be tied to the file that was
+            // actually proven good, not merely to the path it sat at.
+            MacOriginalDeletionService.ArchiveIdentity verifiedArchive =
+                MacOriginalDeletionService.CaptureArchiveIdentity(archivePath);
+
             ProcessResult extraction = encrypted
                 ? await ExtractEncryptedForVerificationAsync(archivePath, verifyRoot)
                 : await _zpaq.ExtractAsync(archivePath, verifyRoot, Progress(), _lifetime.Token);
@@ -1076,7 +1091,10 @@ public sealed partial class MainWindow : Window, IDisposable
                 verification.FilesCompared,
                 verification.BytesCompared));
 
-            IReadOnlyList<string> failures = MacOriginalDeletionService.DeleteOriginals(inputs);
+            IReadOnlyList<string> failures = MacOriginalDeletionService.DeleteOriginals(
+                inputs,
+                archivePath,
+                verifiedArchive);
             if (failures.Count > 0)
             {
                 Log($"{T("deleteOriginalsFailed")} — {string.Join("; ", failures)}");

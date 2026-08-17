@@ -177,7 +177,69 @@ internal sealed class MacOriginalDeletionService
     /// data. Cryptographic erase remains a separate, explicit action for
     /// destroying a container.
     /// </remarks>
-    internal static IReadOnlyList<string> DeleteOriginals(IReadOnlyList<string> originals)
+    /// <summary>
+    /// Identifies the archive by its contents, so any change is noticed.
+    /// </summary>
+    /// <remarks>
+    /// A digest rather than device and inode: those would miss a file
+    /// overwritten in place, which is the cheaper way to swap an archive out
+    /// from under a verification that has already finished reading it.
+    /// </remarks>
+    internal readonly record struct ArchiveIdentity(long Length, string Digest);
+
+    /// <summary>
+    /// Records which archive the verification is about.
+    /// </summary>
+    internal static ArchiveIdentity CaptureArchiveIdentity(string archivePath)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(archivePath);
+        using FileStream stream = MacSafeFileSystem.OpenReadNoSymlinks(archivePath);
+        byte[] digest = SHA512.HashData(stream);
+        return new ArchiveIdentity(stream.Length, Convert.ToHexString(digest));
+    }
+
+    /// <summary>
+    /// Deletes the originals, but only if the archive is still the one that was
+    /// verified.
+    /// </summary>
+    /// <remarks>
+    /// Verification proves the archive reproduced the inputs. It proves nothing
+    /// about the archive that exists a moment later. Between the two lies the
+    /// only irreversible step in this app, so the file is identified again
+    /// immediately before the originals go: same device, same inode, same
+    /// length, same modification time. Anything else and nothing is deleted.
+    /// </remarks>
+    internal static IReadOnlyList<string> DeleteOriginals(
+        IReadOnlyList<string> originals,
+        string archivePath,
+        ArchiveIdentity verified)
+    {
+        ArgumentNullException.ThrowIfNull(originals);
+        ArchiveIdentity current;
+        try
+        {
+            current = CaptureArchiveIdentity(archivePath);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            return [$"{Path.GetFileName(archivePath)}: {exception.Message}"];
+        }
+
+        if (current.Length != verified.Length
+            || !CryptographicOperations.FixedTimeEquals(
+                Convert.FromHexString(current.Digest),
+                Convert.FromHexString(verified.Digest)))
+        {
+            return [
+                "Das Archiv wurde zwischen Prüfung und Löschung verändert; "
+                + "es wurde nichts gelöscht."
+            ];
+        }
+
+        return DeleteOriginals(originals);
+    }
+
+    private static IReadOnlyList<string> DeleteOriginals(IReadOnlyList<string> originals)
     {
         ArgumentNullException.ThrowIfNull(originals);
         var failures = new List<string>();

@@ -46,7 +46,9 @@ if (sheetIndex >= 0 && sheetIndex + 1 < args.Length)
     foreach (bool english in new[] { false, true })
     {
         var service = new KeySheetService();
-        string target = Path.Combine(outputDirectory, english ? "key-sheets-en.pdf" : "key-sheets-de.pdf");
+        string suffix = english ? "en" : "de";
+        string firstTarget = Path.Combine(outputDirectory, $"key-sheet-a-{suffix}.pdf");
+        string secondTarget = Path.Combine(outputDirectory, $"key-sheet-b-{suffix}.pdf");
         service.SaveTestPdf(
             new KeySheetData(
                 Path.Combine(outputDirectory, "beispiel-archiv.kzpaq"),
@@ -56,8 +58,10 @@ if (sheetIndex >= 0 && sheetIndex + 1 < args.Length)
                 DateTime.Now,
                 english,
                 string.Empty),
-            target);
-        Console.WriteLine($"key_sheets={target}");
+            firstTarget,
+            secondTarget);
+        Console.WriteLine($"key_sheets={firstTarget}");
+        Console.WriteLine($"key_sheets={secondTarget}");
     }
 }
 

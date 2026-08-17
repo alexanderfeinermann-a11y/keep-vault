@@ -29,18 +29,69 @@ public sealed class KeySheetService
     /// this method and transports its in-memory PDF directly to the CUPS pipe.
     /// Existing files are intentionally not overwritten.
     /// </summary>
-    public void SaveTestPdf(KeySheetData data, string pdfPath)
+    /// <summary>
+    /// Writes the two key sheets as two separate files.
+    /// </summary>
+    /// <remarks>
+    /// The whole scheme rests on factor A and factor B never being in one
+    /// place. A single export file quietly undid that: it put both halves of
+    /// the key in one object, on one disk, in one backup. Each factor now gets
+    /// its own file so the separation survives the digital step too, and each
+    /// carries the public installation page so either one is useful on its own.
+    /// </remarks>
+    public void SaveTestPdf(KeySheetData data, string firstPdfPath, string secondPdfPath)
     {
         ValidatedKeySheetData validated = Validate(data);
-        ArgumentException.ThrowIfNullOrWhiteSpace(pdfPath);
-        EnsurePdfFontResolver();
+        ArgumentException.ThrowIfNullOrWhiteSpace(firstPdfPath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(secondPdfPath);
+        if (string.Equals(
+                Path.GetFullPath(firstPdfPath),
+                Path.GetFullPath(secondPdfPath),
+                StringComparison.Ordinal))
+        {
+            throw new ArgumentException(
+                "Die beiden Faktoren dürfen nicht in dieselbe Datei geschrieben werden.",
+                nameof(secondPdfPath));
+        }
 
+        EnsurePdfFontResolver();
+        WriteSheet(validated, KeySheetFactor.First, firstPdfPath);
+        try
+        {
+            WriteSheet(validated, KeySheetFactor.Second, secondPdfPath);
+        }
+        catch
+        {
+            // Never leave factor A behind on its own without the caller knowing
+            // the export failed halfway.
+            TryDelete(firstPdfPath);
+            throw;
+        }
+    }
+
+    private static void TryDelete(string path)
+    {
+        try
+        {
+            string full = MacCanonicalPath.CanonicalizeCreatableFile(path);
+            if (File.Exists(full))
+            {
+                File.Delete(full);
+            }
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+        }
+    }
+
+    private static void WriteSheet(ValidatedKeySheetData validated, KeySheetFactor factor, string pdfPath)
+    {
         string targetPath = MacCanonicalPath.CanonicalizeCreatableFile(pdfPath);
         FileStream? output = null;
         try
         {
             output = MacSecretFile.CreateExclusive(targetPath);
-            using PdfDocument document = CreatePdfDocument(validated);
+            using PdfDocument document = CreateSingleSheetDocument(validated, factor);
             document.Save(output, closeStream: false);
             output.Flush(flushToDisk: true);
             MacSafeFileSystem.FullSync(output.SafeFileHandle);
@@ -374,6 +425,21 @@ public sealed class KeySheetService
         return $"{resolved} (macOS)";
     }
 
+    /// <summary>
+    /// One factor's sheet plus the public installation page.
+    /// </summary>
+    private static PdfDocument CreateSingleSheetDocument(ValidatedKeySheetData data, KeySheetFactor factor)
+    {
+        var document = new PdfDocument();
+        document.Info.Title = data.English
+            ? $"{ProductName} key sheet {(factor == KeySheetFactor.First ? "A" : "B")}"
+            : $"{ProductName} Schlüsselzettel {(factor == KeySheetFactor.First ? "A" : "B")}";
+        document.Info.Author = ProductName;
+        DrawPdfSheet(document.AddPage(), data, factor, separatedByBlankPage: false);
+        DrawInstallationPage(document.AddPage(), data.English);
+        return document;
+    }
+
     private static PdfDocument CreatePdfDocument(ValidatedKeySheetData data)
     {
         var document = new PdfDocument();
@@ -381,7 +447,7 @@ public sealed class KeySheetService
             ? $"{ProductName} separated key sheets"
             : $"{ProductName} getrennte Schlüsselzettel";
         document.Info.Author = ProductName;
-        DrawPdfSheet(document.AddPage(), data, KeySheetFactor.First);
+        DrawPdfSheet(document.AddPage(), data, KeySheetFactor.First, separatedByBlankPage: true);
 
         // Page 2 separates factor A from factor B, and that separation is the
         // whole point of it: nothing derived from either factor may appear here.
@@ -390,11 +456,15 @@ public sealed class KeySheetService
         // even through a duplex print or a page held up to the light.
         DrawInstallationPage(document.AddPage(), data.English);
 
-        DrawPdfSheet(document.AddPage(), data, KeySheetFactor.Second);
+        DrawPdfSheet(document.AddPage(), data, KeySheetFactor.Second, separatedByBlankPage: true);
         return document;
     }
 
-    private static void DrawPdfSheet(PdfPage page, ValidatedKeySheetData data, KeySheetFactor factor)
+    private static void DrawPdfSheet(
+        PdfPage page,
+        ValidatedKeySheetData data,
+        KeySheetFactor factor,
+        bool separatedByBlankPage)
     {
         SetA4(page);
         string generatedPassword = factor == KeySheetFactor.First
@@ -427,9 +497,13 @@ public sealed class KeySheetService
         y += 30;
 
         formatter.DrawString(
-            en
-                ? "Keep this key sheet separate from the other one. The completely blank middle page between A and B is intentional."
-                : "Diesen Schlüsselzettel getrennt vom anderen aufbewahren. Die Seite zwischen A und B trennt beide Faktoren absichtlich.",
+            separatedByBlankPage
+                ? (en
+                    ? "Keep this key sheet separate from the other one. The page between A and B separates the two factors on purpose."
+                    : "Diesen Schlüsselzettel getrennt vom anderen aufbewahren. Die Seite zwischen A und B trennt beide Faktoren absichtlich.")
+                : (en
+                    ? "Keep this key sheet separate from the other one. The other factor is in its own file and must be stored elsewhere."
+                    : "Diesen Schlüsselzettel getrennt vom anderen aufbewahren. Der andere Faktor liegt in einer eigenen Datei und gehört an einen anderen Ort."),
             warningFont,
             XBrushes.DarkRed,
             new XRect(margin, y, bodyWidth, 46));

@@ -30,10 +30,10 @@ internal sealed class MacKeySheetService
 {
     private readonly KeySheetService _service = new();
 
-    internal void SaveExplicitTestPdf(MacKeySheetData data, string path)
+    internal void SaveExplicitTestPdf(MacKeySheetData data, string firstPath, string secondPath)
     {
         ArgumentNullException.ThrowIfNull(data);
-        _service.SaveTestPdf(data.ToServiceData(), path);
+        _service.SaveTestPdf(data.ToServiceData(), firstPath, secondPath);
     }
 
     internal async Task<IReadOnlyList<string>> GetPhysicalPrintersAsync(
