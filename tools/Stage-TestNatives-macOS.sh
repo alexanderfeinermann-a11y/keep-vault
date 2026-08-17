@@ -64,7 +64,7 @@ fi
 
 source_natives=${source_app}/Contents/MacOS/Native
 signature_root=${source_app}/Contents/Resources/HybridSignatures/Native
-components=(zpaq argon2 libargon2_ref.dylib libkalyna_ref.dylib libthreefish_ref.dylib)
+components=(zpaq argon2 libargon2_ref.dylib libkalyna_ref.dylib libmars_ref.dylib libshacal2_ref.dylib libthreefish_ref.dylib)
 # Only the two helper executables carry sandbox entitlements and therefore need
 # re-signing; the libraries ship without entitlements and keep their release
 # signatures and manifests untouched.

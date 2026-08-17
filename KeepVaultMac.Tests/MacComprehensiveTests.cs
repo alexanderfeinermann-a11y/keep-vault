@@ -43,6 +43,7 @@ internal static partial class MacComprehensiveTests
             ("cascade layering: the outer layer alone reveals nothing", TestCascadeLayeringAsync),
             ("v9 two-round key derivation from one pool consumption", TestTwoRoundDerivationAsync),
             ("v9 per-chunk nonces across a multi-chunk archive", TestPerChunkNoncesAsync),
+            ("MARS and SHACAL-2 published vectors and CTR behaviour", TestCascadeCipherVectorsAsync),
             ("KPAR2-v2 repair, authentication and transplantation rejection", TestRecoveryAsync),
             ("cryptographic erase ordering and hard-link refusal", TestCryptographicEraseAsync),
             ("verified original deletion refuses on any mismatch", TestVerifiedOriginalDeletionAsync),
@@ -1611,6 +1612,178 @@ internal static partial class MacComprehensiveTests
     /// and the reader disagree about would still produce different ciphertext
     /// per chunk and would still pass the first check.
     /// </remarks>
+    /// <summary>
+    /// Checks the two Crypto++-backed cascade layers against the vectors that
+    /// ship with the library, and checks that their CTR mode behaves.
+    /// </summary>
+    /// <remarks>
+    /// The vectors are read from external/cryptopp/TestVectors rather than
+    /// copied in here, so a Crypto++ update brings its own expectations with it
+    /// instead of being checked against numbers frozen at the time this was
+    /// written.
+    ///
+    /// A gap worth naming: SHACAL-2's file covers the 512-bit key the cascade
+    /// actually uses, but MARS's covers only 128, 192 and 256 bits. The AES
+    /// submission published no 448-bit vectors, so the test proves the MARS
+    /// cipher core and the key schedule at three lengths, and cannot prove the
+    /// 448-bit schedule. That one still needs a second implementation to agree
+    /// with it.
+    /// </remarks>
+    private static Task TestCascadeCipherVectorsAsync()
+    {
+        Require(NativeMars.IsAvailable(), $"MARS reference library unavailable: {NativeMars.LastLoadError}");
+        Require(NativeShacal2.IsAvailable(), $"SHACAL-2 reference library unavailable: {NativeShacal2.LastLoadError}");
+
+        string vectorRoot = ResolveVectorDirectory();
+
+        int marsChecked = RunBlockVectors(
+            Path.Combine(vectorRoot, "mars.txt"),
+            NativeMars.BlockBytes,
+            NativeMars.EncryptBlock,
+            "MARS");
+        Require(marsChecked >= 10, $"Only {marsChecked} MARS vectors were exercised.");
+
+        int shacalChecked = RunBlockVectors(
+            Path.Combine(vectorRoot, "shacal2.txt"),
+            NativeShacal2.BlockBytes,
+            NativeShacal2.EncryptBlock,
+            "SHACAL-2");
+        Require(shacalChecked >= 1000, $"Only {shacalChecked} SHACAL-2 vectors were exercised.");
+
+        // CTR is its own inverse and must not depend on how many threads ran.
+        // The sizes straddle the block width, the 256 KiB claim and the 1 MiB
+        // threshold at which the driver starts handing work to other cores.
+        foreach (int length in new[] { 1, 15, 16, 31, 32, 33, 65536, (1 << 20) - 1, 1 << 20, (5 << 20) + 7 })
+        {
+            RoundTrip(
+                length,
+                keyBytes: 56,
+                nonceBytes: NativeMars.BlockBytes,
+                (k, n, i, o, l) => NativeMars.XCryptCtr448(k, n, i, o, l),
+                "MARS-448");
+            RoundTrip(
+                length,
+                keyBytes: 64,
+                nonceBytes: NativeShacal2.BlockBytes,
+                (k, n, i, o, l) => NativeShacal2.XCryptCtr512(k, n, i, o, l),
+                "SHACAL-2-512");
+        }
+
+        return Task.CompletedTask;
+
+        static void RoundTrip(
+            int length,
+            int keyBytes,
+            int nonceBytes,
+            Action<byte[], byte[], byte[], byte[], int> xcrypt,
+            string label)
+        {
+            byte[] key = RandomNumberGenerator.GetBytes(keyBytes);
+            byte[] nonce = RandomNumberGenerator.GetBytes(nonceBytes);
+            byte[] plain = RandomNumberGenerator.GetBytes(length);
+            byte[] cipher = new byte[length];
+            byte[] restored = new byte[length];
+
+            xcrypt(key, nonce, plain, cipher, length);
+            xcrypt(key, nonce, cipher, restored, length);
+
+            Require(restored.AsSpan().SequenceEqual(plain), $"{label} did not round trip at {length} bytes.");
+            if (length >= nonceBytes)
+            {
+                Require(
+                    !cipher.AsSpan(0, nonceBytes).SequenceEqual(plain.AsSpan(0, nonceBytes)),
+                    $"{label} returned its input unchanged at {length} bytes.");
+            }
+        }
+    }
+
+    /// <summary>
+    /// Reads Key/Plaintext/Ciphertext triples out of a Crypto++ vector file and
+    /// runs the ones whose block size matches.
+    /// </summary>
+    private static int RunBlockVectors(
+        string path,
+        int blockBytes,
+        Action<byte[], byte[], byte[]> encryptBlock,
+        string label)
+    {
+        Require(File.Exists(path), $"{label} vector file is missing: {path}");
+
+        string? key = null;
+        string? plaintext = null;
+        string? ciphertext = null;
+        int exercised = 0;
+
+        foreach (string rawLine in File.ReadLines(path))
+        {
+            string line = rawLine.Trim();
+            int separator = line.IndexOf(':');
+            if (separator <= 0)
+            {
+                continue;
+            }
+
+            string name = line[..separator].Trim();
+            string value = line[(separator + 1)..].Trim();
+
+            switch (name)
+            {
+                case "Key":
+                    key = value;
+                    break;
+                case "Plaintext":
+                    plaintext = value;
+                    break;
+                case "Ciphertext":
+                    ciphertext = value;
+                    break;
+                case "Test":
+                    if (value == "Encrypt" && key is not null && plaintext is not null && ciphertext is not null)
+                    {
+                        byte[] keyBytes = Convert.FromHexString(key);
+                        byte[] input = Convert.FromHexString(plaintext);
+                        byte[] expected = Convert.FromHexString(ciphertext);
+                        if (input.Length == blockBytes && expected.Length == blockBytes)
+                        {
+                            byte[] actual = new byte[blockBytes];
+                            encryptBlock(keyBytes, input, actual);
+                            Require(
+                                actual.AsSpan().SequenceEqual(expected),
+                                $"{label} vector mismatch for a {keyBytes.Length * 8}-bit key: "
+                                + $"got {Convert.ToHexString(actual)}, expected {ciphertext}.");
+                            exercised++;
+                        }
+                    }
+
+                    plaintext = null;
+                    ciphertext = null;
+                    break;
+            }
+        }
+
+        return exercised;
+    }
+
+    /// <summary>
+    /// Finds external/cryptopp/TestVectors by walking up from the test binary.
+    /// </summary>
+    private static string ResolveVectorDirectory()
+    {
+        DirectoryInfo? directory = new(AppContext.BaseDirectory);
+        while (directory is not null)
+        {
+            string candidate = Path.Combine(directory.FullName, "external", "cryptopp", "TestVectors");
+            if (Directory.Exists(candidate))
+            {
+                return candidate;
+            }
+
+            directory = directory.Parent;
+        }
+
+        throw new InvalidOperationException("external/cryptopp/TestVectors was not found above the test binary.");
+    }
+
     private static async Task TestPerChunkNoncesAsync()
     {
         const int chunkSize = 16 * 1024 * 1024;

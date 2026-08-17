@@ -418,7 +418,7 @@ if [[ -d ${native_dir} && ${native_dir} == ${build_root}/* ]]; then
 fi
 mkdir -p ${native_dir}
 native_source=${repo_root}/KeepVaultMac/Native/$([[ ${architecture} == universal ]] && print osx-universal || print osx-arm64)
-for native_name in zpaq argon2 libargon2_ref.dylib libkalyna_ref.dylib libthreefish_ref.dylib; do
+for native_name in zpaq argon2 libargon2_ref.dylib libkalyna_ref.dylib libmars_ref.dylib libshacal2_ref.dylib libthreefish_ref.dylib; do
   ditto ${native_source}/${native_name} ${native_dir}/${native_name}
 done
 
@@ -505,6 +505,8 @@ signer_arguments=(
   --target ${macos_dir}/Native/argon2
   --target ${macos_dir}/Native/libargon2_ref.dylib
   --target ${macos_dir}/Native/libkalyna_ref.dylib
+  --target ${macos_dir}/Native/libmars_ref.dylib
+  --target ${macos_dir}/Native/libshacal2_ref.dylib
   --target ${macos_dir}/Native/libthreefish_ref.dylib
 )
 if [[ -n ${pfx_password_service} ]]; then

@@ -78,6 +78,7 @@
     <Compile Include="../KalynaArchiver/Services/EntropyMixer.cs" Link="Services/EntropyMixer.cs" />
     <Compile Include="../KalynaArchiver/Services/EncryptionSuite.cs" Link="Services/EncryptionSuite.cs" />
     <Compile Include="../KalynaArchiver/Services/KalynaContainerService.cs" Link="Services/KalynaContainerService.cs" />
+    <Compile Include="../KalynaArchiver/Services/NativeCascadeCiphers.cs" Link="Services/NativeCascadeCiphers.cs" />
     <Compile Include="../KalynaArchiver/Services/NativeArgon2id.cs" Link="Services/NativeArgon2id.cs" />
     <Compile Include="../KalynaArchiver/Services/PasswordKeyService.cs" Link="Services/PasswordKeyService.cs" />
     <Compile Include="../KalynaArchiver/Services/ProcessResult.cs" Link="Services/ProcessResult.cs" />
@@ -99,6 +100,8 @@
     <Content Include="Native/osx-arm64/argon2" CopyToOutputDirectory="PreserveNewest" TargetPath="Native/argon2" />
     <Content Include="Native/osx-arm64/libargon2_ref.dylib" CopyToOutputDirectory="PreserveNewest" TargetPath="Native/libargon2_ref.dylib" />
     <Content Include="Native/osx-arm64/libkalyna_ref.dylib" CopyToOutputDirectory="PreserveNewest" TargetPath="Native/libkalyna_ref.dylib" />
+    <Content Include="Native/osx-arm64/libmars_ref.dylib" CopyToOutputDirectory="PreserveNewest" TargetPath="Native/libmars_ref.dylib" />
+    <Content Include="Native/osx-arm64/libshacal2_ref.dylib" CopyToOutputDirectory="PreserveNewest" TargetPath="Native/libshacal2_ref.dylib" />
     <Content Include="Native/osx-arm64/libthreefish_ref.dylib" CopyToOutputDirectory="PreserveNewest" TargetPath="Native/libthreefish_ref.dylib" />
   </ItemGroup>
 

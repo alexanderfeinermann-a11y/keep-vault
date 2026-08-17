@@ -113,7 +113,7 @@ public sealed class IntegrityService : IDisposable
 
     public async Task<IReadOnlyList<ToolIntegrityStatus>> CheckNativeToolsAsync(CancellationToken cancellationToken)
     {
-        string[] toolNames = ["zpaq.exe", "kalyna_ref.dll", "threefish_ref.dll", "argon2_ref.dll", "argon2.exe"];
+        string[] toolNames = ["zpaq.exe", "kalyna_ref.dll", "threefish_ref.dll", "mars_ref.dll", "shacal2_ref.dll", "argon2_ref.dll", "argon2.exe"];
         var statuses = new List<ToolIntegrityStatus>(toolNames.Length);
         foreach (string toolName in toolNames)
         {
