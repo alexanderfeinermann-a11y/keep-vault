@@ -273,7 +273,7 @@ public sealed class KeySheetService
 
         string canonicalArchivePath = MacCanonicalPath.CanonicalizeCreatableFile(data.ArchivePath);
         string deviceName = string.IsNullOrWhiteSpace(data.DeviceName)
-            ? Environment.MachineName
+            ? ResolveDeviceName()
             : data.DeviceName.Trim();
         return new ValidatedKeySheetData(
             canonicalArchivePath,
@@ -306,6 +306,73 @@ public sealed class KeySheetService
     /// here, not a matter of taste.
     /// </remarks>
     private const double MinimumFontSize = 16;
+
+    private const string SystemConfigurationLibrary =
+        "/System/Library/Frameworks/SystemConfiguration.framework/SystemConfiguration";
+    private const string CoreFoundationLibrary =
+        "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation";
+    private const uint Utf8Encoding = 0x08000100;
+
+    [DllImport(SystemConfigurationLibrary, EntryPoint = "SCDynamicStoreCopyComputerName")]
+    private static extern IntPtr CopyComputerName(IntPtr store, IntPtr nameEncoding);
+
+    [DllImport(CoreFoundationLibrary, EntryPoint = "CFStringGetCString")]
+    [return: MarshalAs(UnmanagedType.U1)]
+    private static extern bool CopyCString(IntPtr value, byte[] buffer, nint size, uint encoding);
+
+    [DllImport(CoreFoundationLibrary, EntryPoint = "CFRelease")]
+    private static extern void ReleaseCoreFoundation(IntPtr value);
+
+    /// <summary>
+    /// The name this machine answers to, as its owner set it, with the platform
+    /// beside it.
+    /// </summary>
+    /// <remarks>
+    /// Environment.MachineName returns the network hostname, which macOS derives
+    /// by sanitising the real name: a computer the owner called "MacBook Pro"
+    /// reports itself as "Mac". A key sheet is read years later, quite possibly
+    /// in a household with several machines, and "Mac" narrows that down to
+    /// nothing. The name the owner would recognise comes from the system
+    /// configuration; the hostname is kept only as a fallback.
+    /// </remarks>
+    private static string ResolveDeviceName()
+    {
+        string resolved = string.Empty;
+        IntPtr name = IntPtr.Zero;
+        try
+        {
+            name = CopyComputerName(IntPtr.Zero, IntPtr.Zero);
+            if (name != IntPtr.Zero)
+            {
+                byte[] buffer = new byte[512];
+                if (CopyCString(name, buffer, buffer.Length, Utf8Encoding))
+                {
+                    int end = Array.IndexOf(buffer, (byte)0);
+                    resolved = Encoding.UTF8
+                        .GetString(buffer, 0, end < 0 ? buffer.Length : end)
+                        .Trim();
+                }
+            }
+        }
+        catch (Exception exception) when (exception is DllNotFoundException or EntryPointNotFoundException)
+        {
+            resolved = string.Empty;
+        }
+        finally
+        {
+            if (name != IntPtr.Zero)
+            {
+                ReleaseCoreFoundation(name);
+            }
+        }
+
+        if (resolved.Length == 0)
+        {
+            resolved = Environment.MachineName;
+        }
+
+        return $"{resolved} (macOS)";
+    }
 
     private static PdfDocument CreatePdfDocument(ValidatedKeySheetData data)
     {

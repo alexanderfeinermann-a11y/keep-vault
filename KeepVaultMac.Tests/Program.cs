@@ -55,7 +55,7 @@ if (sheetIndex >= 0 && sheetIndex + 1 < args.Length)
                 second,
                 DateTime.Now,
                 english,
-                Environment.MachineName),
+                string.Empty),
             target);
         Console.WriteLine($"key_sheets={target}");
     }

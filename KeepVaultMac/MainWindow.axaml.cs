@@ -1492,7 +1492,7 @@ public sealed partial class MainWindow : Window, IDisposable
             PasswordKeyService.NormalizeGeneratedPassword(GeneratedPasswordSecondBox.Text ?? string.Empty),
             DateTime.Now,
             IsEnglish,
-            Environment.MachineName);
+            string.Empty);
     }
 
     private void ResetKeySheetStatus()
