@@ -25,3 +25,7 @@ dist/
 # Portable/verifier build outputs
 KeepVaultMac.ReleaseVerifier/bin/
 KeepVaultMac.ReleaseVerifier/obj/
+
+# Crypto++ static archive: a per-architecture build intermediate for the
+# adapters, never shipped in the bundle. Rebuilt by Build-Native-macOS.sh.
+KeepVaultMac/Native/*/libcryptopp.a
