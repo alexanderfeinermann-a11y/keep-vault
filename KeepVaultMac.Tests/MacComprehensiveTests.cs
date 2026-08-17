@@ -1650,6 +1650,8 @@ internal static partial class MacComprehensiveTests
             "SHACAL-2");
         Require(shacalChecked >= 1000, $"Only {shacalChecked} SHACAL-2 vectors were exercised.");
 
+        VerifyMars448AgainstIndependentOracle();
+
 
         Require(NativeAes.IsAvailable(), $"AES reference library unavailable: {NativeAes.LastLoadError}");
         Require(NativeChaChaPoly.IsAvailable(), $"ChaCha20-Poly1305 library unavailable: {NativeChaChaPoly.LastLoadError}");
@@ -1764,6 +1766,67 @@ internal static partial class MacComprehensiveTests
                     $"{label} returned its input unchanged at {length} bytes.");
             }
         }
+    }
+
+
+    /// <summary>
+    /// Checks MARS against answers produced by a different implementation,
+    /// including the 448-bit keys the cascade actually uses.
+    /// </summary>
+    /// <remarks>
+    /// The AES submission published vectors for 128, 192 and 256-bit keys only,
+    /// so the key length this app depends on had no authoritative check. These
+    /// answers come from Botan 1.10.17's MARS, an independent implementation
+    /// line, and the file records its provenance and the published vector it
+    /// was validated against before being trusted.
+    ///
+    /// The oracle had to be validated first for a concrete reason: Brian
+    /// Gladman's widely mirrored mars.c predates the 22 September 1999 MARS
+    /// revision and implements the older key schedule. It disagrees with
+    /// Crypto++ and with the published vectors, and using it unchecked would
+    /// have produced a failure that pointed at this repository instead of at
+    /// the oracle.
+    ///
+    /// Only the raw block cipher is compared. CTR is checked separately, so a
+    /// disagreement here means the MARS primitive, and a disagreement there
+    /// means the counter mode — two implementations can both be correct and
+    /// still differ on counter endianness.
+    /// </remarks>
+    private static void VerifyMars448AgainstIndependentOracle()
+    {
+        string path = Path.Combine(AppContext.BaseDirectory, "MarsKnownAnswers.txt");
+        Require(File.Exists(path), $"The MARS known-answer file is missing: {path}");
+
+        var perLength = new Dictionary<int, int>();
+        foreach (string rawLine in File.ReadLines(path))
+        {
+            string line = rawLine.Trim();
+            if (line.Length == 0 || line[0] == '#')
+            {
+                continue;
+            }
+
+            string[] parts = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            Require(parts.Length == 3, $"Malformed MARS known-answer line: {line}");
+
+            byte[] key = Convert.FromHexString(parts[0]);
+            byte[] plain = Convert.FromHexString(parts[1]);
+            byte[] expected = Convert.FromHexString(parts[2]);
+
+            byte[] actual = new byte[NativeMars.BlockBytes];
+            NativeMars.EncryptBlock(key, plain, actual);
+            Require(
+                actual.AsSpan().SequenceEqual(expected),
+                $"MARS disagrees with the independent oracle at a {key.Length * 8}-bit key: "
+                + $"got {Convert.ToHexString(actual)}, expected {parts[2]}.");
+
+            perLength[key.Length * 8] = perLength.GetValueOrDefault(key.Length * 8) + 1;
+        }
+
+        Require(
+            perLength.GetValueOrDefault(448) >= 32,
+            $"Only {perLength.GetValueOrDefault(448)} MARS answers cover the 448-bit key the cascade uses.");
+        Require(perLength.Count >= 6, $"Only {perLength.Count} MARS key lengths were covered.");
     }
 
     /// <summary>

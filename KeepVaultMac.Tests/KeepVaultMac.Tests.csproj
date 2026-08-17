@@ -9,6 +9,7 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
   <ItemGroup>
+    <Content Include="MarsKnownAnswers.txt" CopyToOutputDirectory="PreserveNewest" />
     <ProjectReference Include="../KeepVaultMac/KeepVaultMac.csproj" />
     <Compile Include="../KalynaArchiver.Signing/Mldsa87Reference.cs" Link="Signing/Mldsa87Reference.cs" />
     <!-- Test-only windowing backend so the real MainWindow can be driven without
