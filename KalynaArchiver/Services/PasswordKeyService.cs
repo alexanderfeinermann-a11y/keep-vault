@@ -26,6 +26,18 @@ public sealed class PasswordKeyService
     /// outer Threefish layer — plus the two MAC keys.
     /// </summary>
     public const int CascadeDerivedKeySize = 384;
+
+    /// <summary>
+    /// The paranoia cascade: 376 bytes of cipher key across six layers, plus the
+    /// two MAC keys.
+    /// </summary>
+    /// <remarks>
+    /// This is still derived in a single Argon2id round. The design calls for
+    /// two rounds with separate salts, and until that lands a container written
+    /// with this suite will not open once it does. The suite is therefore not
+    /// ready to be offered for real archives.
+    /// </remarks>
+    private const int ParanoiaDerivedKeySize = 568;
     public const int KeySize = KalynaDerivedKeySize;
 
     private const double EntropySafetyFactor = 0.72;
@@ -41,6 +53,22 @@ public sealed class PasswordKeyService
     // carry over to the other.
     private static readonly byte[] CascadeFactorADomain =
         "Kalyna-ZPAQ/v9/Threefish-1024-over-Kalyna-512-512/SHA3-512/User+Factor-A"u8.ToArray();
+    /// <summary>
+    /// Domain separators for the six-layer cascade.
+    /// </summary>
+    /// <remarks>
+    /// Each suite gets its own pair so that the same password and the same two
+    /// printed factors cannot derive the same key under two different suites.
+    /// That matters most here: the paranoia cascade shares Kalyna and Threefish
+    /// with other suites, and without separation a key recovered from one
+    /// container would be a key into another.
+    /// </remarks>
+    private static readonly byte[] ParanoiaFactorADomain =
+        "Kalyna-ZPAQ/v9/ChaCha20-Poly1305-Threefish-Kalyna-SHACAL2-MARS-AES/SHA3-512/User+Factor-A"u8.ToArray();
+
+    private static readonly byte[] ParanoiaFactorBDomain =
+        "Kalyna-ZPAQ/v9/ChaCha20-Poly1305-Threefish-Kalyna-SHACAL2-MARS-AES/SHA3-512/User+Factor-B"u8.ToArray();
+
     private static readonly byte[] CascadeFactorBDomain =
         "Kalyna-ZPAQ/v9/Threefish-1024-over-Kalyna-512-512/SHA3-512/User+Factor-B"u8.ToArray();
     private static readonly string[] CommonPasswordTerms =
@@ -433,7 +461,8 @@ public sealed class PasswordKeyService
             throw new ArgumentOutOfRangeException(nameof(argon2PasswordInput), $"Der Argon2id-Passworteingang muss {Argon2PasswordInputSize} Byte lang sein.");
         }
 
-        if (outputLength is not (KalynaDerivedKeySize or ThreefishDerivedKeySize or CascadeDerivedKeySize))
+        if (outputLength is not (KalynaDerivedKeySize or ThreefishDerivedKeySize
+            or CascadeDerivedKeySize or ParanoiaDerivedKeySize))
         {
             throw new ArgumentOutOfRangeException(nameof(outputLength), "Unsupported suite key length.");
         }
@@ -685,6 +714,8 @@ public sealed class PasswordKeyService
             (EncryptionSuite.Threefish1024, false) => ThreefishFactorBDomain,
             (EncryptionSuite.ThreefishOverKalyna, true) => CascadeFactorADomain,
             (EncryptionSuite.ThreefishOverKalyna, false) => CascadeFactorBDomain,
+            (EncryptionSuite.ParanoiaCascade, true) => ParanoiaFactorADomain,
+            (EncryptionSuite.ParanoiaCascade, false) => ParanoiaFactorBDomain,
             _ => throw new ArgumentOutOfRangeException(nameof(suite), suite, "Unknown encryption suite."),
         };
     }

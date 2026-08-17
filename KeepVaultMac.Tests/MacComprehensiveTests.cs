@@ -1288,9 +1288,44 @@ internal static partial class MacComprehensiveTests
         EncryptionSuiteParameters parameters = EncryptionSuiteCatalog.Get(EncryptionSuite.ThreefishOverKalyna);
         CascadeLayout layout = parameters.Cascade
             ?? throw new InvalidOperationException("The cascade suite lost its layer layout.");
-        Require(layout.InnerKeyBytes == 64 && layout.OuterKeyBytes == 128, "Cascade key split is not 64/128.");
-        Require(layout.InnerNonceBytes == 64 && layout.OuterNonceBytes == 128, "Cascade nonce split is not 64/128.");
+        Require(layout.Stages.Count == 2, $"The cascade has {layout.Stages.Count} stages rather than two.");
+        Require(
+            layout.Stages[0].Cipher == CascadeCipher.Kalyna512_512
+            && layout.Stages[0].KeyBytes == 64 && layout.Stages[0].NonceBytes == 64,
+            "The cascade's inner stage is not Kalyna with a 64-byte key and nonce.");
+        Require(
+            layout.Stages[1].Cipher == CascadeCipher.Threefish1024
+            && layout.Stages[1].KeyBytes == 128 && layout.Stages[1].NonceBytes == 128,
+            "The cascade's outer stage is not Threefish with a 128-byte key and nonce.");
+        Require(!layout.OutermostIsAead, "The two-layer cascade must not claim an authenticated outer layer.");
         Require(parameters.DerivedKeyBytes == 384, "Cascade derived key is not 384 bytes.");
+
+        // The six-layer suite, checked the same way: the order is the order the
+        // plaintext travels, and the key and nonce shares are what the header
+        // and the KDF budget were sized against.
+        EncryptionSuiteParameters paranoia = EncryptionSuiteCatalog.Get(EncryptionSuite.ParanoiaCascade);
+        CascadeLayout paranoiaLayout = paranoia.Cascade
+            ?? throw new InvalidOperationException("The paranoia suite lost its layer layout.");
+        CascadeCipher[] expectedOrder =
+        [
+            CascadeCipher.Aes256,
+            CascadeCipher.Mars448,
+            CascadeCipher.Shacal2_512,
+            CascadeCipher.Kalyna512_512,
+            CascadeCipher.Threefish1024,
+            CascadeCipher.ChaCha20Poly1305,
+        ];
+        Require(
+            paranoiaLayout.Stages.Select(stage => stage.Cipher).SequenceEqual(expectedOrder),
+            "The paranoia cascade's layer order is not AES, MARS, SHACAL-2, Kalyna, Threefish, ChaCha20-Poly1305.");
+        Require(paranoiaLayout.OutermostIsAead, "The paranoia cascade's outer layer is not authenticated.");
+        Require(
+            paranoiaLayout.TotalKeyBytes == 376,
+            $"The paranoia cascade needs 376 key bytes, not {paranoiaLayout.TotalKeyBytes}.");
+        Require(
+            paranoiaLayout.TotalNonceBytes == 268,
+            $"The paranoia cascade needs 268 nonce bytes, not {paranoiaLayout.TotalNonceBytes}.");
+        Require(paranoia.UsesTwoKdfRounds, "The paranoia cascade must derive two Argon2id rounds.");
         Require(
             EncryptionSuiteCatalog.Default == EncryptionSuite.ThreefishOverKalyna,
             "The cascade is not the default suite.");
@@ -1314,10 +1349,10 @@ internal static partial class MacComprehensiveTests
             marker.CopyTo(plaintext, offset);
         }
 
-        byte[] innerKey = RandomNumberGenerator.GetBytes(layout.InnerKeyBytes);
-        byte[] outerKey = RandomNumberGenerator.GetBytes(layout.OuterKeyBytes);
-        byte[] innerNonce = RandomNumberGenerator.GetBytes(layout.InnerNonceBytes);
-        byte[] outerNonce = RandomNumberGenerator.GetBytes(layout.OuterNonceBytes);
+        byte[] innerKey = RandomNumberGenerator.GetBytes(layout.Stages[0].KeyBytes);
+        byte[] outerKey = RandomNumberGenerator.GetBytes(layout.Stages[1].KeyBytes);
+        byte[] innerNonce = RandomNumberGenerator.GetBytes(layout.Stages[0].NonceBytes);
+        byte[] outerNonce = RandomNumberGenerator.GetBytes(layout.Stages[1].NonceBytes);
         byte[] tweak = RandomNumberGenerator.GetBytes(parameters.TweakBytes);
         byte[] innerCiphertext = new byte[plaintext.Length];
         byte[] cascadeCiphertext = new byte[plaintext.Length];
@@ -1343,7 +1378,7 @@ internal static partial class MacComprehensiveTests
             Require(FixedEqual(recovered, plaintext), "Both layers together did not reproduce the plaintext.");
 
             // A wrong inner key after a correct outer strip stays garbage.
-            byte[] wrongInner = RandomNumberGenerator.GetBytes(layout.InnerKeyBytes);
+            byte[] wrongInner = RandomNumberGenerator.GetBytes(layout.Stages[0].KeyBytes);
             byte[] wrongRecovery = new byte[plaintext.Length];
             try
             {

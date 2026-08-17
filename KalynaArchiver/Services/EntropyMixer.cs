@@ -205,10 +205,25 @@ public static partial class EntropyMixer
         throw new InvalidOperationException("No mouse-entropy pool could be selected.");
     }
 
+    /// <summary>
+    /// Bytes drawn from each pool.
+    /// </summary>
+    /// <remarks>
+    /// One digest per pool was enough while every suite's nonce fitted in three
+    /// of them. The six-layer cascade needs a wider one, so the draw is sized
+    /// from the catalogue: three pools have to cover the widest nonce any suite
+    /// asks for. Every pool is expanded by the same amount because the
+    /// expansion takes one size for all of them, and the extra bytes in the
+    /// password and salt pools are simply not used.
+    /// </remarks>
+    private static readonly int PoolDrawBytes = Math.Max(
+        Sha3_512Compat.HashSizeInBytes,
+        (EncryptionSuiteCatalog.MaxNonceBytes + 2) / 3);
+
     internal static GeneratedArchiveEntropy CreateArchiveEntropy()
     {
         using LockedSensitiveBuffer mouseBytes = ExpandAndConsumeMousePools(
-            Sha3_512Compat.HashSizeInBytes,
+            PoolDrawBytes,
             SamplePurposes);
         using LockedSensitiveBuffer passwordBytes = LockedSensitiveBuffer.Create(2 * Sha3_512Compat.HashSizeInBytes);
         LockedSensitiveBuffer? salt = null;
@@ -216,21 +231,26 @@ public static partial class EntropyMixer
         try
         {
             FillSystemRandom(passwordBytes.Bytes);
+            // Each password factor takes one digest from the front of its own
+            // pool's draw; the rest of that draw is unused.
             XorInPlace(
-                passwordBytes.Bytes,
-                mouseBytes.Bytes.AsSpan(0, 2 * Sha3_512Compat.HashSizeInBytes));
+                passwordBytes.Bytes.AsSpan(0, Sha3_512Compat.HashSizeInBytes),
+                mouseBytes.Bytes.AsSpan(0, Sha3_512Compat.HashSizeInBytes));
+            XorInPlace(
+                passwordBytes.Bytes.AsSpan(Sha3_512Compat.HashSizeInBytes, Sha3_512Compat.HashSizeInBytes),
+                mouseBytes.Bytes.AsSpan(PoolDrawBytes, Sha3_512Compat.HashSizeInBytes));
 
             salt = LockedSensitiveBuffer.Create(Sha3_512Compat.HashSizeInBytes);
             FillSystemRandom(salt.Bytes);
             XorInPlace(
                 salt.Bytes,
-                mouseBytes.Bytes.AsSpan(2 * Sha3_512Compat.HashSizeInBytes, Sha3_512Compat.HashSizeInBytes));
+                mouseBytes.Bytes.AsSpan(2 * PoolDrawBytes, Sha3_512Compat.HashSizeInBytes));
 
-            fullNonce = LockedSensitiveBuffer.Create(3 * Sha3_512Compat.HashSizeInBytes);
+            fullNonce = LockedSensitiveBuffer.Create(EncryptionSuiteCatalog.MaxNonceBytes);
             FillSystemRandom(fullNonce.Bytes);
             XorInPlace(
                 fullNonce.Bytes,
-                mouseBytes.Bytes.AsSpan(3 * Sha3_512Compat.HashSizeInBytes, 3 * Sha3_512Compat.HashSizeInBytes));
+                mouseBytes.Bytes.AsSpan(3 * PoolDrawBytes, EncryptionSuiteCatalog.MaxNonceBytes));
 
             string firstPassword = Convert.ToHexString(
                 passwordBytes.Bytes.AsSpan(0, Sha3_512Compat.HashSizeInBytes));
@@ -429,7 +449,7 @@ public static partial class EntropyMixer
         }
     }
 
-    private static void XorInPlace(byte[] destination, ReadOnlySpan<byte> source)
+    private static void XorInPlace(Span<byte> destination, ReadOnlySpan<byte> source)
     {
         if (destination.Length != source.Length)
         {
@@ -811,7 +831,7 @@ internal sealed class GeneratedArchiveEntropy : IDisposable
         // 128 for its outer Threefish layer. The single-cipher suites take the
         // leading 64 or 128 bytes of the same material.
         if (_salt.Bytes.Length != Sha3_512Compat.HashSizeInBytes
-            || _fullNonce.Bytes.Length != 3 * Sha3_512Compat.HashSizeInBytes)
+            || _fullNonce.Bytes.Length != EncryptionSuiteCatalog.MaxNonceBytes)
         {
             throw new ArgumentException("Prepared archive entropy has an invalid length.");
         }

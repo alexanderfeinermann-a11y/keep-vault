@@ -38,6 +38,11 @@ public sealed partial class KalynaContainerService
             EncryptionSuite.Kalyna512_512 => IsNativeKalynaAvailable && IsNativeThreefishAvailable,
             EncryptionSuite.Threefish1024 => IsNativeThreefishAvailable,
             EncryptionSuite.ThreefishOverKalyna => IsNativeKalynaAvailable && IsNativeThreefishAvailable,
+            // The paranoia cascade needs all six, and the Skein provider on top.
+            EncryptionSuite.ParanoiaCascade =>
+                IsNativeKalynaAvailable && IsNativeThreefishAvailable
+                && NativeAes.IsAvailable() && NativeMars.IsAvailable()
+                && NativeShacal2.IsAvailable() && NativeChaChaPoly.IsAvailable(),
             _ => false,
         };
     }
@@ -296,8 +301,41 @@ public sealed partial class KalynaContainerService
                             plaintextBytes = checked(plaintextBytes + read);
                             DeriveChunkNonce(nonce, chunkIndex, counter);
                             XCrypt(parameters, keyMaterial.EncryptionKey, tweak, counter, plainChunk, cipherChunk, read);
+
+                            byte[]? chunkTag = null;
+                            if (parameters.Cascade is { OutermostIsAead: true } aeadLayout)
+                            {
+                                // The tag follows its own chunk rather than
+                                // collecting in a table, so a reader never has
+                                // to hold unverified plaintext while it goes
+                                // looking for the proof.
+                                byte[] tag = new byte[NativeChaChaPoly.TagBytes];
+                                (byte[] aeadKey, byte[] aeadNonce) =
+                                    SplitAeadMaterial(aeadLayout, keyMaterial.EncryptionKey, counter);
+                                byte[] associated =
+                                    BuildChunkAssociatedData(parameters, nonce, chunkIndex, read);
+                                try
+                                {
+                                    NativeChaChaPoly.Encrypt(
+                                        aeadKey, aeadNonce, associated, cipherChunk, cipherChunk, read, tag);
+                                }
+                                finally
+                                {
+                                    CryptographicOperations.ZeroMemory(aeadKey);
+                                    CryptographicOperations.ZeroMemory(aeadNonce);
+                                }
+
+                                chunkTag = tag;
+                            }
+
                             await output.WriteAsync(cipherChunk.AsMemory(0, read), cancellationToken).ConfigureAwait(false);
                             AppendAuthentication(hmac, skeinMac, cipherChunk.AsSpan(0, read));
+
+                            if (chunkTag is not null)
+                            {
+                                await output.WriteAsync(chunkTag, cancellationToken).ConfigureAwait(false);
+                                AppendAuthentication(hmac, skeinMac, chunkTag);
+                            }
                             chunkIndex = checked(chunkIndex + 1);
                             CryptographicOperations.ZeroMemory(plainChunk.AsSpan(0, read));
                             CryptographicOperations.ZeroMemory(cipherChunk.AsSpan(0, read));
@@ -470,7 +508,19 @@ public sealed partial class KalynaContainerService
             using IDisposable tweakLock = SecureMemory.TryLock(tweak);
             using IDisposable counterLock = SecureMemory.TryLock(counter);
             input.Position = cipherStart;
-            byte[] cipherChunk = new byte[BufferSize];
+            // Sized to one written chunk: payload, plus the tag that follows
+            // it when the suite has an authenticated outer layer. A single read
+            // then lands exactly on a chunk boundary.
+            //
+            // The allowance must not be added unconditionally. For a suite
+            // without a tag the writer emits BufferSize per chunk, and a reader
+            // taking BufferSize + 16 would drift by a tag every chunk — the
+            // chunk indices on the two sides would diverge, and the per-chunk
+            // nonces with them.
+            int chunkTagAllowance = parameters.Cascade is { OutermostIsAead: true }
+                ? NativeChaChaPoly.TagBytes
+                : 0;
+            byte[] cipherChunk = new byte[BufferSize + chunkTagAllowance];
             byte[] plainChunk = new byte[BufferSize];
             using IDisposable cipherChunkLock = SecureMemory.TryLock(cipherChunk);
             using IDisposable plainChunkLock = SecureMemory.TryLock(plainChunk);
@@ -481,6 +531,41 @@ public sealed partial class KalynaContainerService
                 while ((read = await ReadChunkAsync(input, cipherChunk, cancellationToken).ConfigureAwait(false)) > 0)
                 {
                     DeriveChunkNonce(nonce, chunkIndex, counter);
+
+                    if (parameters.Cascade is { OutermostIsAead: true } aeadLayout)
+                    {
+                        // The chunk and its tag were written together, so the
+                        // tag sits in the last bytes of what was just read.
+                        // Verification happens before the inner layers run: a
+                        // reader must never hand out plaintext it has not
+                        // authenticated, not even to the next cipher.
+                        int tagBytes = NativeChaChaPoly.TagBytes;
+                        if (read < tagBytes)
+                        {
+                            throw new InvalidDataException("The container ends inside an authentication tag.");
+                        }
+
+                        int payload = read - tagBytes;
+                        byte[] tag = cipherChunk.AsSpan(payload, tagBytes).ToArray();
+                        (byte[] aeadKey, byte[] aeadNonce) =
+                            SplitAeadMaterial(aeadLayout, keyMaterial.EncryptionKey, counter);
+                        byte[] associated =
+                            BuildChunkAssociatedData(parameters, nonce, chunkIndex, payload);
+                        try
+                        {
+                            NativeChaChaPoly.Decrypt(
+                                aeadKey, aeadNonce, associated, cipherChunk, cipherChunk, payload, tag);
+                        }
+                        finally
+                        {
+                            CryptographicOperations.ZeroMemory(aeadKey);
+                            CryptographicOperations.ZeroMemory(aeadNonce);
+                            CryptographicOperations.ZeroMemory(tag);
+                        }
+
+                        read = payload;
+                    }
+
                     XCrypt(parameters, keyMaterial.EncryptionKey, tweak, counter, cipherChunk, plainChunk, read);
                     await plainZpaqDestination.WriteAsync(plainChunk.AsMemory(0, read), cancellationToken).ConfigureAwait(false);
                     chunkIndex = checked(chunkIndex + 1);
@@ -976,6 +1061,16 @@ public sealed partial class KalynaContainerService
         byte[] output,
         int length)
     {
+        // A suite is a cascade exactly when the catalogue gave it a layer list.
+        // Routing on that rather than on suite names means a new cascade is
+        // driven correctly the moment it is declared, instead of falling
+        // through to an exception that only shows up at run time.
+        if (parameters.Cascade is { } layout)
+        {
+            XCryptCascade(layout, encryptionKey, tweak, counter, input, output, length);
+            return;
+        }
+
         switch (parameters.Suite)
         {
             case EncryptionSuite.Kalyna512_512:
@@ -983,9 +1078,6 @@ public sealed partial class KalynaContainerService
                 break;
             case EncryptionSuite.Threefish1024:
                 NativeThreefish.XCryptCtr1024(encryptionKey, tweak, counter, input, output, length);
-                break;
-            case EncryptionSuite.ThreefishOverKalyna:
-                XCryptCascade(RequireCascade(parameters), encryptionKey, tweak, counter, input, output, length);
                 break;
             default:
                 throw new ArgumentOutOfRangeException(
@@ -1001,6 +1093,27 @@ public sealed partial class KalynaContainerService
             ?? throw new CryptographicException("The cascade suite is missing its layer layout.");
     }
 
+    /// <summary>
+    /// Runs the plaintext through every layer of a cascade, innermost first.
+    /// </summary>
+    /// <remarks>
+    /// Each stage owns a slice of the key and a slice of the nonce, taken in
+    /// the order the stages are declared, and works in place on the buffer the
+    /// previous stage produced.
+    ///
+    /// There is no direction parameter, and that is not an oversight. Every
+    /// stage here is CTR, so each one XORs a keystream that depends on its key
+    /// and nonce alone and never on the data. The layers therefore commute:
+    /// the result is the plaintext XORed with all five keystreams, whichever
+    /// order they are applied in, and encryption and decryption are the same
+    /// walk. Introducing a direction flag would imply a dependency that does
+    /// not exist and would be one more thing to get backwards.
+    ///
+    /// The authenticated stage, if there is one, is not handled here. It sits
+    /// outside the CTR stack because it also produces a tag, and a function
+    /// that returned ciphertext for five layers and ciphertext-plus-tag for the
+    /// sixth would hide that difference from its callers.
+    /// </remarks>
     private static void XCryptCascade(
         CascadeLayout layout,
         byte[] encryptionKey,
@@ -1015,30 +1128,128 @@ public sealed partial class KalynaContainerService
             throw new CryptographicException("The cascade received key or counter material of the wrong length.");
         }
 
-        byte[] innerKey = new byte[layout.InnerKeyBytes];
-        byte[] outerKey = new byte[layout.OuterKeyBytes];
-        byte[] innerCounter = new byte[layout.InnerNonceBytes];
-        byte[] outerCounter = new byte[layout.OuterNonceBytes];
-        using IDisposable innerKeyLock = SecureMemory.TryLock(innerKey);
-        using IDisposable outerKeyLock = SecureMemory.TryLock(outerKey);
-        using IDisposable innerCounterLock = SecureMemory.TryLock(innerCounter);
-        using IDisposable outerCounterLock = SecureMemory.TryLock(outerCounter);
-        try
-        {
-            encryptionKey.AsSpan(0, layout.InnerKeyBytes).CopyTo(innerKey);
-            encryptionKey.AsSpan(layout.InnerKeyBytes, layout.OuterKeyBytes).CopyTo(outerKey);
-            counter.AsSpan(0, layout.InnerNonceBytes).CopyTo(innerCounter);
-            counter.AsSpan(layout.InnerNonceBytes, layout.OuterNonceBytes).CopyTo(outerCounter);
+        IReadOnlyList<CascadeStage> stages = layout.Stages;
+        int ctrStageCount = layout.OutermostIsAead ? stages.Count - 1 : stages.Count;
 
-            NativeKalyna.XCryptCtr512(innerKey, innerCounter, input, output, length);
-            NativeThreefish.XCryptCtr1024(outerKey, tweak, outerCounter, output, output, length);
-        }
-        finally
+        // Where each stage's key and nonce begin. Computed once so a stage
+        // cannot be handed the neighbouring layer's material by an arithmetic
+        // slip at the call site.
+        int[] keyOffsets = new int[stages.Count];
+        int[] nonceOffsets = new int[stages.Count];
+        int keyCursor = 0;
+        int nonceCursor = 0;
+        for (int index = 0; index < stages.Count; index++)
         {
-            CryptographicOperations.ZeroMemory(innerKey);
-            CryptographicOperations.ZeroMemory(outerKey);
-            CryptographicOperations.ZeroMemory(innerCounter);
-            CryptographicOperations.ZeroMemory(outerCounter);
+            keyOffsets[index] = keyCursor;
+            nonceOffsets[index] = nonceCursor;
+            keyCursor += stages[index].KeyBytes;
+            nonceCursor += stages[index].NonceBytes;
+        }
+
+        if (!ReferenceEquals(input, output))
+        {
+            input.AsSpan(0, length).CopyTo(output);
+        }
+
+        for (int index = 0; index < ctrStageCount; index++)
+        {
+            CascadeStage stage = stages[index];
+
+            byte[] stageKey = new byte[stage.KeyBytes];
+            byte[] stageCounter = new byte[stage.NonceBytes];
+            using IDisposable stageKeyLock = SecureMemory.TryLock(stageKey);
+            using IDisposable stageCounterLock = SecureMemory.TryLock(stageCounter);
+            try
+            {
+                encryptionKey.AsSpan(keyOffsets[index], stage.KeyBytes).CopyTo(stageKey);
+                counter.AsSpan(nonceOffsets[index], stage.NonceBytes).CopyTo(stageCounter);
+                ApplyCtrStage(stage, stageKey, tweak, stageCounter, output, length);
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(stageKey);
+                CryptographicOperations.ZeroMemory(stageCounter);
+            }
+        }
+    }
+
+
+    /// <summary>
+    /// Associated data binding one chunk to its place in one archive.
+    /// </summary>
+    /// <remarks>
+    /// Poly1305 proves a chunk was not altered. On its own it does not prove
+    /// the chunk belongs where it was found: an attacker holding two archives,
+    /// or two positions in one archive, could move a chunk and every tag would
+    /// still verify. Binding the format version, the suite, the archive's own
+    /// identity, the chunk's index and its length into the tag is what closes
+    /// that, and it costs nothing because the AEAD authenticates associated
+    /// data it never has to store.
+    ///
+    /// The archive identity is the header nonce, which is unique per archive
+    /// and already authenticated by the container's own MACs.
+    /// </remarks>
+    private static byte[] BuildChunkAssociatedData(
+        EncryptionSuiteParameters parameters,
+        ReadOnlySpan<byte> archiveNonce,
+        long chunkIndex,
+        int length)
+    {
+        const int identityBytes = 16;
+        byte[] associated = new byte[4 + 4 + identityBytes + sizeof(long) + sizeof(int)];
+        BinaryPrimitives.WriteInt32BigEndian(associated.AsSpan(0), CurrentVersion);
+        BinaryPrimitives.WriteInt32BigEndian(associated.AsSpan(4), (int)parameters.Suite);
+        archiveNonce[..identityBytes].CopyTo(associated.AsSpan(8));
+        BinaryPrimitives.WriteInt64BigEndian(associated.AsSpan(8 + identityBytes), chunkIndex);
+        BinaryPrimitives.WriteInt32BigEndian(associated.AsSpan(8 + identityBytes + sizeof(long)), length);
+        return associated;
+    }
+
+    /// <summary>
+    /// The slice of the derived key and of the chunk nonce that belong to the
+    /// authenticated outermost layer.
+    /// </summary>
+    private static (byte[] Key, byte[] Nonce) SplitAeadMaterial(
+        CascadeLayout layout,
+        byte[] encryptionKey,
+        byte[] counter)
+    {
+        CascadeStage stage = layout.Stages[^1];
+        int keyOffset = layout.TotalKeyBytes - stage.KeyBytes;
+        int nonceOffset = layout.TotalNonceBytes - stage.NonceBytes;
+        return (
+            encryptionKey.AsSpan(keyOffset, stage.KeyBytes).ToArray(),
+            counter.AsSpan(nonceOffset, stage.NonceBytes).ToArray());
+    }
+
+    private static void ApplyCtrStage(
+        CascadeStage stage,
+        byte[] key,
+        byte[] tweak,
+        byte[] counter,
+        byte[] buffer,
+        int length)
+    {
+        switch (stage.Cipher)
+        {
+            case CascadeCipher.Aes256:
+                NativeAes.XCryptCtr256(key, counter, buffer, buffer, length);
+                break;
+            case CascadeCipher.Mars448:
+                NativeMars.XCryptCtr448(key, counter, buffer, buffer, length);
+                break;
+            case CascadeCipher.Shacal2_512:
+                NativeShacal2.XCryptCtr512(key, counter, buffer, buffer, length);
+                break;
+            case CascadeCipher.Kalyna512_512:
+                NativeKalyna.XCryptCtr512(key, counter, buffer, buffer, length);
+                break;
+            case CascadeCipher.Threefish1024:
+                NativeThreefish.XCryptCtr1024(key, tweak, counter, buffer, buffer, length);
+                break;
+            default:
+                throw new CryptographicException(
+                    $"{stage.Cipher} is not a counter-mode stage and cannot be applied here.");
         }
     }
 
@@ -1053,14 +1264,18 @@ public sealed partial class KalynaContainerService
     /// </remarks>
     private static byte[] CreateSuiteTweak(EncryptionSuite suite, byte[] nonce)
     {
-        if (suite == EncryptionSuite.Kalyna512_512)
-        {
-            return [];
-        }
-
-        if (suite is not (EncryptionSuite.Threefish1024 or EncryptionSuite.ThreefishOverKalyna))
+        // Driven by the catalogue rather than by a list of suite names. A suite
+        // needs a tweak exactly when it contains a Threefish layer, and that is
+        // already recorded as its tweak size; keeping a second list in step with
+        // the first is how the next suite gets forgotten here.
+        if (!EncryptionSuiteCatalog.IsKnown(suite))
         {
             throw new ArgumentOutOfRangeException(nameof(suite), suite, "Unknown encryption suite.");
+        }
+
+        if (EncryptionSuiteCatalog.Get(suite).TweakBytes == 0)
+        {
+            return [];
         }
 
         byte[] material = new byte[sizeof(int) + ThreefishTweakDomain.Length + sizeof(int) + nonce.Length];
@@ -1093,13 +1308,22 @@ public sealed partial class KalynaContainerService
             EncryptionSuite.Kalyna512_512 => NativeKalyna.IsAvailable() && NativeThreefish.IsAvailable(),
             EncryptionSuite.Threefish1024 => NativeThreefish.IsAvailable(),
             EncryptionSuite.ThreefishOverKalyna => NativeKalyna.IsAvailable() && NativeThreefish.IsAvailable(),
+            EncryptionSuite.ParanoiaCascade =>
+                NativeKalyna.IsAvailable() && NativeThreefish.IsAvailable()
+                && NativeAes.IsAvailable() && NativeMars.IsAvailable()
+                && NativeShacal2.IsAvailable() && NativeChaChaPoly.IsAvailable(),
             _ => false,
         };
         if (!available)
         {
-            string library = suite == EncryptionSuite.Threefish1024
-                ? "threefish_ref.dll"
-                : "kalyna_ref.dll and the Skein provider threefish_ref.dll";
+            string library = suite switch
+            {
+                EncryptionSuite.Threefish1024 => "threefish_ref.dll",
+                EncryptionSuite.ParanoiaCascade =>
+                    "aes_ref.dll, mars_ref.dll, shacal2_ref.dll, kalyna_ref.dll, "
+                    + "chachapoly_ref.dll and the Skein provider threefish_ref.dll",
+                _ => "kalyna_ref.dll and the Skein provider threefish_ref.dll",
+            };
             throw new PlatformNotSupportedException($"The signed and dual-manifest-verified reference library {library} is unavailable.");
         }
     }
