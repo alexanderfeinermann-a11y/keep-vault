@@ -119,3 +119,136 @@ extern "C" KEEPVAULT_EXPORT int chacha20poly1305_decrypt(
         return 5;
     }
 }
+
+/*
+ * Raw ChaCha20, and Poly1305 over a whole stream.
+ *
+ * The cascade cannot use the AEAD above for its outer layer. The container
+ * encrypts in 16 MiB chunks and authenticates the finished ciphertext, so an
+ * AEAD applied per chunk would produce a tag per chunk that says nothing about
+ * the order those chunks appear in — dropping or swapping two of them would
+ * leave every tag valid. Poly1305 is therefore run once over the entire
+ * ciphertext, beside the container's HMAC-SHA3-512 and Skein-MAC-1024, where it
+ * covers ordering and length as well as content.
+ *
+ * That needs the two halves separately: ChaCha20 as a keystream generator the
+ * chunk loop can position by block, and Poly1305 as something that can be fed
+ * incrementally.
+ */
+#include "chacha.h"
+#include "poly1305.h"
+
+/*
+ * Encrypts or decrypts, starting at an explicit block counter.
+ *
+ * ChaChaTLS, not ChaCha: Crypto++ carries both Bernstein's original with its
+ * 8-byte nonce and the IETF form from RFC 8439 with a 12-byte nonce and a
+ * 32-bit block counter. The container uses the IETF form, and the two produce
+ * different keystreams from the same inputs.
+ *
+ * The counter is what lets a chunk be processed on its own: the caller passes
+ * the block index the chunk begins at, so the keystream lines up with the
+ * position in the stream rather than restarting per call.
+ */
+extern "C" KEEPVAULT_EXPORT int chacha20_xcrypt(
+    const std::uint8_t key[CHACHAPOLY_KEY_BYTES],
+    const std::uint8_t nonce[CHACHAPOLY_NONCE_BYTES],
+    std::uint32_t block_counter,
+    const std::uint8_t* input,
+    std::uint8_t* output,
+    std::size_t length)
+{
+    if (key == nullptr || nonce == nullptr) {
+        return 1;
+    }
+
+    if (length != 0 && (input == nullptr || output == nullptr)) {
+        return 1;
+    }
+
+    try {
+        // The initial block counter is not part of the IV. Crypto++ reads it
+        // from an "InitialBlock" parameter at SetKey time and puts it in
+        // state[12]; the 12-byte nonce goes to state[13..15], exactly as
+        // RFC 8439 section 2.3 lays the state out. Building a 16-byte
+        // counter||nonce IV instead — which is what an earlier version of this
+        // function did — produces a different keystream that matches neither
+        // the RFC nor this file's own AEAD.
+        CryptoPP::ChaChaTLS::Encryption cipher;
+        cipher.SetKeyWithIV(
+            key,
+            CHACHAPOLY_KEY_BYTES,
+            nonce,
+            CHACHAPOLY_NONCE_BYTES);
+        cipher.SetKey(
+            key,
+            CHACHAPOLY_KEY_BYTES,
+            CryptoPP::MakeParameters(
+                "InitialBlock", static_cast<CryptoPP::word64>(block_counter))
+                (CryptoPP::Name::IV(),
+                 CryptoPP::ConstByteArrayParameter(nonce, CHACHAPOLY_NONCE_BYTES)));
+        cipher.ProcessData(output, input, length);
+        return 0;
+    } catch (...) {
+        return 5;
+    }
+}
+
+/*
+ * Poly1305 over a stream, in three calls.
+ *
+ * This is the RFC 8439 form, which takes the 32-byte one-time key r||s
+ * directly, rather than Bernstein's original AES-keyed variant.
+ *
+ * The one-time key is the caller's to supply and must never be reused with a
+ * different message: Poly1305 is a one-time authenticator, and two messages
+ * under one key hand an attacker the ability to forge a third. The container
+ * derives it per archive from the Argon2id output.
+ */
+extern "C" KEEPVAULT_EXPORT void* poly1305_create(const std::uint8_t key[32])
+{
+    if (key == nullptr) {
+        return nullptr;
+    }
+
+    try {
+        auto* mac = new CryptoPP::Poly1305TLS();
+        mac->SetKey(key, 32);
+        return mac;
+    } catch (...) {
+        return nullptr;
+    }
+}
+
+extern "C" KEEPVAULT_EXPORT int poly1305_update(void* handle, const std::uint8_t* data, std::size_t length)
+{
+    if (handle == nullptr || (length != 0 && data == nullptr)) {
+        return 1;
+    }
+
+    try {
+        static_cast<CryptoPP::Poly1305TLS*>(handle)->Update(data, length);
+        return 0;
+    } catch (...) {
+        return 5;
+    }
+}
+
+extern "C" KEEPVAULT_EXPORT int poly1305_final(void* handle, std::uint8_t tag[CHACHAPOLY_TAG_BYTES])
+{
+    if (handle == nullptr || tag == nullptr) {
+        return 1;
+    }
+
+    try {
+        static_cast<CryptoPP::Poly1305TLS*>(handle)->Final(tag);
+        return 0;
+    } catch (...) {
+        return 5;
+    }
+}
+
+extern "C" KEEPVAULT_EXPORT void poly1305_destroy(void* handle)
+{
+    delete static_cast<CryptoPP::Poly1305TLS*>(handle);
+}
