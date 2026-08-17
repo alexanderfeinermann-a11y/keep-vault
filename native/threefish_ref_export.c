@@ -31,8 +31,32 @@
    bounds the stack-allocated job tables and lets the counter mode scale across
    every logical processor, hyperthreads included. */
 #define THREEFISH_MAX_THREADS 64
-#define THREEFISH_PARALLEL_THRESHOLD_BYTES (8 * 1024 * 1024)
-#define THREEFISH_MIN_BYTES_PER_THREAD (1024 * 1024)
+#define THREEFISH_PARALLEL_THRESHOLD_BYTES (1024 * 1024)
+
+/* Work is handed out in chunks rather than split once up front. Apple silicon
+   pairs fast performance cores with slower efficiency cores, and an even split
+   across both leaves the fast cores idle while the slow ones finish the share
+   they were given — the whole operation then runs at efficiency-core speed. A
+   claimed-chunk queue lets each core take exactly as much as it can carry, on
+   any mix of core types and any generation, with no per-machine tuning.
+
+   The chunk is 256 KiB: large enough that one atomic claim is lost in the
+   noise of the work it buys, small enough that the tail is short. */
+#define THREEFISH_MIN_BYTES_PER_THREAD (256 * 1024)
+#define THREEFISH_CHUNK_BLOCKS (2048u)
+
+#if defined(_WIN32)
+typedef volatile LONG64 threefish_cursor;
+#define THREEFISH_CURSOR_NEXT(cursor) \
+    ((size_t)(InterlockedIncrement64((volatile LONG64*)(cursor)) - 1))
+#else
+#include <stdatomic.h>
+#if defined(__APPLE__)
+#include <pthread/qos.h>
+#endif
+typedef _Atomic size_t threefish_cursor;
+#define THREEFISH_CURSOR_NEXT(cursor) atomic_fetch_add((cursor), (size_t)1)
+#endif
 #define SKEIN1024_DIGEST_BYTES 128
 #define SKEIN1024_MAC_KEY_BYTES 128
 
@@ -366,15 +390,20 @@ cleanup:
     return result;
 }
 
-typedef struct threefish_ctr_job {
+typedef struct threefish_ctr_shared {
     const uint8_t* key;
     const uint8_t* tweak;
     const uint8_t* nonce;
     const uint8_t* input;
     uint8_t* output;
     size_t length;
-    size_t start_block;
-    size_t block_count;
+    size_t total_blocks;
+    size_t chunk_blocks;
+    threefish_cursor next_chunk;
+} threefish_ctr_shared;
+
+typedef struct threefish_ctr_job {
+    threefish_ctr_shared* shared;
     int result;
 } threefish_ctr_job;
 
@@ -385,15 +414,30 @@ static void* threefish_ctr_worker(void* parameter)
 #endif
 {
     threefish_ctr_job* job = (threefish_ctr_job*)parameter;
-    job->result = xcrypt_ctr_range(
-        job->key,
-        job->tweak,
-        job->nonce,
-        job->input,
-        job->output,
-        job->length,
-        job->start_block,
-        job->block_count);
+    threefish_ctr_shared* shared = job->shared;
+    for (;;) {
+        size_t chunk = THREEFISH_CURSOR_NEXT(&shared->next_chunk);
+        size_t start_block = chunk * shared->chunk_blocks;
+        if (start_block >= shared->total_blocks) {
+            break;
+        }
+
+        size_t remaining = shared->total_blocks - start_block;
+        size_t block_count = remaining < shared->chunk_blocks ? remaining : shared->chunk_blocks;
+        int result = xcrypt_ctr_range(
+            shared->key,
+            shared->tweak,
+            shared->nonce,
+            shared->input,
+            shared->output,
+            shared->length,
+            start_block,
+            block_count);
+        if (result != 0) {
+            job->result = result;
+            break;
+        }
+    }
 #if defined(_WIN32)
     return 0;
 #else
@@ -500,25 +544,26 @@ THREEFISH_EXPORT int threefish_1024_ctr_xcrypt(
         int started[THREEFISH_MAX_THREADS];
 #endif
         threefish_ctr_job jobs[THREEFISH_MAX_THREADS];
-        size_t base_blocks = total_blocks / thread_count;
-        size_t extra_blocks = total_blocks % thread_count;
-        size_t start_block = 0;
+        threefish_ctr_shared shared;
         memset(handles, 0, sizeof(handles));
 #if !defined(_WIN32)
         memset(started, 0, sizeof(started));
 #endif
         memset(jobs, 0, sizeof(jobs));
+        memset(&shared, 0, sizeof(shared));
+        shared.key = key;
+        shared.tweak = tweak;
+        shared.nonce = nonce;
+        shared.input = input;
+        shared.output = output;
+        shared.length = length;
+        shared.total_blocks = total_blocks;
+        shared.chunk_blocks = THREEFISH_CHUNK_BLOCKS;
+        shared.next_chunk = 0;
+
 
         for (size_t index = 0; index < thread_count; ++index) {
-            size_t block_count = base_blocks + (index < extra_blocks ? 1 : 0);
-            jobs[index].key = key;
-            jobs[index].tweak = tweak;
-            jobs[index].nonce = nonce;
-            jobs[index].input = input;
-            jobs[index].output = output;
-            jobs[index].length = length;
-            jobs[index].start_block = start_block;
-            jobs[index].block_count = block_count;
+            jobs[index].shared = &shared;
 #if defined(_WIN32)
             handles[index] = CreateThread(NULL, 0, threefish_ctr_worker, &jobs[index], 0, NULL);
             if (handles[index] == NULL) {
@@ -532,7 +577,11 @@ THREEFISH_EXPORT int threefish_1024_ctr_xcrypt(
                 return 3;
             }
 #else
-            if (pthread_create(&handles[index], NULL, threefish_ctr_worker, &jobs[index]) != 0) {
+            if (pthread_create(
+                    &handles[index],
+                    NULL,
+                    threefish_ctr_worker,
+                    &jobs[index]) != 0) {
                 for (size_t previous = 0; previous < index; ++previous) {
                     if (started[previous]) {
                         (void)pthread_join(handles[previous], NULL);
@@ -546,9 +595,8 @@ THREEFISH_EXPORT int threefish_1024_ctr_xcrypt(
             }
             started[index] = 1;
 #endif
-
-            start_block += block_count;
         }
+
 
         int result = 0;
 #if defined(_WIN32)

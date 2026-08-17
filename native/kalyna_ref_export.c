@@ -24,8 +24,31 @@
    bounds the stack-allocated job tables and lets the counter mode scale across
    every logical processor, hyperthreads included. */
 #define KALYNA_MAX_THREADS 64
-#define KALYNA_PARALLEL_THRESHOLD_BYTES (8 * 1024 * 1024)
-#define KALYNA_MIN_BYTES_PER_THREAD (1024 * 1024)
+#define KALYNA_PARALLEL_THRESHOLD_BYTES (1024 * 1024)
+
+/* Work is claimed in chunks rather than split once up front. Apple silicon
+   pairs fast performance cores with slower efficiency cores, and an even split
+   across both makes the slow half decide when the whole operation finishes. A
+   claimed-chunk queue lets each core take what it can carry, on any mix of core
+   types and any generation, without per-machine tuning.
+
+   256 KiB per chunk: one atomic claim disappears into the work it buys, and the
+   tail stays short. */
+#define KALYNA_MIN_BYTES_PER_THREAD (256 * 1024)
+#define KALYNA_CHUNK_BLOCKS (4096u)
+
+#if defined(_WIN32)
+typedef volatile LONG64 kalyna_cursor;
+#define KALYNA_CURSOR_NEXT(cursor) \
+    ((size_t)(InterlockedIncrement64((volatile LONG64*)(cursor)) - 1))
+#else
+#include <stdatomic.h>
+#if defined(__APPLE__)
+#include <pthread/qos.h>
+#endif
+typedef _Atomic size_t kalyna_cursor;
+#define KALYNA_CURSOR_NEXT(cursor) atomic_fetch_add((cursor), (size_t)1)
+#endif
 
 static int increment_counter(uint8_t counter[64])
 {
@@ -78,8 +101,12 @@ static void wipe_kalyna(kalyna_t* ctx)
     }
 }
 
-static int xcrypt_ctr_range(
-    const uint8_t key[64],
+/* Encrypts one range with a context whose key schedule is already built.
+   Kalyna's schedule is expensive, and work is claimed in many small chunks, so
+   building it per chunk would cost more than the parallelism saves. Each worker
+   builds one and reuses it for every chunk it claims. */
+static int xcrypt_ctr_range_prepared(
+    kalyna_t* ctx,
     const uint8_t nonce[64],
     const uint8_t* input,
     uint8_t* output,
@@ -87,8 +114,6 @@ static int xcrypt_ctr_range(
     size_t start_block,
     size_t block_count)
 {
-    kalyna_t* ctx = NULL;
-    uint64_t key_words[8];
     uint64_t counter_words[8];
     uint64_t stream_words[8];
     uint8_t counter[64];
@@ -103,19 +128,11 @@ static int xcrypt_ctr_range(
         return 4;
     }
 
-    ctx = KalynaInit(512, 512);
-    if (ctx == NULL) {
-        return 2;
-    }
-
-    memcpy(key_words, key, sizeof(key_words));
     memcpy(counter, nonce, sizeof(counter));
     if (add_counter_blocks(counter, (uint64_t)start_block)) {
         result = 4;
         goto cleanup;
     }
-
-    KalynaKeyExpand(key_words, ctx);
 
     size_t end_block = start_block + block_count;
     if (end_block < start_block) {
@@ -141,24 +158,73 @@ static int xcrypt_ctr_range(
     }
 
 cleanup:
-    wipe_kalyna(ctx);
-    secure_zero(key_words, sizeof(key_words));
     secure_zero(counter_words, sizeof(counter_words));
     secure_zero(stream_words, sizeof(stream_words));
     secure_zero(counter, sizeof(counter));
     secure_zero(stream, sizeof(stream));
-    KalynaDelete(ctx);
     return result;
 }
 
-typedef struct kalyna_ctr_job {
+/* Builds a key-expanded context. The caller owns it and must release it with
+   release_kalyna_context, which wipes the schedule before freeing. */
+static kalyna_t* create_kalyna_context(const uint8_t key[64])
+{
+    uint64_t key_words[8];
+    kalyna_t* ctx = KalynaInit(512, 512);
+    if (ctx == NULL) {
+        return NULL;
+    }
+
+    memcpy(key_words, key, sizeof(key_words));
+    KalynaKeyExpand(key_words, ctx);
+    secure_zero(key_words, sizeof(key_words));
+    return ctx;
+}
+
+static void release_kalyna_context(kalyna_t* ctx)
+{
+    if (ctx == NULL) {
+        return;
+    }
+
+    wipe_kalyna(ctx);
+    KalynaDelete(ctx);
+}
+
+/* Single-range convenience wrapper for the serial path. */
+static int xcrypt_ctr_range(
+    const uint8_t key[64],
+    const uint8_t nonce[64],
+    const uint8_t* input,
+    uint8_t* output,
+    size_t length,
+    size_t start_block,
+    size_t block_count)
+{
+    kalyna_t* ctx = create_kalyna_context(key);
+    if (ctx == NULL) {
+        return 2;
+    }
+
+    int result = xcrypt_ctr_range_prepared(
+        ctx, nonce, input, output, length, start_block, block_count);
+    release_kalyna_context(ctx);
+    return result;
+}
+
+typedef struct kalyna_ctr_shared {
     const uint8_t* key;
     const uint8_t* nonce;
     const uint8_t* input;
     uint8_t* output;
     size_t length;
-    size_t start_block;
-    size_t block_count;
+    size_t total_blocks;
+    size_t chunk_blocks;
+    kalyna_cursor next_chunk;
+} kalyna_ctr_shared;
+
+typedef struct kalyna_ctr_job {
+    kalyna_ctr_shared* shared;
     int result;
 } kalyna_ctr_job;
 
@@ -169,14 +235,41 @@ static void* kalyna_ctr_worker(void* parameter)
 #endif
 {
     kalyna_ctr_job* job = (kalyna_ctr_job*)parameter;
-    job->result = xcrypt_ctr_range(
-        job->key,
-        job->nonce,
-        job->input,
-        job->output,
-        job->length,
-        job->start_block,
-        job->block_count);
+    kalyna_ctr_shared* shared = job->shared;
+    kalyna_t* ctx = create_kalyna_context(shared->key);
+    if (ctx == NULL) {
+        job->result = 2;
+#if defined(_WIN32)
+        return 0;
+#else
+        return NULL;
+#endif
+    }
+
+    for (;;) {
+        size_t chunk = KALYNA_CURSOR_NEXT(&shared->next_chunk);
+        size_t start_block = chunk * shared->chunk_blocks;
+        if (start_block >= shared->total_blocks) {
+            break;
+        }
+
+        size_t remaining = shared->total_blocks - start_block;
+        size_t block_count = remaining < shared->chunk_blocks ? remaining : shared->chunk_blocks;
+        int result = xcrypt_ctr_range_prepared(
+            ctx,
+            shared->nonce,
+            shared->input,
+            shared->output,
+            shared->length,
+            start_block,
+            block_count);
+        if (result != 0) {
+            job->result = result;
+            break;
+        }
+    }
+
+    release_kalyna_context(ctx);
 #if defined(_WIN32)
     return 0;
 #else
@@ -265,24 +358,25 @@ KALYNA_EXPORT int kalyna_512_512_ctr_xcrypt(
         int started[KALYNA_MAX_THREADS];
 #endif
         kalyna_ctr_job jobs[KALYNA_MAX_THREADS];
-        size_t base_blocks = total_blocks / thread_count;
-        size_t extra_blocks = total_blocks % thread_count;
-        size_t start_block = 0;
+        kalyna_ctr_shared shared;
         memset(handles, 0, sizeof(handles));
 #if !defined(_WIN32)
         memset(started, 0, sizeof(started));
 #endif
         memset(jobs, 0, sizeof(jobs));
+        memset(&shared, 0, sizeof(shared));
+        shared.key = key;
+        shared.nonce = nonce;
+        shared.input = input;
+        shared.output = output;
+        shared.length = length;
+        shared.total_blocks = total_blocks;
+        shared.chunk_blocks = KALYNA_CHUNK_BLOCKS;
+        shared.next_chunk = 0;
+
 
         for (size_t i = 0; i < thread_count; ++i) {
-            size_t block_count = base_blocks + (i < extra_blocks ? 1 : 0);
-            jobs[i].key = key;
-            jobs[i].nonce = nonce;
-            jobs[i].input = input;
-            jobs[i].output = output;
-            jobs[i].length = length;
-            jobs[i].start_block = start_block;
-            jobs[i].block_count = block_count;
+            jobs[i].shared = &shared;
 #if defined(_WIN32)
             handles[i] = CreateThread(NULL, 0, kalyna_ctr_worker, &jobs[i], 0, NULL);
             if (handles[i] == NULL) {
@@ -294,7 +388,11 @@ KALYNA_EXPORT int kalyna_512_512_ctr_xcrypt(
                 return 3;
             }
 #else
-            if (pthread_create(&handles[i], NULL, kalyna_ctr_worker, &jobs[i]) != 0) {
+            if (pthread_create(
+                    &handles[i],
+                    NULL,
+                    kalyna_ctr_worker,
+                    &jobs[i]) != 0) {
                 for (size_t j = 0; j < i; ++j) {
                     if (started[j]) {
                         (void)pthread_join(handles[j], NULL);
@@ -307,9 +405,8 @@ KALYNA_EXPORT int kalyna_512_512_ctr_xcrypt(
             }
             started[i] = 1;
 #endif
-
-            start_block += block_count;
         }
+
 
         int result = 0;
 #if defined(_WIN32)
