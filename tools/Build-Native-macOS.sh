@@ -95,6 +95,75 @@ build_architecture() {
 
   mkdir -p -- ${output_dir}
 
+  # Crypto++ is compiled once per architecture into a static archive rather
+  # than listed file by file next to each adapter.
+  #
+  # Its algorithm sources cannot be cherry-picked: rijndael.cpp and its
+  # siblings reach cryptlib, misc, secblock, algparam and from there the whole
+  # integer machinery, so a hand-picked subset does not link and would have to
+  # be re-picked at every update. The whole library takes about ten seconds per
+  # architecture, which is less than the time spent discovering that a shorter
+  # list is incomplete.
+  local cryptopp_dir=${repo_root}/external/cryptopp
+  # Must be identical for the archive and for every adapter compiled against
+  # it: the headers branch on this macro, so a mismatch would give the two
+  # sides different class layouts.
+  local cryptopp_flags=(-std=c++17 -DCRYPTOPP_DISABLE_ASM)
+  local cryptopp_objects=${output_dir}/cryptopp-objects
+  local cryptopp_archive=${output_dir}/libcryptopp.a
+  rm -rf -- ${cryptopp_objects}
+  mkdir -p -- ${cryptopp_objects}
+
+  local cryptopp_sources=()
+  local candidate
+  for candidate in ${cryptopp_dir}/*.cpp(N:t); do
+    # The validation, benchmark and self-test drivers ship in the same
+    # directory as the library and pull in a main().
+    case ${candidate} in
+      test.cpp|bench1.cpp|bench2.cpp|bench3.cpp|datatest.cpp|dlltest.cpp|fipsalgt.cpp|adhoc.cpp)
+        continue
+        ;;
+      regtest*.cpp|validat*.cpp)
+        continue
+        ;;
+      # The *_simd translation units are compiled by Crypto++'s own makefile
+      # with per-file -m flags for AES-NI, SHA and NEON. This build uses one
+      # flag set for everything, so they are left out and the portable C++
+      # paths are selected instead; see CRYPTOPP_DISABLE_ASM below.
+      *_simd.cpp)
+        continue
+        ;;
+    esac
+    cryptopp_sources+=(${candidate})
+  done
+
+  if (( ${#cryptopp_sources} == 0 )); then
+    print -u2 'No Crypto++ sources were found; external/cryptopp is missing or empty.'
+    exit 1
+  fi
+
+  print -r -- ${(F)cryptopp_sources} \
+    | xargs -P 10 -I{} ${cxx} ${common_flags[@]} ${cryptopp_flags[@]} -c \
+        -I${cryptopp_dir} -o ${cryptopp_objects}/{}.o ${cryptopp_dir}/{}
+  xcrun ar rcs ${cryptopp_archive} ${cryptopp_objects}/*.o
+  rm -rf -- ${cryptopp_objects}
+
+  ${cxx} ${common_flags[@]} ${cryptopp_flags[@]} -dynamiclib -pthread \
+    -install_name @rpath/libmars_ref.dylib \
+    -o ${output_dir}/libmars_ref.dylib \
+    -I${cryptopp_dir} \
+    ${repo_root}/native/mars_ref_export.cpp \
+    ${cryptopp_archive} \
+    ${link_flags[@]}
+
+  ${cxx} ${common_flags[@]} ${cryptopp_flags[@]} -dynamiclib -pthread \
+    -install_name @rpath/libshacal2_ref.dylib \
+    -o ${output_dir}/libshacal2_ref.dylib \
+    -I${cryptopp_dir} \
+    ${repo_root}/native/shacal2_ref_export.cpp \
+    ${cryptopp_archive} \
+    ${link_flags[@]}
+
   ${cxx} ${common_flags[@]} -DNOJIT -DBSD -fPIE -pthread \
     -o ${output_dir}/zpaq \
     ${repo_root}/external/zpaq/zpaq.cpp \
@@ -168,7 +237,7 @@ build_architecture x86_64 osx-x64
 
 universal_dir=${output_root}/osx-universal
 mkdir -p -- ${universal_dir}
-artifacts=(zpaq argon2 libargon2_ref.dylib libkalyna_ref.dylib libmldsa87_ref.dylib libsha3_ref.dylib libthreefish_ref.dylib)
+artifacts=(zpaq argon2 libargon2_ref.dylib libkalyna_ref.dylib libmars_ref.dylib libmldsa87_ref.dylib libshacal2_ref.dylib libsha3_ref.dylib libthreefish_ref.dylib)
 for artifact_name in ${artifacts[@]}; do
   xcrun lipo -create \
     ${output_root}/osx-arm64/${artifact_name} \
