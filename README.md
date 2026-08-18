@@ -69,13 +69,38 @@ und deklariert auch keine entsprechende Berechtigung.
 ## Formatpolitik
 
 Die App erzeugt und liest ausschliesslich das verschluesselte Containerformat
-Version 8. Jede andere Version wird abgewiesen, auch Version 7; ein Legacy-
-Entschluesselungspfad ist nicht vorhanden und ist auch nicht vorgesehen. Mit v7
+Version 9. Jede andere Version wird abgewiesen, auch Version 8; ein Legacy-
+Entschluesselungspfad ist nicht vorhanden und ist auch nicht vorgesehen. Mit v8
 erzeugte Archive lassen sich mit dieser Fassung nicht mehr oeffnen.
 
-Auch die Domaenentrenner der Schluesselableitung tragen `v8`, sodass ein
-v8-Schluessel selbst bei identischem Passwort und identischen Faktoren niemals
-mit einem v7-Schluessel zusammenfaellt.
+Auch die Domaenentrenner der Schluesselableitung tragen `v9`, sodass ein
+v9-Schluessel selbst bei identischem Passwort und identischen Faktoren niemals
+mit einem v8-Schluessel zusammenfaellt.
+
+### Optionen
+
+Zehn Verfahren, in dieser Reihenfolge angeboten:
+
+1. **Standard:** Threefish-1024 ueber Kalyna-512/512
+2. **Paranoia:** ChaCha20-Poly1305 ueber Threefish-1024, Kalyna-512/512,
+   SHACAL-2-512, MARS-448 und AES-256 — sechs Chiffren, zwei Argon2id-Runden
+3. **Schnell:** ChaCha20-Poly1305 ueber AES-256
+4. **Gemischt:** ChaCha20-Poly1305 ueber Threefish-1024 und AES-256
+5. Die sechs Chiffren einzeln, nach Schluessellaenge absteigend: Threefish-1024,
+   Kalyna-512/512, SHACAL-2-512, MARS-448, AES-256, ChaCha20-Poly1305
+
+Jeder Chunk erhaelt seine eigene Nonce, aus der Basis-Nonce und dem
+Chunk-Index ueber SHA3-512 abgeleitet. Ein durchgehender CTR-Zaehler ueber
+unbegrenzt grosse Archive wiederholt sich irgendwann, und ein wiederholter
+Zaehlerblock unter einem Schluessel gibt den XOR zweier Klartexte preis.
+
+Bei der Paranoia-Option laeuft Argon2id zweimal: die erste Runde wie bei allen
+anderen Verfahren, die zweite mit einem eigenen Salt. Beide Runden liefern je
+384 Byte, aus denen die 568 Byte fuer sechs Schichten und die beiden
+MAC-Schluessel entnommen werden. Die beiden Faktoren bleiben gleich — nur der
+Salt unterscheidet sich, weshalb dafuer keine neuen Entropiepools noetig sind:
+die erste Erweiterung nutzt SHA3-512, die zweite SHA-512 auf demselben
+Schnappschuss.
 
 ### Kaskade (Standard)
 
@@ -133,7 +158,7 @@ umfassen dieselbe Magie, Kopflaenge, denselben Kopf und den gesamten Chiffretext
 Beide Tags werden vollstaendig und ohne Kurzschluss verglichen, bevor Klartext
 in die ZPAQ-Pipe gelangt.
 
-Der v8-Reader akzeptiert nur das feste Produktionsprofil `1 GiB / 4 / 4`.
+Der v9-Reader akzeptiert nur das feste Produktionsprofil `1 GiB / 4 / 4`.
 Abweichende Kopfwerte werden vor der KDF verworfen, damit ein manipuliertes
 Archiv weder schwaechere noch hoehere Argon2-Kosten erzwingen kann. Der native
 Adapter erzwingt dasselbe Profil unabhaengig ein zweites Mal, vergroessert fuer
@@ -161,13 +186,13 @@ Die GUI hat drei Tabs:
    Verschluesselung aktivieren und Threefish oder Kalyna waehlen. Threefish-1024
    steht an erster Stelle und ist die Werkseinstellung.
 2. **Extract**: `.zpaq` oder `.kzpaq` ablegen; die Suite wird zunaechst aus dem
-   noch unbestaetigten v8-Kopf angezeigt und vor jeder Klartextausgabe durch beide
+   noch unbestaetigten v9-Kopf angezeigt und vor jeder Klartextausgabe durch beide
    MACs authentisiert. Der Zielordner wird konfliktfrei vorgeschlagen.
    Extrahiert wird nur in einen neuen oder leeren Nicht-Reparse-Point-Ordner.
    Eine `.kzpaq` ohne gueltige Containerkennung und ohne nutzbares KPAR2-Sidecar
    wird geschlossen abgewiesen und niemals als unverschluesseltes ZPAQ an den
    nativen Parser weitergereicht.
-3. **Cryptographic erase**: Einen gueltigen verschluesselten v8-Container
+3. **Cryptographic erase**: Einen gueltigen verschluesselten v9-Container
    analysieren, zuerst das rekonstruierbare Recovery-Sidecar entfernen und danach
    Kopf/Schluesselparameter sowie Container loeschen.
 
@@ -241,7 +266,7 @@ gesperrten Zustand genullt. Auch die aus der gesperrten Argon2-Ausgabe
 abgetrennten Chiffre- und MAC-Schluessel werden nur in zuvor gesperrte Puffer
 kopiert und dort vor dem Entsperren genullt.
 Die App kompiliert direkt die unveraenderten PHC-Argon2-Kernquellen. Tests
-vergleichen den nativen Adapter mit der PHC-CLI und den exakten 128-Byte-v8-Pfad
+vergleichen den nativen Adapter mit der PHC-CLI und den exakten 128-Byte-v9-Pfad
 zusaetzlich mit Bouncy Castles unabhaengiger Argon2id-Implementierung.
 
 Ein Salt verhindert vorab berechnete Tabellen fuer identisches Passwortmaterial.
