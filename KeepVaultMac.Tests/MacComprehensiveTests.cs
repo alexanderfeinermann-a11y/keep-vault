@@ -39,6 +39,7 @@ internal static partial class MacComprehensiveTests
         [
             ("macOS process hardening", TestProcessHardeningAsync),
             ("signed native trust and tamper rejection", TestNativeTrustAsync),
+            ("every Mach-O in the release bundle carries a hybrid signature", TestBundleMachOClosureAsync),
             ("SHA3, Skein, Kalyna and Threefish reference vectors", TestPrimitiveVectorsAsync),
             ("ML-DSA-87 managed/reference interoperability", TestMldsaInteropAsync),
             ("randomised differential testing against every reference library", TestReferenceDifferentialAsync),
@@ -47,6 +48,7 @@ internal static partial class MacComprehensiveTests
             ("v9 triple-suite roundtrip and manipulation rejection", TestContainersAsync),
             ("cascade layering: the outer layer alone reveals nothing", TestCascadeLayeringAsync),
             ("v9 two-round key derivation from one pool consumption", TestTwoRoundDerivationAsync),
+            ("salt and nonce for every single-round suite without prepared entropy", TestUnpreparedEncryptionParametersAsync),
             ("v9 per-chunk nonces across a multi-chunk archive", TestPerChunkNoncesAsync),
             ("MARS and SHACAL-2 published vectors and CTR behaviour", TestCascadeCipherVectorsAsync),
             ("KPAR2-v2 repair, authentication and transplantation rejection", TestRecoveryAsync),
@@ -237,6 +239,154 @@ internal static partial class MacComprehensiveTests
         finally
         {
             Directory.Delete(root, recursive: true);
+        }
+
+        return Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// Every Mach-O file in the built bundle has to carry a hybrid signature.
+    /// </summary>
+    /// <remarks>
+    /// The signing targets used to be a hand-written list, and three libraries
+    /// that Avalonia brings along were not on it. They load into the process
+    /// that holds the archive keys, so they were running on Apple's signature
+    /// alone -- the single layer this app is built not to depend on. The build
+    /// now enumerates the bundle instead of naming files, and this asserts the
+    /// result, because the failure mode is silent: a bundle missing a signature
+    /// starts and works exactly like one that has it.
+    /// </remarks>
+    private static Task TestBundleMachOClosureAsync()
+    {
+        string? bundle = LocateReleaseBundle();
+        Require(
+            bundle is not null,
+            "No built Keep Vault.app was found. Run tools/Build-KeepVault-macOS.sh before the full suite.");
+
+        string macOs = Path.Combine(bundle!, "Contents", "MacOS");
+        string signatures = Path.Combine(bundle!, "Contents", "Resources", "HybridSignatures");
+        var missing = new List<string>();
+        int checkedFiles = 0;
+        foreach (string file in Directory.EnumerateFiles(macOs, "*", SearchOption.AllDirectories))
+        {
+            if (!IsMachO(file))
+            {
+                continue;
+            }
+
+            checkedFiles++;
+            string relative = Path.GetRelativePath(macOs, file);
+
+            // The launcher is the bundle's main executable, so codesign writes
+            // the bundle seal into it; its own signature has to live outside the
+            // bundle and is checked by the launcher at every start.
+            if (string.Equals(relative, "Keep Vault Launcher", StringComparison.Ordinal))
+            {
+                Require(
+                    File.Exists(bundle + ".launcher.khsig"),
+                    "The launcher's hybrid signature is missing beside the bundle.");
+                continue;
+            }
+
+            if (!File.Exists(Path.Combine(signatures, relative + ".khsig")))
+            {
+                missing.Add(relative);
+            }
+        }
+
+        Require(checkedFiles >= 10, $"Only {checkedFiles} Mach-O files were found in the bundle; the walk is wrong.");
+        Require(missing.Count == 0, $"Mach-O files without a hybrid signature: {string.Join(", ", missing)}");
+        return Task.CompletedTask;
+    }
+
+    private static string? LocateReleaseBundle()
+    {
+        string[] candidates =
+        [
+            "/Applications/Keep Vault.app",
+            Path.Combine(RepositoryRoot(), "dist", "Keep Vault-macOS", "Keep Vault.app"),
+        ];
+        return candidates.FirstOrDefault(Directory.Exists);
+    }
+
+    private static string RepositoryRoot()
+    {
+        for (string? directory = AppContext.BaseDirectory;
+            directory is not null;
+            directory = Path.GetDirectoryName(directory))
+        {
+            if (Directory.Exists(Path.Combine(directory, ".git")))
+            {
+                return directory;
+            }
+        }
+
+        return AppContext.BaseDirectory;
+    }
+
+    private static bool IsMachO(string path)
+    {
+        Span<byte> magic = stackalloc byte[4];
+        using FileStream stream = File.OpenRead(path);
+        if (stream.ReadAtLeast(magic, magic.Length, throwOnEndOfStream: false) < magic.Length)
+        {
+            return false;
+        }
+
+        uint value = BinaryPrimitives.ReadUInt32BigEndian(magic);
+        return value is 0xFEEDFACE or 0xFEEDFACF or 0xCEFAEDFE or 0xCFFAEDFE or 0xCAFEBABE or 0xBEBAFECA;
+    }
+
+    /// <summary>
+    /// Salt and nonce have to be derivable for every single-round suite on the
+    /// path that consumes the pools directly.
+    /// </summary>
+    /// <remarks>
+    /// That path sized its nonce block at three digests. The widest single-round
+    /// nonce is exactly 192 bytes, so it fitted to the byte and no test noticed;
+    /// one suite with a wider nonce would have made it throw. Asking for every
+    /// suite is what makes the size a property of the catalogue rather than a
+    /// coincidence.
+    /// </remarks>
+    private static Task TestUnpreparedEncryptionParametersAsync()
+    {
+        foreach (EncryptionSuite suite in EncryptionSuiteCatalog.DisplayOrder)
+        {
+            EncryptionSuiteParameters parameters = EncryptionSuiteCatalog.Get(suite);
+            AddMouseSamplesUntilReady();
+            if (parameters.UsesTwoKdfRounds)
+            {
+                using TwoRoundEncryptionParameters twoRound =
+                    EntropyMixer.CreateTwoRoundEncryptionParameters(suite);
+                Require(
+                    twoRound.FirstNonce.Bytes.Length == parameters.NonceBytes
+                        && twoRound.SecondNonce.Bytes.Length == parameters.NonceBytes,
+                    $"{suite} produced a two-round nonce of the wrong width.");
+                Require(
+                    !FixedEqual(twoRound.FirstSalt.Bytes, twoRound.SecondSalt.Bytes),
+                    $"{suite} produced the same salt for both Argon2id rounds.");
+                continue;
+            }
+
+            (LockedSensitiveBuffer salt, LockedSensitiveBuffer nonce) =
+                EntropyMixer.CreateEncryptionParameters(suite);
+            try
+            {
+                Require(
+                    salt.Bytes.Length == PasswordKeyService.SaltSize,
+                    $"{suite} produced a salt of the wrong width.");
+                Require(
+                    nonce.Bytes.Length == parameters.NonceBytes,
+                    $"{suite} produced a nonce of the wrong width.");
+                Require(
+                    nonce.Bytes.AsSpan().IndexOfAnyExcept((byte)0) >= 0,
+                    $"{suite} produced an all-zero nonce.");
+            }
+            finally
+            {
+                nonce.Dispose();
+                salt.Dispose();
+            }
         }
 
         return Task.CompletedTask;

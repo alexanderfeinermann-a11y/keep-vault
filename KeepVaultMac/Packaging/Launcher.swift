@@ -138,6 +138,104 @@ private func validateDynamicCode(processIdentifier: pid_t, requirementText: Stri
     }
 }
 
+/// Whether a file starts with a Mach-O magic number, thin or fat, either byte
+/// order.
+///
+/// Read from the file rather than inferred from its name or its permission
+/// bits: a planted library is named whatever its author wants, and a dylib does
+/// not need the executable bit to be loaded into a process.
+private func isMachO(at path: String) throws -> Bool {
+    let fileDescriptor = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW_ANY)
+    guard fileDescriptor >= 0 else {
+        throw LauncherFailure(message: "Ein Bundle-Bestandteil kann nicht symlink-sicher geoeffnet werden (errno \(errno)).")
+    }
+    defer { close(fileDescriptor) }
+    var magic = [UInt8](repeating: 0, count: 4)
+    var filled = 0
+    while filled < magic.count {
+        let count = magic.withUnsafeMutableBytes { buffer -> Int in
+            read(fileDescriptor, buffer.baseAddress!.advanced(by: filled), buffer.count - filled)
+        }
+        if count == 0 {
+            return false
+        }
+        if count < 0 {
+            if errno == EINTR {
+                continue
+            }
+            throw LauncherFailure(message: "Ein Bundle-Bestandteil konnte nicht gelesen werden (errno \(errno)).")
+        }
+        filled += count
+    }
+
+    let value = (UInt32(magic[0]) << 24) | (UInt32(magic[1]) << 16) | (UInt32(magic[2]) << 8) | UInt32(magic[3])
+    switch value {
+    case 0xFEED_FACE, 0xFEED_FACF, 0xCEFA_EDFE, 0xCFFA_EDFE, 0xCAFE_BABE, 0xBEBA_FECA:
+        return true
+    default:
+        return false
+    }
+}
+
+/// Hybrid-verifies every remaining Mach-O below Contents/MacOS.
+///
+/// The core, the supervisor and the launcher are checked by name because each
+/// needs its own handling. Everything else -- the Avalonia, Skia and HarfBuzz
+/// libraries, the reference ciphers, the two helper tools -- is found by walking
+/// the directory, so a component cannot be missed by not being on a list, and a
+/// library planted into the bundle cannot pass by simply having no signature to
+/// check. All of it runs in the same address space as the archive keys, and
+/// Apple's signature is the one layer this app deliberately does not rely on.
+private func verifyRemainingMachOComponents(bundleURL: URL) throws {
+    let macosURL = bundleURL.appendingPathComponent("Contents/MacOS", isDirectory: true)
+    let signatureRoot = bundleURL.appendingPathComponent(
+        "Contents/Resources/HybridSignatures", isDirectory: true)
+    let handledByName: Set<String> = [coreName, supervisorName, launcherName]
+    var pending = [macosURL]
+    while let directory = pending.popLast() {
+        let entries = try FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey],
+            options: [])
+        for entry in entries {
+            let values = try entry.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+            if values.isSymbolicLink == true {
+                throw LauncherFailure(message:
+                    "Im Programmverzeichnis liegt eine symbolische Verknuepfung: \(entry.lastPathComponent).")
+            }
+
+            if values.isDirectory == true {
+                pending.append(entry)
+                continue
+            }
+
+            if handledByName.contains(entry.lastPathComponent) {
+                continue
+            }
+
+            guard try isMachO(at: entry.path) else {
+                continue
+            }
+
+            let relative = entry.path.dropFirst(macosURL.path.count + 1)
+            let signatureURL = signatureRoot.appendingPathComponent(
+                String(relative) + ".khsig", isDirectory: false)
+            let opened = try openAndHashCore(at: entry.path, subject: entry.lastPathComponent)
+            do {
+                try verifyHybridCore(
+                    opened,
+                    signaturePath: signatureURL.path,
+                    subject: entry.lastPathComponent)
+            } catch {
+                close(opened.fileDescriptor)
+                throw error
+            }
+
+            close(opened.fileDescriptor)
+        }
+    }
+}
+
 private func openAndHashCore(at path: String, subject: String = "App-Core") throws -> OpenedCore {
     let fileDescriptor = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW_ANY)
     guard fileDescriptor >= 0 else {
@@ -647,6 +745,8 @@ private enum KeepVaultLauncher {
                     + "gestartet werden.")
             }
             close(openedLauncher.fileDescriptor)
+
+            try verifyRemainingMachOComponents(bundleURL: bundleURL)
 
             let openedCore = try openAndHashCore(at: coreURL.path)
             do {

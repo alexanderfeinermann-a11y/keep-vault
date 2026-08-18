@@ -455,7 +455,7 @@ public static partial class EntropyMixer
         }
 
         using LockedSensitiveBuffer mouseBytes = ExpandAndConsumeMousePools(
-            Sha3_512Compat.HashSizeInBytes,
+            PoolDrawBytes,
             [
                 EntropyPurpose.Salt,
                 EntropyPurpose.NonceFirst,
@@ -473,11 +473,16 @@ public static partial class EntropyMixer
                 salt.Bytes,
                 mouseBytes.Bytes.AsSpan(0, Sha3_512Compat.HashSizeInBytes));
 
-            fullNonce = LockedSensitiveBuffer.Create(3 * Sha3_512Compat.HashSizeInBytes);
+            // Sized from the catalogue rather than from three digests. The
+            // widest single-round nonce happens to be exactly 192 bytes today,
+            // so the old fixed size fitted to the byte -- and one suite with a
+            // wider nonce would have turned that into an exception on the path
+            // that runs whenever no prepared entropy is at hand.
+            fullNonce = LockedSensitiveBuffer.Create(EncryptionSuiteCatalog.MaxNonceBytes);
             FillSystemRandom(fullNonce.Bytes);
             XorInPlace(
                 fullNonce.Bytes,
-                mouseBytes.Bytes.AsSpan(Sha3_512Compat.HashSizeInBytes, 3 * Sha3_512Compat.HashSizeInBytes));
+                mouseBytes.Bytes.AsSpan(PoolDrawBytes, EncryptionSuiteCatalog.MaxNonceBytes));
 
             int nonceBytes = EncryptionSuiteCatalog.Get(suite).NonceBytes;
             if (nonceBytes == fullNonce.Bytes.Length)

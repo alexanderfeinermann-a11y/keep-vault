@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.Security.Cryptography;
 using KalynaArchiver.Services;
 using KalynaArchiver.Signing;
@@ -162,6 +163,43 @@ static void VerifyDirectory(string directory, HybridSignaturePolicy policy)
         throw new InvalidDataException("The release directory contains no hybrid-signed artifacts.");
     }
 
+    // The other direction: every executable in the tree has to be one of those
+    // payloads. Building the worklist from the signatures alone answered
+    // TRUSTED for a bundle whose signature had been deleted -- the artifact
+    // simply left the list -- and for one with an extra unsigned library
+    // dropped in. Both are what an attacker who can write into the bundle would
+    // actually do, so the inventory is closed against the code that is present
+    // rather than against the signatures that happen to be there.
+    var unsigned = new SortedSet<string>(StringComparer.Ordinal);
+    foreach (string file in files)
+    {
+        if (signedPayloads.Contains(file) || !IsMachO(file))
+        {
+            continue;
+        }
+
+        // The launcher carries the bundle seal, so its own hybrid signature
+        // cannot live inside the bundle; it is published beside the app and
+        // checked by the launcher itself at every start.
+        if (isAppBundle
+            && string.Equals(
+                Path.GetRelativePath(directory, file).Replace(Path.DirectorySeparatorChar, '/'),
+                "Contents/MacOS/Keep Vault Launcher",
+                StringComparison.Ordinal))
+        {
+            continue;
+        }
+
+        unsigned.Add(file);
+    }
+
+    if (unsigned.Count > 0)
+    {
+        throw new InvalidDataException(
+            "Executable code without a hybrid signature: "
+            + string.Join(", ", unsigned.Select(file => Path.GetRelativePath(directory, file))));
+    }
+
     foreach (string payload in signedPayloads)
     {
         VerifyArtifact(payload, ResolveSidecarBase(payload), policy);
@@ -171,6 +209,29 @@ static void VerifyDirectory(string directory, HybridSignaturePolicy policy)
 
     Console.WriteLine($"directory={directory}");
     Console.WriteLine($"verified_artifacts={payloads.Length}");
+}
+
+/// <summary>
+/// Whether a file is Mach-O, thin or fat, in either byte order.
+/// </summary>
+/// <remarks>
+/// Read from the file rather than inferred from its name or its permission
+/// bits: a planted library is named whatever its author wants, and a dylib does
+/// not need the executable bit to be loaded into a process.
+/// </remarks>
+static bool IsMachO(string path)
+{
+    Span<byte> magic = stackalloc byte[4];
+    using (FileStream stream = File.OpenRead(path))
+    {
+        if (stream.ReadAtLeast(magic, magic.Length, throwOnEndOfStream: false) < magic.Length)
+        {
+            return false;
+        }
+    }
+
+    uint value = BinaryPrimitives.ReadUInt32BigEndian(magic);
+    return value is 0xFEEDFACE or 0xFEEDFACF or 0xCEFAEDFE or 0xCFFAEDFE or 0xCAFEBABE or 0xBEBAFECA;
 }
 
 static List<string> EnumerateWithoutSymlinks(string root)

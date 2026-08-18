@@ -500,17 +500,31 @@ signer_arguments=(
   --reference-library ${repo_root}/KeepVaultMac/Native/$([[ ${architecture} == universal ]] && print osx-universal || print osx-arm64)/libmldsa87_ref.dylib
   --policy ${mac_project}/Directory.Build.props
   --launcher-pins ${build_root}/HybridPins.swift
-  --target ${macos_dir}/Keep\ Vault
-  --target ${macos_dir}/Native/zpaq
-  --target ${macos_dir}/Native/argon2
-  --target ${macos_dir}/Native/libargon2_ref.dylib
-  --target ${macos_dir}/Native/libkalyna_ref.dylib
-  --target ${macos_dir}/Native/libaes_ref.dylib
-  --target ${macos_dir}/Native/libchachapoly_ref.dylib
-  --target ${macos_dir}/Native/libmars_ref.dylib
-  --target ${macos_dir}/Native/libshacal2_ref.dylib
-  --target ${macos_dir}/Native/libthreefish_ref.dylib
 )
+
+# Every Mach-O below Contents/MacOS gets a hybrid signature, enumerated from the
+# bundle rather than listed by hand. A hand-written list only covers what
+# somebody remembered to add: the three Avalonia and Skia libraries were signed
+# by Apple in the loop above and then left out here, so they ran inside the
+# process that holds the archive keys protected by Apple's signature alone --
+# exactly the layer the post-quantum pair exists to stop relying on.
+#
+# The supervisor and the launcher are skipped here because each gets its own
+# later pass: the supervisor after its cdhash pin is generated, and the launcher
+# because it carries the bundle seal and its signature has to live outside the
+# bundle. Neither is compiled into the bundle yet at this point; the guard is
+# there so reordering the build cannot silently sign them twice.
+hybrid_target_count=0
+while IFS= read -r -d '' hybrid_candidate; do
+  [[ ${hybrid_candidate:t} == 'Keep Vault Supervisor' || ${hybrid_candidate:t} == 'Keep Vault Launcher' ]] && continue
+  file -b ${hybrid_candidate} | grep -q 'Mach-O' || continue
+  signer_arguments+=(--target ${hybrid_candidate})
+  (( hybrid_target_count += 1 ))
+done < <(find ${macos_dir} -type f -print0 | sort -z)
+if (( hybrid_target_count < 10 )); then
+  print -u2 "Too few Mach-O hybrid-signing targets were found: ${hybrid_target_count}"
+  exit 1
+fi
 if [[ -n ${pfx_password_service} ]]; then
   signer_arguments+=(--pfx-password-keychain-service ${pfx_password_service})
   [[ -n ${pfx_password_account} ]] && signer_arguments+=(--pfx-keychain-account ${pfx_password_account})
