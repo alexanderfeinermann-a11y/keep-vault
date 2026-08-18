@@ -259,7 +259,7 @@ public sealed class KeySheetService
         using var sha3 = new Sha3_512Incremental();
         using var skein = new Skein1024Digest();
 
-        AppendFingerprintPart(sha3, skein, "Kalyna-ZPAQ/v8/key-sheet-fingerprint"u8);
+        AppendFingerprintPart(sha3, skein, "Kalyna-ZPAQ/v9/key-sheet-fingerprint"u8);
         AppendFingerprintPart(sha3, skein, pathBytes.Bytes);
         AppendFingerprintPart(sha3, skein, suiteBytes.Bytes);
         AppendFingerprintPart(sha3, skein, firstBytes.Bytes);
@@ -329,7 +329,7 @@ public sealed class KeySheetService
         return new ValidatedKeySheetData(
             canonicalArchivePath,
             data.Suite,
-            suite.DisplayName,
+            EncryptionSuiteCatalog.DisplayName(data.Suite, data.English),
             first,
             second,
             data.CreatedAt,
@@ -560,16 +560,24 @@ public sealed class KeySheetService
         // The password is written by hand and comes first: it is the part the
         // owner supplies, and reading the sheet top to bottom should follow the
         // order the factors are actually entered in.
-        y += 4;
-        for (int index = 0; index < 3; index++)
+        //
+        // The factor block below is reserved first and the writing lines take
+        // what is left. A suite name or a storage path that runs to an extra
+        // line then shortens the lines instead of pushing the factor across the
+        // QR codes — and the factor is the one thing on this sheet that must
+        // never be the part that gets squeezed.
+        const double factorBlockHeight = 22 + (4 * 20) + 20;
+        double writingTop = y + 4;
+        double writingBottom = qrHeadingBaseline - factorBlockHeight;
+        const int writingLines = 3;
+        double writingSpacing = Math.Min(22, (writingBottom - writingTop) / (writingLines + 1));
+        for (int index = 0; index < writingLines && writingSpacing >= 12; index++)
         {
-            y += 22;
-            graphics.DrawLine(XPens.Black, margin, y, page.Width.Point - margin, y);
+            double lineY = writingTop + (writingSpacing * (index + 1));
+            graphics.DrawLine(XPens.Black, margin, lineY, page.Width.Point - margin, lineY);
         }
 
-        // Same breathing space as between every other block above, so the three
-        // sheets read as one document rather than three different ones.
-        y += 30;
+        y = writingBottom;
 
         graphics.DrawString(
             en

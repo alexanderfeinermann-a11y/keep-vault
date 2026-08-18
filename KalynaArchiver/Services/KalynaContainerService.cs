@@ -11,12 +11,12 @@ namespace KalynaArchiver.Services;
 public sealed partial class KalynaContainerService
 {
     private static readonly byte[] Magic = "KZPAQ1\0"u8.ToArray();
-    private static readonly byte[] ThreefishTweakDomain = "Kalyna-ZPAQ/v8/Threefish-1024/CTR-Tweak"u8.ToArray();
+    private static readonly byte[] ThreefishTweakDomain = "Kalyna-ZPAQ/v9/Threefish-1024/CTR-Tweak"u8.ToArray();
     // Version 8 introduces the cascade suite and drops every earlier version.
     // There is deliberately no reader for v7: a format this app writes once and
     // reads years later is safer with one shape than with a compatibility path
     // that is exercised rarely and audited less.
-    private const int CurrentVersion = 8;
+    private const int CurrentVersion = 9;
     private const int BufferSize = 16 * 1024 * 1024;
     private const int Sha3TagSize = 64;
     private const int SkeinTagSize = 128;
@@ -28,19 +28,7 @@ public sealed partial class KalynaContainerService
     public static string? NativeKalynaLoadError => NativeKalyna.LastLoadError;
     public static string? NativeThreefishLoadError => NativeThreefish.LastLoadError;
 
-    public bool IsNativeSuiteAvailable(EncryptionSuite suite)
-    {
-        return suite switch
-        {
-            // threefish_ref also provides Skein for the second MAC, so every
-            // suite needs it; Kalyna is needed by its own suite and by the
-            // cascade that runs it underneath Threefish.
-            EncryptionSuite.Kalyna512_512 => IsNativeKalynaAvailable && IsNativeThreefishAvailable,
-            EncryptionSuite.Threefish1024 => IsNativeThreefishAvailable,
-            EncryptionSuite.ThreefishOverKalyna => IsNativeKalynaAvailable && IsNativeThreefishAvailable,
-            _ => false,
-        };
-    }
+    public bool IsNativeSuiteAvailable(EncryptionSuite suite) => MissingNativeLibraries(suite).Count == 0;
 
     public Task EncryptZpaqStreamAsync(
         Stream plainZpaqStream,
@@ -171,9 +159,25 @@ public sealed partial class KalynaContainerService
             throw new DirectoryNotFoundException($"The encrypted archive target directory does not exist: {targetDirectory}");
         }
 
+        // A two-round suite needs two salts and two nonces, and both halves have
+        // to reach the header: an archive whose header carries only the first
+        // round cannot be decrypted by anyone, including the machine that wrote
+        // it.
         LockedSensitiveBuffer saltBuffer;
         LockedSensitiveBuffer nonceBuffer;
-        if (preparedEntropy is null)
+        TwoRoundEncryptionParameters? twoRound = null;
+        if (parameters.UsesTwoKdfRounds)
+        {
+            twoRound = preparedEntropy is null
+                ? EntropyMixer.CreateTwoRoundEncryptionParameters(suite)
+                : preparedEntropy.ConsumeTwoRoundEncryptionParameters(
+                    suite,
+                    firstGeneratedPassword,
+                    secondGeneratedPassword);
+            saltBuffer = twoRound.FirstSalt;
+            nonceBuffer = twoRound.FirstNonce;
+        }
+        else if (preparedEntropy is null)
         {
             (saltBuffer, nonceBuffer) = EntropyMixer.CreateEncryptionParameters(suite);
         }
@@ -187,7 +191,11 @@ public sealed partial class KalynaContainerService
 
         byte[] salt = saltBuffer.Bytes;
         byte[] nonce = nonceBuffer.Bytes;
+        byte[] secondSalt = twoRound?.SecondSalt.Bytes ?? [];
+        byte[] secondNonce = twoRound?.SecondNonce.Bytes ?? [];
+        byte[] chunkNonceBase = [];
         byte[] kdfSalt = [];
+        byte[] kdfSecondSalt = [];
         SuiteKeyMaterial? keyMaterial = null;
         byte[] tweak = [];
         byte[] counter = [];
@@ -195,23 +203,37 @@ public sealed partial class KalynaContainerService
         try
         {
             kdfSalt = (byte[])salt.Clone();
+            kdfSecondSalt = secondSalt.Length == 0 ? [] : (byte[])secondSalt.Clone();
             try
             {
-                using DerivedKey key = await _passwords.DeriveAsync(
-                    userPassword,
-                    firstGeneratedPassword,
-                    secondGeneratedPassword,
-                    kdfSalt,
-                    suite,
-                    argon2Profile,
-                    cancellationToken).ConfigureAwait(false);
+                using DerivedKey key = parameters.UsesTwoKdfRounds
+                    ? await _passwords.DeriveTwoRoundAsync(
+                        userPassword,
+                        firstGeneratedPassword,
+                        secondGeneratedPassword,
+                        kdfSalt,
+                        kdfSecondSalt,
+                        suite,
+                        argon2Profile,
+                        cancellationToken).ConfigureAwait(false)
+                    : await _passwords.DeriveAsync(
+                        userPassword,
+                        firstGeneratedPassword,
+                        secondGeneratedPassword,
+                        kdfSalt,
+                        suite,
+                        argon2Profile,
+                        cancellationToken).ConfigureAwait(false);
                 keyMaterial = SuiteKeyMaterial.Create(key.Bytes, parameters);
                 effectiveProfile = key.Profile;
             }
             finally
             {
                 CryptographicOperations.ZeroMemory(kdfSalt);
+                CryptographicOperations.ZeroMemory(kdfSecondSalt);
             }
+
+            chunkNonceBase = BuildChunkNonceBase(nonce, secondNonce);
 
             tweak = CreateSuiteTweak(suite, nonce);
             counter = (byte[])nonce.Clone();
@@ -244,7 +266,11 @@ public sealed partial class KalynaContainerService
                 "UserPassword+GeneratedHex512x2",
                 EncryptionSuiteCatalog.KdfInputMode,
                 1024,
-                2);
+                2,
+                secondSalt.Length == 0 ? 0 : PasswordKeyService.SaltSize * 8,
+                secondSalt.Length == 0 ? null : Convert.ToBase64String(secondSalt),
+                secondNonce.Length == 0 ? 0 : parameters.NonceBytes * 8,
+                secondNonce.Length == 0 ? null : Convert.ToBase64String(secondNonce));
             byte[] headerBytes = JsonSerializer.SerializeToUtf8Bytes(header, ContainerJsonContext.Default.ContainerHeader);
             if (headerBytes.Length > MaxHeaderSize)
             {
@@ -290,13 +316,48 @@ public sealed partial class KalynaContainerService
                     {
                         int read;
                         long plaintextBytes = 0;
+                        long chunkIndex = 0;
                         while ((read = await ReadChunkAsync(plainZpaqStream, plainChunk, cancellationToken).ConfigureAwait(false)) > 0)
                         {
                             plaintextBytes = checked(plaintextBytes + read);
+                            DeriveChunkNonce(chunkNonceBase, chunkIndex, counter);
                             XCrypt(parameters, keyMaterial.EncryptionKey, tweak, counter, plainChunk, cipherChunk, read);
+
+                            byte[]? chunkTag = null;
+                            if (parameters.Cascade is { OutermostIsAead: true } aeadLayout)
+                            {
+                                // The tag follows its own chunk rather than
+                                // collecting in a table, so a reader never has
+                                // to hold unverified plaintext while it goes
+                                // looking for the proof.
+                                byte[] tag = new byte[NativeChaChaPoly.TagBytes];
+                                (byte[] aeadKey, byte[] aeadNonce) =
+                                    SplitAeadMaterial(aeadLayout, keyMaterial.EncryptionKey, counter);
+                                byte[] associated =
+                                    BuildChunkAssociatedData(parameters, chunkNonceBase, chunkIndex, read);
+                                try
+                                {
+                                    NativeChaChaPoly.Encrypt(
+                                        aeadKey, aeadNonce, associated, cipherChunk, cipherChunk, read, tag);
+                                }
+                                finally
+                                {
+                                    CryptographicOperations.ZeroMemory(aeadKey);
+                                    CryptographicOperations.ZeroMemory(aeadNonce);
+                                }
+
+                                chunkTag = tag;
+                            }
+
                             await output.WriteAsync(cipherChunk.AsMemory(0, read), cancellationToken).ConfigureAwait(false);
                             AppendAuthentication(hmac, skeinMac, cipherChunk.AsSpan(0, read));
-                            AdvanceCounter(parameters, counter, read);
+
+                            if (chunkTag is not null)
+                            {
+                                await output.WriteAsync(chunkTag, cancellationToken).ConfigureAwait(false);
+                                AppendAuthentication(hmac, skeinMac, chunkTag);
+                            }
+                            chunkIndex = checked(chunkIndex + 1);
                             CryptographicOperations.ZeroMemory(plainChunk.AsSpan(0, read));
                             CryptographicOperations.ZeroMemory(cipherChunk.AsSpan(0, read));
                         }
@@ -359,13 +420,24 @@ public sealed partial class KalynaContainerService
         finally
         {
             CryptographicOperations.ZeroMemory(kdfSalt);
+            CryptographicOperations.ZeroMemory(kdfSecondSalt);
+            CryptographicOperations.ZeroMemory(chunkNonceBase);
             keyMaterial?.Dispose();
             CryptographicOperations.ZeroMemory(counter);
             CryptographicOperations.ZeroMemory(tweak);
             CryptographicOperations.ZeroMemory(nonce);
             CryptographicOperations.ZeroMemory(salt);
-            nonceBuffer.Dispose();
-            saltBuffer.Dispose();
+            // A two-round set owns all four buffers, so disposing it covers the
+            // salt and nonce aliases taken from it.
+            if (twoRound is not null)
+            {
+                twoRound.Dispose();
+            }
+            else
+            {
+                nonceBuffer.Dispose();
+                saltBuffer.Dispose();
+            }
         }
     }
 
@@ -394,6 +466,9 @@ public sealed partial class KalynaContainerService
         byte[]? expectedSkeinTag = null;
         byte[]? salt = null;
         byte[]? nonce = null;
+        byte[]? secondSalt = null;
+        byte[]? secondNonce = null;
+        byte[]? chunkNonceBase = null;
         byte[]? tweak = null;
         byte[]? actualSha3Tag = null;
         byte[]? actualSkeinTag = null;
@@ -433,16 +508,29 @@ public sealed partial class KalynaContainerService
 
             salt = Convert.FromBase64String(header.Salt);
             nonce = Convert.FromBase64String(header.Nonce);
+            secondSalt = string.IsNullOrEmpty(header.SecondSalt) ? [] : Convert.FromBase64String(header.SecondSalt);
+            secondNonce = string.IsNullOrEmpty(header.SecondNonce) ? [] : Convert.FromBase64String(header.SecondNonce);
+            chunkNonceBase = BuildChunkNonceBase(nonce, secondNonce);
             tweak = string.IsNullOrEmpty(header.Tweak) ? [] : Convert.FromBase64String(header.Tweak);
             Argon2Profile argon2Profile = GetArgon2Profile(header);
-            using (DerivedKey key = await _passwords.DeriveAsync(
-                userPassword,
-                firstGeneratedPassword,
-                secondGeneratedPassword,
-                salt,
-                parameters.Suite,
-                argon2Profile,
-                cancellationToken).ConfigureAwait(false))
+            using (DerivedKey key = parameters.UsesTwoKdfRounds
+                ? await _passwords.DeriveTwoRoundAsync(
+                    userPassword,
+                    firstGeneratedPassword,
+                    secondGeneratedPassword,
+                    salt,
+                    secondSalt,
+                    parameters.Suite,
+                    argon2Profile,
+                    cancellationToken).ConfigureAwait(false)
+                : await _passwords.DeriveAsync(
+                    userPassword,
+                    firstGeneratedPassword,
+                    secondGeneratedPassword,
+                    salt,
+                    parameters.Suite,
+                    argon2Profile,
+                    cancellationToken).ConfigureAwait(false))
             {
                 keyMaterial = SuiteKeyMaterial.Create(key.Bytes, parameters);
             }
@@ -468,18 +556,67 @@ public sealed partial class KalynaContainerService
             using IDisposable tweakLock = SecureMemory.TryLock(tweak);
             using IDisposable counterLock = SecureMemory.TryLock(counter);
             input.Position = cipherStart;
-            byte[] cipherChunk = new byte[BufferSize];
+            // Sized to one written chunk: payload, plus the tag that follows
+            // it when the suite has an authenticated outer layer. A single read
+            // then lands exactly on a chunk boundary.
+            //
+            // The allowance must not be added unconditionally. For a suite
+            // without a tag the writer emits BufferSize per chunk, and a reader
+            // taking BufferSize + 16 would drift by a tag every chunk — the
+            // chunk indices on the two sides would diverge, and the per-chunk
+            // nonces with them.
+            int chunkTagAllowance = parameters.Cascade is { OutermostIsAead: true }
+                ? NativeChaChaPoly.TagBytes
+                : 0;
+            byte[] cipherChunk = new byte[BufferSize + chunkTagAllowance];
             byte[] plainChunk = new byte[BufferSize];
             using IDisposable cipherChunkLock = SecureMemory.TryLock(cipherChunk);
             using IDisposable plainChunkLock = SecureMemory.TryLock(plainChunk);
             try
             {
                 int read;
+                long chunkIndex = 0;
                 while ((read = await ReadChunkAsync(input, cipherChunk, cancellationToken).ConfigureAwait(false)) > 0)
                 {
+                    DeriveChunkNonce(chunkNonceBase, chunkIndex, counter);
+
+                    if (parameters.Cascade is { OutermostIsAead: true } aeadLayout)
+                    {
+                        // The chunk and its tag were written together, so the
+                        // tag sits in the last bytes of what was just read.
+                        // Verification happens before the inner layers run: a
+                        // reader must never hand out plaintext it has not
+                        // authenticated, not even to the next cipher.
+                        int tagBytes = NativeChaChaPoly.TagBytes;
+                        if (read < tagBytes)
+                        {
+                            throw new InvalidDataException("The container ends inside an authentication tag.");
+                        }
+
+                        int payload = read - tagBytes;
+                        byte[] tag = cipherChunk.AsSpan(payload, tagBytes).ToArray();
+                        (byte[] aeadKey, byte[] aeadNonce) =
+                            SplitAeadMaterial(aeadLayout, keyMaterial.EncryptionKey, counter);
+                        byte[] associated =
+                            BuildChunkAssociatedData(parameters, chunkNonceBase, chunkIndex, payload);
+                        try
+                        {
+                            NativeChaChaPoly.Decrypt(
+                                aeadKey, aeadNonce, associated, cipherChunk, cipherChunk, payload, tag);
+                        }
+                        finally
+                        {
+                            CryptographicOperations.ZeroMemory(aeadKey);
+                            CryptographicOperations.ZeroMemory(aeadNonce);
+                            CryptographicOperations.ZeroMemory(tag);
+                        }
+
+                        read = payload;
+                    }
+
                     XCrypt(parameters, keyMaterial.EncryptionKey, tweak, counter, cipherChunk, plainChunk, read);
                     await plainZpaqDestination.WriteAsync(plainChunk.AsMemory(0, read), cancellationToken).ConfigureAwait(false);
-                    AdvanceCounter(parameters, counter, read);
+                    chunkIndex = checked(chunkIndex + 1);
                     CryptographicOperations.ZeroMemory(cipherChunk.AsSpan(0, read));
                     CryptographicOperations.ZeroMemory(plainChunk.AsSpan(0, read));
                 }
@@ -504,6 +641,9 @@ public sealed partial class KalynaContainerService
             ZeroIfNotNull(counter);
             ZeroIfNotNull(tweak);
             ZeroIfNotNull(nonce);
+            ZeroIfNotNull(secondSalt);
+            ZeroIfNotNull(secondNonce);
+            ZeroIfNotNull(chunkNonceBase);
             ZeroIfNotNull(salt);
             ZeroIfNotNull(magic);
             ZeroIfNotNull(headerLengthBytes);
@@ -769,7 +909,7 @@ public sealed partial class KalynaContainerService
             {
                 if (!headerBytes.AsSpan().SequenceEqual(canonicalHeader))
                 {
-                    throw new InvalidDataException("Container header is not in the unique canonical v8 JSON representation.");
+                    throw new InvalidDataException("Container header is not in the unique canonical v9 JSON representation.");
                 }
             }
             finally
@@ -787,7 +927,7 @@ public sealed partial class KalynaContainerService
         }
         catch (JsonException ex)
         {
-            throw new InvalidDataException("Container header is not valid canonical v8 JSON.", ex);
+            throw new InvalidDataException("Container header is not valid canonical v9 JSON.", ex);
         }
     }
 
@@ -899,6 +1039,91 @@ public sealed partial class KalynaContainerService
     /// cores read each byte before writing the same index and never declare
     /// their buffers restricted, so the aliasing is defined.
     /// </remarks>
+    private static readonly byte[] ChunkNonceDomain = "Kalyna-ZPAQ/v9/chunk-nonce"u8.ToArray();
+
+    /// <summary>
+    /// Gives every chunk its own nonce instead of running one counter across
+    /// the whole archive.
+    /// </summary>
+    /// <remarks>
+    /// A single CTR stream over an archive of unbounded size is the case where
+    /// counter blocks eventually repeat, and a repeated counter block under the
+    /// same key hands an observer the XOR of two plaintexts. Re-deriving the
+    /// nonce for every chunk keeps each chunk's counter space to one chunk, so
+    /// archive size stops being what decides whether that is reachable.
+    ///
+    /// The per-chunk value is derived, not drawn. Fresh randomness per chunk
+    /// could not be reproduced when reading unless it were stored per chunk,
+    /// which is exactly the overhead an arbitrarily large archive cannot carry.
+    /// The chunk index is bound into the hash, so the nonces are independent of
+    /// each other while both sides compute the same sequence.
+    ///
+    /// SHA3-512 does this for every suite, including the two-round paranoia
+    /// cascade. The two hashes separate the *key derivation* rounds, where two
+    /// independent expansions of one entropy snapshot are the whole point;
+    /// chunk nonces need no such separation, because the base nonce they hang
+    /// off is already per-archive and per-suite. Using one hash here keeps the
+    /// sequence identical for every suite and removes a branch that could put
+    /// a reader and a writer on different derivations.
+    /// </remarks>
+    /// <summary>
+    /// The material every chunk nonce hangs off.
+    /// </summary>
+    /// <remarks>
+    /// One-round suites use their single nonce. A two-round suite uses both,
+    /// laid end to end, so each chunk nonce depends on the entropy of both
+    /// rounds and neither of the two stored nonces is dead weight in the header.
+    /// </remarks>
+    private static byte[] BuildChunkNonceBase(byte[] nonce, byte[] secondNonce)
+    {
+        if (secondNonce.Length == 0)
+        {
+            return (byte[])nonce.Clone();
+        }
+
+        byte[] combined = new byte[checked(nonce.Length + secondNonce.Length)];
+        nonce.CopyTo(combined, 0);
+        secondNonce.CopyTo(combined, nonce.Length);
+        return combined;
+    }
+
+    private static void DeriveChunkNonce(
+        byte[] baseNonce,
+        long chunkIndex,
+        byte[] destination)
+    {
+        Span<byte> indexBytes = stackalloc byte[sizeof(long)];
+        BinaryPrimitives.WriteInt64BigEndian(indexBytes, chunkIndex);
+        Span<byte> blockBytes = stackalloc byte[sizeof(uint)];
+        Span<byte> digest = stackalloc byte[Sha3_512Compat.HashSizeInBytes];
+
+        int messageLength = ChunkNonceDomain.Length + baseNonce.Length + indexBytes.Length + blockBytes.Length;
+        byte[] message = new byte[messageLength];
+        try
+        {
+            ChunkNonceDomain.CopyTo(message, 0);
+            baseNonce.CopyTo(message, ChunkNonceDomain.Length);
+            indexBytes.CopyTo(message.AsSpan(ChunkNonceDomain.Length + baseNonce.Length));
+            int blockOffset = ChunkNonceDomain.Length + baseNonce.Length + indexBytes.Length;
+
+            int written = 0;
+            for (uint block = 0; written < destination.Length; block++)
+            {
+                BinaryPrimitives.WriteUInt32BigEndian(message.AsSpan(blockOffset, sizeof(uint)), block);
+                _ = Sha3_512Compat.HashData(message, digest);
+
+                int count = Math.Min(digest.Length, destination.Length - written);
+                digest[..count].CopyTo(destination.AsSpan(written));
+                written += count;
+            }
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(message);
+            CryptographicOperations.ZeroMemory(digest);
+        }
+    }
+
     private static void XCrypt(
         EncryptionSuiteParameters parameters,
         byte[] encryptionKey,
@@ -908,6 +1133,16 @@ public sealed partial class KalynaContainerService
         byte[] output,
         int length)
     {
+        // A suite is a cascade exactly when the catalogue gave it a layer list.
+        // Routing on that rather than on suite names means a new cascade is
+        // driven correctly the moment it is declared, instead of falling
+        // through to an exception that only shows up at run time.
+        if (parameters.Cascade is { } layout)
+        {
+            XCryptCascade(layout, encryptionKey, tweak, counter, input, output, length);
+            return;
+        }
+
         switch (parameters.Suite)
         {
             case EncryptionSuite.Kalyna512_512:
@@ -915,9 +1150,6 @@ public sealed partial class KalynaContainerService
                 break;
             case EncryptionSuite.Threefish1024:
                 NativeThreefish.XCryptCtr1024(encryptionKey, tweak, counter, input, output, length);
-                break;
-            case EncryptionSuite.ThreefishOverKalyna:
-                XCryptCascade(RequireCascade(parameters), encryptionKey, tweak, counter, input, output, length);
                 break;
             default:
                 throw new ArgumentOutOfRangeException(
@@ -933,6 +1165,27 @@ public sealed partial class KalynaContainerService
             ?? throw new CryptographicException("The cascade suite is missing its layer layout.");
     }
 
+    /// <summary>
+    /// Runs the plaintext through every layer of a cascade, innermost first.
+    /// </summary>
+    /// <remarks>
+    /// Each stage owns a slice of the key and a slice of the nonce, taken in
+    /// the order the stages are declared, and works in place on the buffer the
+    /// previous stage produced.
+    ///
+    /// There is no direction parameter, and that is not an oversight. Every
+    /// stage here is CTR, so each one XORs a keystream that depends on its key
+    /// and nonce alone and never on the data. The layers therefore commute:
+    /// the result is the plaintext XORed with all five keystreams, whichever
+    /// order they are applied in, and encryption and decryption are the same
+    /// walk. Introducing a direction flag would imply a dependency that does
+    /// not exist and would be one more thing to get backwards.
+    ///
+    /// The authenticated stage, if there is one, is not handled here. It sits
+    /// outside the CTR stack because it also produces a tag, and a function
+    /// that returned ciphertext for five layers and ciphertext-plus-tag for the
+    /// sixth would hide that difference from its callers.
+    /// </remarks>
     private static void XCryptCascade(
         CascadeLayout layout,
         byte[] encryptionKey,
@@ -947,56 +1200,136 @@ public sealed partial class KalynaContainerService
             throw new CryptographicException("The cascade received key or counter material of the wrong length.");
         }
 
-        byte[] innerKey = new byte[layout.InnerKeyBytes];
-        byte[] outerKey = new byte[layout.OuterKeyBytes];
-        byte[] innerCounter = new byte[layout.InnerNonceBytes];
-        byte[] outerCounter = new byte[layout.OuterNonceBytes];
-        using IDisposable innerKeyLock = SecureMemory.TryLock(innerKey);
-        using IDisposable outerKeyLock = SecureMemory.TryLock(outerKey);
-        using IDisposable innerCounterLock = SecureMemory.TryLock(innerCounter);
-        using IDisposable outerCounterLock = SecureMemory.TryLock(outerCounter);
-        try
-        {
-            encryptionKey.AsSpan(0, layout.InnerKeyBytes).CopyTo(innerKey);
-            encryptionKey.AsSpan(layout.InnerKeyBytes, layout.OuterKeyBytes).CopyTo(outerKey);
-            counter.AsSpan(0, layout.InnerNonceBytes).CopyTo(innerCounter);
-            counter.AsSpan(layout.InnerNonceBytes, layout.OuterNonceBytes).CopyTo(outerCounter);
+        IReadOnlyList<CascadeStage> stages = layout.Stages;
+        int ctrStageCount = layout.OutermostIsAead ? stages.Count - 1 : stages.Count;
 
-            NativeKalyna.XCryptCtr512(innerKey, innerCounter, input, output, length);
-            NativeThreefish.XCryptCtr1024(outerKey, tweak, outerCounter, output, output, length);
-        }
-        finally
+        // Where each stage's key and nonce begin. Computed once so a stage
+        // cannot be handed the neighbouring layer's material by an arithmetic
+        // slip at the call site.
+        int[] keyOffsets = new int[stages.Count];
+        int[] nonceOffsets = new int[stages.Count];
+        int keyCursor = 0;
+        int nonceCursor = 0;
+        for (int index = 0; index < stages.Count; index++)
         {
-            CryptographicOperations.ZeroMemory(innerKey);
-            CryptographicOperations.ZeroMemory(outerKey);
-            CryptographicOperations.ZeroMemory(innerCounter);
-            CryptographicOperations.ZeroMemory(outerCounter);
+            keyOffsets[index] = keyCursor;
+            nonceOffsets[index] = nonceCursor;
+            keyCursor += stages[index].KeyBytes;
+            nonceCursor += stages[index].NonceBytes;
+        }
+
+        if (!ReferenceEquals(input, output))
+        {
+            input.AsSpan(0, length).CopyTo(output);
+        }
+
+        for (int index = 0; index < ctrStageCount; index++)
+        {
+            CascadeStage stage = stages[index];
+
+            byte[] stageKey = new byte[stage.KeyBytes];
+            byte[] stageCounter = new byte[stage.NonceBytes];
+            using IDisposable stageKeyLock = SecureMemory.TryLock(stageKey);
+            using IDisposable stageCounterLock = SecureMemory.TryLock(stageCounter);
+            try
+            {
+                encryptionKey.AsSpan(keyOffsets[index], stage.KeyBytes).CopyTo(stageKey);
+                counter.AsSpan(nonceOffsets[index], stage.NonceBytes).CopyTo(stageCounter);
+                ApplyCtrStage(stage, stageKey, tweak, stageCounter, output, length);
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(stageKey);
+                CryptographicOperations.ZeroMemory(stageCounter);
+            }
         }
     }
 
+
     /// <summary>
-    /// Advances the suite's counter past <paramref name="length"/> bytes.
+    /// Associated data binding one chunk to its place in one archive.
     /// </summary>
     /// <remarks>
-    /// The cascade carries two counters in one buffer and they advance at
-    /// different rates, because a Kalyna block is half a Threefish block.
-    /// Advancing them together by a single block count would silently reuse
-    /// keystream on the very next chunk.
+    /// Poly1305 proves a chunk was not altered. On its own it does not prove
+    /// the chunk belongs where it was found: an attacker holding two archives,
+    /// or two positions in one archive, could move a chunk and every tag would
+    /// still verify. Binding the format version, the suite, the archive's own
+    /// identity, the chunk's index and its length into the tag is what closes
+    /// that, and it costs nothing because the AEAD authenticates associated
+    /// data it never has to store.
+    ///
+    /// The archive identity is the header nonce, which is unique per archive
+    /// and already authenticated by the container's own MACs.
     /// </remarks>
-    private static void AdvanceCounter(EncryptionSuiteParameters parameters, byte[] counter, int length)
+    private static byte[] BuildChunkAssociatedData(
+        EncryptionSuiteParameters parameters,
+        ReadOnlySpan<byte> archiveNonce,
+        long chunkIndex,
+        int length)
     {
-        if (parameters.Cascade is { } layout)
-        {
-            IncrementCounter(
-                counter.AsSpan(0, layout.InnerNonceBytes),
-                BlocksForLength(length, layout.InnerBlockBytes));
-            IncrementCounter(
-                counter.AsSpan(layout.InnerNonceBytes, layout.OuterNonceBytes),
-                BlocksForLength(length, layout.OuterBlockBytes));
-            return;
-        }
+        // The archive identity is a digest of the whole base nonce, not its
+        // first bytes: nonces range from 12 bytes for ChaCha20-Poly1305 alone to
+        // 536 for the two-round paranoia cascade, and slicing a fixed prefix
+        // both overruns the short ones and ignores most of the long ones.
+        const int identityBytes = 16;
+        Span<byte> identityDigest = stackalloc byte[Sha3_512Compat.HashSizeInBytes];
+        _ = Sha3_512Compat.HashData(archiveNonce, identityDigest);
 
-        IncrementCounter(counter, BlocksForLength(length, parameters.BlockBytes));
+        byte[] associated = new byte[4 + 4 + identityBytes + sizeof(long) + sizeof(int)];
+        BinaryPrimitives.WriteInt32BigEndian(associated.AsSpan(0), CurrentVersion);
+        BinaryPrimitives.WriteInt32BigEndian(associated.AsSpan(4), (int)parameters.Suite);
+        identityDigest[..identityBytes].CopyTo(associated.AsSpan(8));
+        BinaryPrimitives.WriteInt64BigEndian(associated.AsSpan(8 + identityBytes), chunkIndex);
+        BinaryPrimitives.WriteInt32BigEndian(associated.AsSpan(8 + identityBytes + sizeof(long)), length);
+        return associated;
+    }
+
+    /// <summary>
+    /// The slice of the derived key and of the chunk nonce that belong to the
+    /// authenticated outermost layer.
+    /// </summary>
+    private static (byte[] Key, byte[] Nonce) SplitAeadMaterial(
+        CascadeLayout layout,
+        byte[] encryptionKey,
+        byte[] counter)
+    {
+        CascadeStage stage = layout.Stages[^1];
+        int keyOffset = layout.TotalKeyBytes - stage.KeyBytes;
+        int nonceOffset = layout.TotalNonceBytes - stage.NonceBytes;
+        return (
+            encryptionKey.AsSpan(keyOffset, stage.KeyBytes).ToArray(),
+            counter.AsSpan(nonceOffset, stage.NonceBytes).ToArray());
+    }
+
+    private static void ApplyCtrStage(
+        CascadeStage stage,
+        byte[] key,
+        byte[] tweak,
+        byte[] counter,
+        byte[] buffer,
+        int length)
+    {
+        switch (stage.Cipher)
+        {
+            case CascadeCipher.Aes256:
+                NativeAes.XCryptCtr256(key, counter, buffer, buffer, length);
+                break;
+            case CascadeCipher.Mars448:
+                NativeMars.XCryptCtr448(key, counter, buffer, buffer, length);
+                break;
+            case CascadeCipher.Shacal2_512:
+                NativeShacal2.XCryptCtr512(key, counter, buffer, buffer, length);
+                break;
+            case CascadeCipher.Kalyna512_512:
+                NativeKalyna.XCryptCtr512(key, counter, buffer, buffer, length);
+                break;
+            case CascadeCipher.Threefish1024:
+                NativeThreefish.XCryptCtr1024(key, tweak, counter, buffer, buffer, length);
+                break;
+            default:
+                throw new CryptographicException(
+                    $"{stage.Cipher} is not a counter-mode stage and cannot be applied here.");
+        }
     }
 
     /// <summary>
@@ -1010,14 +1343,18 @@ public sealed partial class KalynaContainerService
     /// </remarks>
     private static byte[] CreateSuiteTweak(EncryptionSuite suite, byte[] nonce)
     {
-        if (suite == EncryptionSuite.Kalyna512_512)
-        {
-            return [];
-        }
-
-        if (suite is not (EncryptionSuite.Threefish1024 or EncryptionSuite.ThreefishOverKalyna))
+        // Driven by the catalogue rather than by a list of suite names. A suite
+        // needs a tweak exactly when it contains a Threefish layer, and that is
+        // already recorded as its tweak size; keeping a second list in step with
+        // the first is how the next suite gets forgotten here.
+        if (!EncryptionSuiteCatalog.IsKnown(suite))
         {
             throw new ArgumentOutOfRangeException(nameof(suite), suite, "Unknown encryption suite.");
+        }
+
+        if (EncryptionSuiteCatalog.Get(suite).TweakBytes == 0)
+        {
+            return [];
         }
 
         byte[] material = new byte[sizeof(int) + ThreefishTweakDomain.Length + sizeof(int) + nonce.Length];
@@ -1041,24 +1378,75 @@ public sealed partial class KalynaContainerService
         }
     }
 
+    /// <summary>
+    /// The reference libraries a suite needs that are not loadable.
+    /// </summary>
+    /// <remarks>
+    /// Derived from the suite's layer list rather than from its name. Every
+    /// time a suite was added, one of these gates was the thing that got
+    /// forgotten, and the failure does not appear where the mistake is — it
+    /// appears the first time somebody picks that suite. A suite is usable
+    /// exactly when every cipher it names can be loaded, and that question the
+    /// catalogue can already answer.
+    ///
+    /// threefish_ref is always required because it also provides Skein for the
+    /// second MAC, whichever ciphers the suite itself uses.
+    /// </remarks>
+    private static IReadOnlyList<string> MissingNativeLibraries(EncryptionSuite suite)
+    {
+        if (!EncryptionSuiteCatalog.IsKnown(suite))
+        {
+            return ["an unknown encryption suite"];
+        }
+
+        var missing = new List<string>();
+        if (!NativeThreefish.IsAvailable())
+        {
+            missing.Add("threefish_ref.dll");
+        }
+
+        EncryptionSuiteParameters parameters = EncryptionSuiteCatalog.Get(suite);
+        IEnumerable<CascadeCipher> ciphers = parameters.Cascade is { } layout
+            ? layout.Stages.Select(stage => stage.Cipher)
+            : [
+                suite == EncryptionSuite.Kalyna512_512
+                    ? CascadeCipher.Kalyna512_512
+                    : CascadeCipher.Threefish1024,
+            ];
+
+        foreach (CascadeCipher cipher in ciphers.Distinct())
+        {
+            (bool available, string library) = cipher switch
+            {
+                CascadeCipher.Aes256 => (NativeAes.IsAvailable(), "aes_ref.dll"),
+                CascadeCipher.Mars448 => (NativeMars.IsAvailable(), "mars_ref.dll"),
+                CascadeCipher.Shacal2_512 => (NativeShacal2.IsAvailable(), "shacal2_ref.dll"),
+                CascadeCipher.Kalyna512_512 => (NativeKalyna.IsAvailable(), "kalyna_ref.dll"),
+                CascadeCipher.Threefish1024 => (NativeThreefish.IsAvailable(), "threefish_ref.dll"),
+                CascadeCipher.ChaCha20Poly1305 => (NativeChaChaPoly.IsAvailable(), "chachapoly_ref.dll"),
+                _ => (false, "an unknown cipher"),
+            };
+            if (!available && !missing.Contains(library))
+            {
+                missing.Add(library);
+            }
+        }
+
+        return missing;
+    }
+
     private static void EnsureNativeAvailable(EncryptionSuite suite)
     {
-        // Every suite needs threefish_ref, because it also provides Skein for
-        // the second MAC. Kalyna is needed by its own suite and by the cascade.
-        bool available = suite switch
+        IReadOnlyList<string> missing = MissingNativeLibraries(suite);
+        if (missing.Count == 0)
         {
-            EncryptionSuite.Kalyna512_512 => NativeKalyna.IsAvailable() && NativeThreefish.IsAvailable(),
-            EncryptionSuite.Threefish1024 => NativeThreefish.IsAvailable(),
-            EncryptionSuite.ThreefishOverKalyna => NativeKalyna.IsAvailable() && NativeThreefish.IsAvailable(),
-            _ => false,
-        };
-        if (!available)
-        {
-            string library = suite == EncryptionSuite.Threefish1024
-                ? "threefish_ref.dll"
-                : "kalyna_ref.dll and the Skein provider threefish_ref.dll";
-            throw new PlatformNotSupportedException($"The signed and dual-manifest-verified reference library {library} is unavailable.");
+            return;
         }
+
+        throw new PlatformNotSupportedException(
+            "The signed and dual-manifest-verified reference library "
+            + string.Join(", ", missing)
+            + " is unavailable.");
     }
 
     private static Argon2Profile GetArgon2Profile(ContainerHeader header)
@@ -1095,14 +1483,14 @@ public sealed partial class KalynaContainerService
                 StringComparison.Ordinal)
             || header.Argon2OutputBits != parameters.DerivedKeyBytes * 8)
         {
-            throw new InvalidDataException("Container header contains invalid v8 suite parameters.");
+            throw new InvalidDataException("Container header contains invalid v9 suite parameters.");
         }
 
         ValidatePasswordMode(header);
         Argon2Profile profile = GetArgon2Profile(header);
         if (profile != Argon2Profile.Default)
         {
-            throw new InvalidDataException("Container header does not use the fixed v8 Argon2id profile.");
+            throw new InvalidDataException("Container header does not use the fixed v9 Argon2id profile.");
         }
 
         if (header.Hint is { Length: > 180 } || header.Hint?.Any(char.IsControl) == true)
@@ -1114,6 +1502,8 @@ public sealed partial class KalynaContainerService
         {
             throw new InvalidDataException("Container header contains no salt or nonce.");
         }
+
+        ValidateSecondRound(header, parameters);
 
         byte[]? salt = null;
         byte[]? nonce = null;
@@ -1150,6 +1540,82 @@ public sealed partial class KalynaContainerService
         }
     }
 
+    /// <summary>
+    /// Checks the second Argon2id round's salt and nonce against the suite.
+    /// </summary>
+    /// <remarks>
+    /// Whether a second round exists is a property of the suite, not something
+    /// the header may assert on its own: a header claiming a second round for a
+    /// single-round suite would derive a key nobody can reproduce, and a
+    /// two-round suite missing either value cannot be opened at all — not even
+    /// by the machine that wrote it, because neither the second salt nor the
+    /// second nonce is derivable from the first.
+    ///
+    /// Both are therefore required together and refused together, and the
+    /// second salt is rejected if it repeats the first: that can only mean the
+    /// writer used one round's material for both, which silently collapses the
+    /// second round back onto the first.
+    /// </remarks>
+    private static void ValidateSecondRound(ContainerHeader header, EncryptionSuiteParameters parameters)
+    {
+        bool expected = parameters.UsesTwoKdfRounds;
+        bool present = header.SecondSalt is not null || header.SecondNonce is not null;
+
+        if (!expected)
+        {
+            if (present || header.SecondSaltBits != 0 || header.SecondNonceBits != 0)
+            {
+                throw new InvalidDataException(
+                    "Container header carries second-round key material for a suite that derives one round.");
+            }
+
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(header.SecondSalt) || string.IsNullOrWhiteSpace(header.SecondNonce))
+        {
+            throw new InvalidDataException(
+                "Container header is missing the second Argon2id round's salt or nonce.");
+        }
+
+        if (header.SecondSaltBits != PasswordKeyService.SaltSize * 8
+            || header.SecondNonceBits != parameters.NonceBytes * 8)
+        {
+            throw new InvalidDataException("Container header contains invalid second-round parameter lengths.");
+        }
+
+        byte[]? secondSalt = null;
+        byte[]? secondNonce = null;
+        byte[]? firstSalt = null;
+        try
+        {
+            secondSalt = Convert.FromBase64String(header.SecondSalt);
+            secondNonce = Convert.FromBase64String(header.SecondNonce);
+            firstSalt = Convert.FromBase64String(header.Salt!);
+
+            if (secondSalt.Length != PasswordKeyService.SaltSize
+                || secondNonce.Length != parameters.NonceBytes)
+            {
+                throw new InvalidDataException("Container header contains invalid second-round lengths.");
+            }
+
+            if (CryptographicOperations.FixedTimeEquals(firstSalt, secondSalt))
+            {
+                throw new InvalidDataException("Container header reuses the first round's salt for the second.");
+            }
+        }
+        catch (FormatException ex)
+        {
+            throw new InvalidDataException("Container header contains invalid Base64 second-round parameters.", ex);
+        }
+        finally
+        {
+            ZeroIfNotNull(secondSalt);
+            ZeroIfNotNull(secondNonce);
+            ZeroIfNotNull(firstSalt);
+        }
+    }
+
     private static void ValidatePasswordMode(ContainerHeader header)
     {
         if (header.GeneratedPasswordFactorCount != 2
@@ -1157,7 +1623,7 @@ public sealed partial class KalynaContainerService
             || !string.Equals(header.PasswordMode, "UserPassword+GeneratedHex512x2", StringComparison.Ordinal)
             || !string.Equals(header.KdfInputMode, EncryptionSuiteCatalog.KdfInputMode, StringComparison.Ordinal))
         {
-            throw new InvalidDataException("Container header contains no valid v8 dual-factor KDF model.");
+            throw new InvalidDataException("Container header contains no valid v9 dual-factor KDF model.");
         }
     }
 
@@ -1267,7 +1733,22 @@ public sealed partial class KalynaContainerService
         string? PasswordMode,
         string? KdfInputMode,
         int GeneratedPasswordBits,
-        int GeneratedPasswordFactorCount = 0);
+        int GeneratedPasswordFactorCount = 0,
+
+        // The second Argon2id round, present only for suites that run one.
+        //
+        // Both values have to survive into the header or the archive cannot be
+        // opened by anybody, including the machine that wrote it: the second
+        // round's salt is not derivable from the first, and its nonce is not
+        // derivable from the first either. They are nullable rather than absent
+        // because the header is compared against its own canonical
+        // re-serialization — a field that disappeared for single-round suites
+        // would change the byte layout and the reader would reject containers
+        // this app had just written.
+        int SecondSaltBits = 0,
+        string? SecondSalt = null,
+        int SecondNonceBits = 0,
+        string? SecondNonce = null);
 
     [JsonSourceGenerationOptions(
         PropertyNameCaseInsensitive = false,

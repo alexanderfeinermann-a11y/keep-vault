@@ -177,9 +177,6 @@
                                               Margin="10,10,0,0"
                                               SelectedIndex="0"
                                               SelectionChanged="CipherSuiteBox_SelectionChanged">
-                                        <ComboBoxItem Content="Threefish 1024 over Kalyna 512/512 (cascade)" Tag="ThreefishOverKalyna" />
-                                        <ComboBoxItem Content="Threefish 1024" Tag="Threefish1024" />
-                                        <ComboBoxItem Content="Kalyna 512/512" Tag="Kalyna512_512" />
                                     </ComboBox>
                                     <TextBlock x:Name="Argon2ProfileText"
                                                Grid.Row="2"

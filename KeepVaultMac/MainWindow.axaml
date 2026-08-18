@@ -207,9 +207,6 @@
                     <CheckBox x:Name="EncryptBox" Grid.Column="3" Content="Archiv verschlüsseln" IsChecked="True" VerticalAlignment="Center" />
                     <TextBlock x:Name="CipherSuiteLabel" Grid.Row="1" Text="Verfahren" VerticalAlignment="Center" />
                     <ComboBox x:Name="CipherSuiteBox" Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="3" Margin="9,0,0,0" SelectedIndex="0" SelectionChanged="CipherSuiteBox_SelectionChanged">
-                      <ComboBoxItem Content="Threefish 1024 über Kalyna 512/512 (Kaskade)" Tag="ThreefishOverKalyna" />
-                      <ComboBoxItem Content="Threefish 1024" Tag="Threefish1024" />
-                      <ComboBoxItem Content="Kalyna 512/512" Tag="Kalyna512_512" />
                     </ComboBox>
                     <TextBlock x:Name="Argon2ProfileText"
                                Grid.Row="2" Grid.ColumnSpan="4"

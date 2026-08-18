@@ -26,23 +26,25 @@ public sealed class PasswordKeyService
     /// outer Threefish layer — plus the two MAC keys.
     /// </summary>
     public const int CascadeDerivedKeySize = 384;
+
+    /// <summary>
+    /// The paranoia cascade: 376 bytes of cipher key across six layers, plus the
+    /// two MAC keys.
+    /// </summary>
+    /// <remarks>
+    /// This is still derived in a single Argon2id round. The design calls for
+    /// two rounds with separate salts, and until that lands a container written
+    /// with this suite will not open once it does. The suite is therefore not
+    /// ready to be offered for real archives.
+    /// </remarks>
+    private const int ParanoiaDerivedKeySize = 568;
     public const int KeySize = KalynaDerivedKeySize;
 
     private const double EntropySafetyFactor = 0.72;
     private static readonly UTF8Encoding StrictUtf8 = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
-    private static readonly byte[] KalynaFactorADomain = "Kalyna-ZPAQ/v8/Kalyna-512-512/SHA3-512/User+Factor-A"u8.ToArray();
-    private static readonly byte[] KalynaFactorBDomain = "Kalyna-ZPAQ/v8/Kalyna-512-512/SHA3-512/User+Factor-B"u8.ToArray();
-    private static readonly byte[] ThreefishFactorADomain = "Kalyna-ZPAQ/v8/Threefish-1024/SHA3-512/User+Factor-A"u8.ToArray();
-    private static readonly byte[] ThreefishFactorBDomain = "Kalyna-ZPAQ/v8/Threefish-1024/SHA3-512/User+Factor-B"u8.ToArray();
 
-    // The cascade gets its own domain rather than reusing either layer's. Two
-    // containers built from the same password and factors but different suites
-    // must not share a derived key, or a weakness found in one suite would
-    // carry over to the other.
-    private static readonly byte[] CascadeFactorADomain =
-        "Kalyna-ZPAQ/v8/Threefish-1024-over-Kalyna-512-512/SHA3-512/User+Factor-A"u8.ToArray();
-    private static readonly byte[] CascadeFactorBDomain =
-        "Kalyna-ZPAQ/v8/Threefish-1024-over-Kalyna-512-512/SHA3-512/User+Factor-B"u8.ToArray();
+
+
     private static readonly string[] CommonPasswordTerms =
     [
         "PASSWORD", "PASSWORT", "LETMEIN", "WELCOME", "ADMIN", "CORRECTHORSEBATTERY",
@@ -263,8 +265,97 @@ public sealed class PasswordKeyService
         {
             throw new ArgumentOutOfRangeException(
                 nameof(profile),
-                $"Argon2id must use the fixed v8 profile: {Argon2Profile.DefaultMemoryKiB} KiB, "
+                $"Argon2id must use the fixed v9 profile: {Argon2Profile.DefaultMemoryKiB} KiB, "
                 + $"{Argon2Profile.DefaultIterations} iterations, parallelism {Argon2Profile.DefaultParallelism}.");
+        }
+    }
+
+    /// <summary>
+    /// Derives a two-round suite's key from two Argon2id passes over the same
+    /// password input with two different salts.
+    /// </summary>
+    /// <remarks>
+    /// The paranoia cascade needs 568 bytes and one Argon2id call is kept at
+    /// 384, so the material comes from two rounds laid end to end and truncated.
+    /// Both rounds use the same password and the same two factors — only the
+    /// salt differs, which is what makes the second round independent without
+    /// asking the user for more entropy.
+    ///
+    /// Truncating rather than sizing the second round to the remainder keeps
+    /// both calls identical in shape, so a reader cannot end up running a
+    /// differently parameterised second round than the writer did.
+    /// </remarks>
+    public async Task<DerivedKey> DeriveTwoRoundAsync(
+        string userPassword,
+        string firstGeneratedPassword,
+        string secondGeneratedPassword,
+        byte[] firstSalt,
+        byte[] secondSalt,
+        EncryptionSuite suite,
+        Argon2Profile profile,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(firstSalt);
+        ArgumentNullException.ThrowIfNull(secondSalt);
+        EncryptionSuiteParameters parameters = EncryptionSuiteCatalog.Get(suite);
+        if (!parameters.UsesTwoKdfRounds)
+        {
+            throw new ArgumentOutOfRangeException(nameof(suite), suite, "This suite derives a single Argon2id round.");
+        }
+
+        if (CryptographicOperations.FixedTimeEquals(firstSalt, secondSalt))
+        {
+            throw new CryptographicException("Both Argon2id rounds were given the same salt.");
+        }
+
+        string normalizedFirst = NormalizeGeneratedPassword(firstGeneratedPassword);
+        string normalizedSecond = NormalizeGeneratedPassword(secondGeneratedPassword);
+        ValidateUserPasswordForCreation(userPassword, normalizedFirst, normalizedSecond);
+
+        using LockedSensitiveBuffer argon2PasswordInput = CreateLockedArgon2PasswordInput(
+            userPassword,
+            normalizedFirst,
+            normalizedSecond,
+            suite);
+
+        using DerivedKey round1 = await DeriveFromPreHashAsync(
+            argon2PasswordInput.Bytes, firstSalt, CascadeDerivedKeySize, profile, cancellationToken)
+            .ConfigureAwait(false);
+        using DerivedKey round2 = await DeriveFromPreHashAsync(
+            argon2PasswordInput.Bytes, secondSalt, CascadeDerivedKeySize, round1.Profile, cancellationToken)
+            .ConfigureAwait(false);
+
+        int required = parameters.DerivedKeyBytes;
+        if (required > round1.Bytes.Length + round2.Bytes.Length)
+        {
+            throw new CryptographicException("Two Argon2id rounds do not cover this suite's key length.");
+        }
+
+        byte[] combined = new byte[required];
+        byte[] reportedSalt = (byte[])firstSalt.Clone();
+        IDisposable? combinedLock = null;
+        IDisposable? saltLock = null;
+        try
+        {
+            combinedLock = SecureMemory.TryLock(combined);
+            saltLock = SecureMemory.TryLock(reportedSalt);
+
+            int fromFirst = Math.Min(round1.Bytes.Length, required);
+            round1.Bytes[..fromFirst].CopyTo(combined);
+            if (required > fromFirst)
+            {
+                round2.Bytes[..(required - fromFirst)].CopyTo(combined.AsSpan(fromFirst));
+            }
+
+            return new DerivedKey(combined, reportedSalt, round1.Profile, combinedLock, saltLock);
+        }
+        catch
+        {
+            CryptographicOperations.ZeroMemory(combined);
+            CryptographicOperations.ZeroMemory(reportedSalt);
+            combinedLock?.Dispose();
+            saltLock?.Dispose();
+            throw;
         }
     }
 
@@ -433,7 +524,11 @@ public sealed class PasswordKeyService
             throw new ArgumentOutOfRangeException(nameof(argon2PasswordInput), $"Der Argon2id-Passworteingang muss {Argon2PasswordInputSize} Byte lang sein.");
         }
 
-        if (outputLength is not (KalynaDerivedKeySize or ThreefishDerivedKeySize or CascadeDerivedKeySize))
+        // Checked against what the catalogue actually publishes rather than
+        // against a written list. Every time a suite was added, this list was
+        // the thing that got forgotten, and a missing entry does not fail at
+        // the point of the mistake — it fails on the first archive.
+        if (!EncryptionSuiteCatalog.IsSupportedDerivedKeyLength(outputLength))
         {
             throw new ArgumentOutOfRangeException(nameof(outputLength), "Unsupported suite key length.");
         }
@@ -675,18 +770,26 @@ public sealed class PasswordKeyService
         return CommonPasswordTerms.Count(term => normalized.Contains(term, StringComparison.Ordinal));
     }
 
+    /// <summary>
+    /// The domain separator that binds a factor to one suite.
+    /// </summary>
+    /// <remarks>
+    /// Built from the suite's algorithm string instead of a hand-written table.
+    /// Two suites must never derive the same key from the same password and
+    /// factors, or a weakness found in one would carry straight over to the
+    /// other — and a table is exactly the kind of thing that gets forgotten
+    /// when a suite is added. Unlike a missing availability gate, that omission
+    /// would not crash: it would quietly produce a colliding key.
+    ///
+    /// The algorithm string already names the whole construction and is part of
+    /// the authenticated header, so it is both unique per suite and stable for
+    /// the life of the format.
+    /// </remarks>
     private static byte[] GetFactorDomain(EncryptionSuite suite, bool first)
     {
-        return (suite, first) switch
-        {
-            (EncryptionSuite.Kalyna512_512, true) => KalynaFactorADomain,
-            (EncryptionSuite.Kalyna512_512, false) => KalynaFactorBDomain,
-            (EncryptionSuite.Threefish1024, true) => ThreefishFactorADomain,
-            (EncryptionSuite.Threefish1024, false) => ThreefishFactorBDomain,
-            (EncryptionSuite.ThreefishOverKalyna, true) => CascadeFactorADomain,
-            (EncryptionSuite.ThreefishOverKalyna, false) => CascadeFactorBDomain,
-            _ => throw new ArgumentOutOfRangeException(nameof(suite), suite, "Unknown encryption suite."),
-        };
+        EncryptionSuiteParameters parameters = EncryptionSuiteCatalog.Get(suite);
+        string domain = $"Kalyna-ZPAQ/v9/{parameters.Algorithm}/SHA3-512/User+Factor-{(first ? "A" : "B")}";
+        return Encoding.ASCII.GetBytes(domain);
     }
 
     private static void WriteLengthAndBytes(byte[] destination, ref int offset, byte[] source)

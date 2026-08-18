@@ -205,32 +205,50 @@ public static partial class EntropyMixer
         throw new InvalidOperationException("No mouse-entropy pool could be selected.");
     }
 
+    /// <summary>
+    /// Bytes drawn from each pool.
+    /// </summary>
+    /// <remarks>
+    /// One digest per pool was enough while every suite's nonce fitted in three
+    /// of them. The six-layer cascade needs a wider one, so the draw is sized
+    /// from the catalogue: three pools have to cover the widest nonce any suite
+    /// asks for. Every pool is expanded by the same amount because the
+    /// expansion takes one size for all of them, and the extra bytes in the
+    /// password and salt pools are simply not used.
+    /// </remarks>
+    private static readonly int PoolDrawBytes = Math.Max(
+        Sha3_512Compat.HashSizeInBytes,
+        (EncryptionSuiteCatalog.MaxNonceBytes + 2) / 3);
+
     internal static GeneratedArchiveEntropy CreateArchiveEntropy()
     {
-        using LockedSensitiveBuffer mouseBytes = ExpandAndConsumeMousePools(
-            Sha3_512Compat.HashSizeInBytes,
-            SamplePurposes);
+        // One consumption of the pools yields both Argon2id rounds: the first
+        // expansion uses SHA3-512, the second SHA-512 over the same snapshot.
+        // That is what lets the paranoia suite have a genuinely independent
+        // second round without asking the user for another 512 samples per pool.
+        (LockedSensitiveBuffer firstMouse, LockedSensitiveBuffer secondMouse) =
+            ExpandAndConsumeMousePoolsDual(PoolDrawBytes, SamplePurposes);
         using LockedSensitiveBuffer passwordBytes = LockedSensitiveBuffer.Create(2 * Sha3_512Compat.HashSizeInBytes);
         LockedSensitiveBuffer? salt = null;
         LockedSensitiveBuffer? fullNonce = null;
+        LockedSensitiveBuffer? secondSalt = null;
+        LockedSensitiveBuffer? secondFullNonce = null;
         try
         {
             FillSystemRandom(passwordBytes.Bytes);
+            // Each password factor takes one digest from the front of its own
+            // pool's draw. They come from the first expansion only: the two
+            // factors must stay identical across both rounds, which is what
+            // makes the second round a second key rather than a second archive.
             XorInPlace(
-                passwordBytes.Bytes,
-                mouseBytes.Bytes.AsSpan(0, 2 * Sha3_512Compat.HashSizeInBytes));
+                passwordBytes.Bytes.AsSpan(0, Sha3_512Compat.HashSizeInBytes),
+                firstMouse.Bytes.AsSpan(0, Sha3_512Compat.HashSizeInBytes));
+            XorInPlace(
+                passwordBytes.Bytes.AsSpan(Sha3_512Compat.HashSizeInBytes, Sha3_512Compat.HashSizeInBytes),
+                firstMouse.Bytes.AsSpan(PoolDrawBytes, Sha3_512Compat.HashSizeInBytes));
 
-            salt = LockedSensitiveBuffer.Create(Sha3_512Compat.HashSizeInBytes);
-            FillSystemRandom(salt.Bytes);
-            XorInPlace(
-                salt.Bytes,
-                mouseBytes.Bytes.AsSpan(2 * Sha3_512Compat.HashSizeInBytes, Sha3_512Compat.HashSizeInBytes));
-
-            fullNonce = LockedSensitiveBuffer.Create(3 * Sha3_512Compat.HashSizeInBytes);
-            FillSystemRandom(fullNonce.Bytes);
-            XorInPlace(
-                fullNonce.Bytes,
-                mouseBytes.Bytes.AsSpan(3 * Sha3_512Compat.HashSizeInBytes, 3 * Sha3_512Compat.HashSizeInBytes));
+            (salt, fullNonce) = SplitPreparedSaltAndNonce(firstMouse);
+            (secondSalt, secondFullNonce) = SplitPreparedSaltAndNonce(secondMouse);
 
             string firstPassword = Convert.ToHexString(
                 passwordBytes.Bytes.AsSpan(0, Sha3_512Compat.HashSizeInBytes));
@@ -241,13 +259,181 @@ public static partial class EntropyMixer
                 throw new CryptographicException("The independently generated password factors unexpectedly match.");
             }
 
-            var result = new GeneratedArchiveEntropy(firstPassword, secondPassword, salt, fullNonce);
+            var result = new GeneratedArchiveEntropy(
+                firstPassword,
+                secondPassword,
+                salt,
+                fullNonce,
+                secondSalt,
+                secondFullNonce);
             salt = null;
             fullNonce = null;
+            secondSalt = null;
+            secondFullNonce = null;
             return result;
         }
         finally
         {
+            secondFullNonce?.Dispose();
+            secondSalt?.Dispose();
+            fullNonce?.Dispose();
+            salt?.Dispose();
+            secondMouse.Dispose();
+            firstMouse.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// Takes a full-width salt and nonce out of one expanded pool block.
+    /// </summary>
+    private static (LockedSensitiveBuffer Salt, LockedSensitiveBuffer Nonce) SplitPreparedSaltAndNonce(
+        LockedSensitiveBuffer mouseBytes)
+    {
+        LockedSensitiveBuffer? salt = null;
+        LockedSensitiveBuffer? nonce = null;
+        try
+        {
+            salt = LockedSensitiveBuffer.Create(Sha3_512Compat.HashSizeInBytes);
+            FillSystemRandom(salt.Bytes);
+            XorInPlace(
+                salt.Bytes,
+                mouseBytes.Bytes.AsSpan(2 * PoolDrawBytes, Sha3_512Compat.HashSizeInBytes));
+
+            nonce = LockedSensitiveBuffer.Create(EncryptionSuiteCatalog.MaxNonceBytes);
+            FillSystemRandom(nonce.Bytes);
+            XorInPlace(
+                nonce.Bytes,
+                mouseBytes.Bytes.AsSpan(3 * PoolDrawBytes, EncryptionSuiteCatalog.MaxNonceBytes));
+
+            (LockedSensitiveBuffer Salt, LockedSensitiveBuffer Nonce) result = (salt, nonce);
+            salt = null;
+            nonce = null;
+            return result;
+        }
+        finally
+        {
+            nonce?.Dispose();
+            salt?.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// Salt and nonce for both Argon2id rounds of a two-round suite.
+    /// </summary>
+    /// <remarks>
+    /// Only the paranoia cascade needs this. Every other suite runs one round
+    /// and keeps using <see cref="CreateEncryptionParameters"/>.
+    ///
+    /// Both rounds are drawn from a single pool consumption, because consuming
+    /// the pools twice would mean asking the user to collect the whole mouse
+    /// entropy a second time. The two rounds differ by the hash that expands
+    /// the shared snapshot — SHA3-512 for the first, SHA-512 for the second —
+    /// and each is XORed with its own independent draw from the system
+    /// generator, so neither salt nor either nonce set can be derived from the
+    /// other.
+    ///
+    /// Both salts and both nonce sets have to reach the container header. A v9
+    /// archive whose header carries only the first round cannot be decrypted by
+    /// anyone, including the machine that wrote it.
+    /// </remarks>
+    internal static TwoRoundEncryptionParameters CreateTwoRoundEncryptionParameters(EncryptionSuite suite)
+    {
+        if (!EncryptionSuiteCatalog.IsKnown(suite))
+        {
+            throw new ArgumentOutOfRangeException(nameof(suite), suite, "Unbekanntes Verschluesselungsverfahren.");
+        }
+
+        (LockedSensitiveBuffer firstMouse, LockedSensitiveBuffer secondMouse) = ExpandAndConsumeMousePoolsDual(
+            PoolDrawBytes,
+            [
+                EntropyPurpose.Salt,
+                EntropyPurpose.NonceFirst,
+                EntropyPurpose.NonceSecond,
+                EntropyPurpose.NonceThird,
+            ]);
+
+        LockedSensitiveBuffer? firstSalt = null;
+        LockedSensitiveBuffer? firstNonce = null;
+        LockedSensitiveBuffer? secondSalt = null;
+        LockedSensitiveBuffer? secondNonce = null;
+        try
+        {
+            (firstSalt, firstNonce) = SplitSaltAndNonce(firstMouse, suite);
+            (secondSalt, secondNonce) = SplitSaltAndNonce(secondMouse, suite);
+
+            // Two rounds that produced the same salt would mean the pools, the
+            // two hashes and two independent system draws had all coincided.
+            // That cannot happen by chance, so if it happens something is
+            // broken badly enough that no archive should be written.
+            if (CryptographicOperations.FixedTimeEquals(firstSalt.Bytes, secondSalt.Bytes))
+            {
+                throw new CryptographicException("Both Argon2id rounds produced the same salt.");
+            }
+
+            var result = new TwoRoundEncryptionParameters(firstSalt, firstNonce, secondSalt, secondNonce);
+            firstSalt = null;
+            firstNonce = null;
+            secondSalt = null;
+            secondNonce = null;
+            return result;
+        }
+        finally
+        {
+            secondNonce?.Dispose();
+            secondSalt?.Dispose();
+            firstNonce?.Dispose();
+            firstSalt?.Dispose();
+            secondMouse.Dispose();
+            firstMouse.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// Turns one expanded pool block into a salt and a nonce, each XORed with
+    /// its own draw from the system generator.
+    /// </summary>
+    private static (LockedSensitiveBuffer Salt, LockedSensitiveBuffer Nonce) SplitSaltAndNonce(
+        LockedSensitiveBuffer mouseBytes,
+        EncryptionSuite suite)
+    {
+        LockedSensitiveBuffer? salt = null;
+        LockedSensitiveBuffer? fullNonce = null;
+        LockedSensitiveBuffer? selectedNonce = null;
+        try
+        {
+            salt = LockedSensitiveBuffer.Create(Sha3_512Compat.HashSizeInBytes);
+            FillSystemRandom(salt.Bytes);
+            XorInPlace(salt.Bytes, mouseBytes.Bytes.AsSpan(0, Sha3_512Compat.HashSizeInBytes));
+
+            // Sized from the catalogue, not from three digests: the six-layer
+            // cascade needs 268 nonce bytes and the old fixed 192 would have
+            // silently starved it.
+            fullNonce = LockedSensitiveBuffer.Create(EncryptionSuiteCatalog.MaxNonceBytes);
+            FillSystemRandom(fullNonce.Bytes);
+            XorInPlace(
+                fullNonce.Bytes,
+                mouseBytes.Bytes.AsSpan(PoolDrawBytes, EncryptionSuiteCatalog.MaxNonceBytes));
+
+            int nonceBytes = EncryptionSuiteCatalog.Get(suite).NonceBytes;
+            if (nonceBytes == fullNonce.Bytes.Length)
+            {
+                selectedNonce = fullNonce;
+                fullNonce = null;
+            }
+            else
+            {
+                selectedNonce = LockedSensitiveBuffer.Create(nonceBytes);
+                fullNonce.Bytes.AsSpan(0, nonceBytes).CopyTo(selectedNonce.Bytes);
+            }
+
+            (LockedSensitiveBuffer Salt, LockedSensitiveBuffer Nonce) result = (salt, selectedNonce);
+            salt = null;
+            selectedNonce = null;
+            return result;
+        }
+        finally
+        {
+            selectedNonce?.Dispose();
             fullNonce?.Dispose();
             salt?.Dispose();
         }
@@ -310,7 +496,7 @@ public static partial class EntropyMixer
         }
     }
 
-    private static void XorInPlace(byte[] destination, ReadOnlySpan<byte> source)
+    private static void XorInPlace(Span<byte> destination, ReadOnlySpan<byte> source)
     {
         if (destination.Length != source.Length)
         {
@@ -323,10 +509,42 @@ public static partial class EntropyMixer
         }
     }
 
-    [SuppressMessage("Reliability", "CA2000:Dispose objects before losing scope", Justification = "The returned output transfers ownership to the caller; all failure paths dispose it, replacement-pool transfer is guarded, and loop buffers use compiler-generated finally blocks.")]
     private static LockedSensitiveBuffer ExpandAndConsumeMousePools(
         int byteCountPerPool,
         EntropyPurpose[] purposes)
+        => ExpandAndConsumeMousePoolsCore(byteCountPerPool, purposes, secondRound: false).First;
+
+    /// <summary>
+    /// Expands the pools twice in one pass: once through SHA3-512 and once
+    /// through SHA-512.
+    /// </summary>
+    /// <remarks>
+    /// Container v9's paranoia suite runs Argon2id twice, and the second round
+    /// needs its own salt and its own nonces. It cannot simply call the
+    /// single-round expansion again: that call *consumes* the pools — it swaps
+    /// in fresh buffers and resets every sample count to zero — so a second
+    /// call would demand another <see cref="RequiredMouseSamplesPerPurpose"/>
+    /// mouse samples per pool from a user who has already collected them once.
+    ///
+    /// Both rounds therefore come from the same snapshot, separated by the hash
+    /// that expands it. SHA3-512 and SHA-512 are different constructions —
+    /// Keccak against Merkle-Damgard — so neither output tells anything about
+    /// the other, and no second pool has to be filled.
+    /// </remarks>
+    private static (LockedSensitiveBuffer First, LockedSensitiveBuffer Second) ExpandAndConsumeMousePoolsDual(
+        int byteCountPerPool,
+        EntropyPurpose[] purposes)
+    {
+        (LockedSensitiveBuffer first, LockedSensitiveBuffer? second) =
+            ExpandAndConsumeMousePoolsCore(byteCountPerPool, purposes, secondRound: true);
+        return (first, second!);
+    }
+
+    [SuppressMessage("Reliability", "CA2000:Dispose objects before losing scope", Justification = "The returned outputs transfer ownership to the caller; all failure paths dispose them, replacement-pool transfer is guarded, and loop buffers use compiler-generated finally blocks.")]
+    private static (LockedSensitiveBuffer First, LockedSensitiveBuffer? Second) ExpandAndConsumeMousePoolsCore(
+        int byteCountPerPool,
+        EntropyPurpose[] purposes,
+        bool secondRound)
     {
         if (byteCountPerPool <= 0)
         {
@@ -356,6 +574,7 @@ public static partial class EntropyMixer
 
         int totalByteCount = checked(byteCountPerPool * purposes.Length);
         LockedSensitiveBuffer output = LockedSensitiveBuffer.Create(totalByteCount);
+        LockedSensitiveBuffer? secondOutput = secondRound ? LockedSensitiveBuffer.Create(totalByteCount) : null;
         var snapshots = new LockedSensitiveBuffer?[purposes.Length];
         var replacements = new LockedSensitiveBuffer?[PurposeCount];
         var oldPools = new LockedSensitiveBuffer?[PurposeCount];
@@ -446,13 +665,38 @@ public static partial class EntropyMixer
                     int count = Math.Min(block.Bytes.Length, byteCountPerPool - localOffset);
                     Buffer.BlockCopy(block.Bytes, 0, output.Bytes, poolOffset + localOffset, count);
                     localOffset += count;
+
+                    if (secondOutput is null)
+                    {
+                        continue;
+                    }
+
+                    // The same block input, expanded through the other hash.
+                    // SHA3-512 is a sponge and SHA-512 is Merkle-Damgard, so
+                    // knowing one output says nothing about the other, and the
+                    // second round gets independent material without a second
+                    // pool having to be collected.
+                    using LockedSensitiveBuffer secondBlock = LockedSensitiveBuffer.Create(Sha512Compat.HashSizeInBytes);
+                    int secondWritten = Sha512Compat.HashData(combined.Bytes, secondBlock.Bytes);
+                    if (secondWritten != Sha512Compat.HashSizeInBytes)
+                    {
+                        throw new CryptographicException("SHA-512 returned an invalid mouse-entropy expansion length.");
+                    }
+
+                    Buffer.BlockCopy(
+                        secondBlock.Bytes,
+                        0,
+                        secondOutput.Bytes,
+                        poolOffset + localOffset - count,
+                        count);
                 }
             }
 
-            return output;
+            return (output, secondOutput);
         }
         catch
         {
+            secondOutput?.Dispose();
             output.Dispose();
             throw;
         }
@@ -561,6 +805,47 @@ public readonly record struct EntropyPoolStatus(
     public bool IsBalanced => Maximum - Minimum <= 1;
 }
 
+/// <summary>
+/// Salt and nonce for each of the two Argon2id rounds of a two-round suite.
+/// </summary>
+/// <remarks>
+/// Written out as four separate values rather than two concatenated blobs. An
+/// off-by-one that handed round two round one's salt would still encrypt and
+/// still decrypt on the same build, and would only surface as an unreadable
+/// archive somewhere else — which, with no backward compatibility, is
+/// unrecoverable.
+/// </remarks>
+internal sealed class TwoRoundEncryptionParameters : IDisposable
+{
+    internal TwoRoundEncryptionParameters(
+        LockedSensitiveBuffer firstSalt,
+        LockedSensitiveBuffer firstNonce,
+        LockedSensitiveBuffer secondSalt,
+        LockedSensitiveBuffer secondNonce)
+    {
+        FirstSalt = firstSalt;
+        FirstNonce = firstNonce;
+        SecondSalt = secondSalt;
+        SecondNonce = secondNonce;
+    }
+
+    internal LockedSensitiveBuffer FirstSalt { get; }
+
+    internal LockedSensitiveBuffer FirstNonce { get; }
+
+    internal LockedSensitiveBuffer SecondSalt { get; }
+
+    internal LockedSensitiveBuffer SecondNonce { get; }
+
+    public void Dispose()
+    {
+        SecondNonce.Dispose();
+        SecondSalt.Dispose();
+        FirstNonce.Dispose();
+        FirstSalt.Dispose();
+    }
+}
+
 public enum EntropyPurpose
 {
     GeneratedPasswordFirst = 0,
@@ -576,26 +861,129 @@ internal sealed class GeneratedArchiveEntropy : IDisposable
     private readonly object _gate = new();
     private LockedSensitiveBuffer? _salt;
     private LockedSensitiveBuffer? _fullNonce;
+    private LockedSensitiveBuffer? _secondSalt;
+    private LockedSensitiveBuffer? _secondFullNonce;
     private string? _firstPassword;
     private string? _secondPassword;
 
+    /// <remarks>
+    /// Both rounds are prepared here, from one consumption of the pools, because
+    /// the suite is not known when the user generates the factors. A suite that
+    /// derives one round simply never asks for the second pair, and it is wiped
+    /// with the rest.
+    /// </remarks>
     internal GeneratedArchiveEntropy(
         string firstPassword,
         string secondPassword,
         LockedSensitiveBuffer salt,
-        LockedSensitiveBuffer fullNonce)
+        LockedSensitiveBuffer fullNonce,
+        LockedSensitiveBuffer secondSalt,
+        LockedSensitiveBuffer secondFullNonce)
     {
         _firstPassword = firstPassword ?? throw new ArgumentNullException(nameof(firstPassword));
         _secondPassword = secondPassword ?? throw new ArgumentNullException(nameof(secondPassword));
         _salt = salt ?? throw new ArgumentNullException(nameof(salt));
         _fullNonce = fullNonce ?? throw new ArgumentNullException(nameof(fullNonce));
-        // Three nonce parts: 64 bytes for the cascade's inner Kalyna layer and
-        // 128 for its outer Threefish layer. The single-cipher suites take the
-        // leading 64 or 128 bytes of the same material.
+        _secondSalt = secondSalt ?? throw new ArgumentNullException(nameof(secondSalt));
+        _secondFullNonce = secondFullNonce ?? throw new ArgumentNullException(nameof(secondFullNonce));
         if (_salt.Bytes.Length != Sha3_512Compat.HashSizeInBytes
-            || _fullNonce.Bytes.Length != 3 * Sha3_512Compat.HashSizeInBytes)
+            || _secondSalt.Bytes.Length != Sha3_512Compat.HashSizeInBytes
+            || _fullNonce.Bytes.Length != EncryptionSuiteCatalog.MaxNonceBytes
+            || _secondFullNonce.Bytes.Length != EncryptionSuiteCatalog.MaxNonceBytes)
         {
             throw new ArgumentException("Prepared archive entropy has an invalid length.");
+        }
+
+        if (CryptographicOperations.FixedTimeEquals(_salt.Bytes, _secondSalt.Bytes))
+        {
+            throw new CryptographicException("Both prepared Argon2id rounds carry the same salt.");
+        }
+    }
+
+    /// <summary>
+    /// Hands out both rounds' salt and nonce for a two-round suite.
+    /// </summary>
+    internal TwoRoundEncryptionParameters ConsumeTwoRoundEncryptionParameters(
+        EncryptionSuite suite,
+        string firstPassword,
+        string secondPassword)
+    {
+        ArgumentNullException.ThrowIfNull(firstPassword);
+        ArgumentNullException.ThrowIfNull(secondPassword);
+        EncryptionSuiteParameters parameters = EncryptionSuiteCatalog.Get(suite);
+        if (!parameters.UsesTwoKdfRounds)
+        {
+            throw new ArgumentOutOfRangeException(nameof(suite), suite, "This suite derives a single Argon2id round.");
+        }
+
+        LockedSensitiveBuffer salt;
+        LockedSensitiveBuffer fullNonce;
+        LockedSensitiveBuffer secondSalt;
+        LockedSensitiveBuffer secondFullNonce;
+        lock (_gate)
+        {
+            if (!string.Equals(_firstPassword, firstPassword, StringComparison.Ordinal)
+                || !string.Equals(_secondPassword, secondPassword, StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    "Prepared salt and nonce parameters do not belong to the supplied generated password factors.");
+            }
+
+            salt = _salt ?? throw new InvalidOperationException("Prepared salt and nonce parameters were already consumed.");
+            fullNonce = _fullNonce ?? throw new InvalidOperationException("Prepared salt and nonce parameters were already consumed.");
+            secondSalt = _secondSalt ?? throw new InvalidOperationException("Prepared salt and nonce parameters were already consumed.");
+            secondFullNonce = _secondFullNonce ?? throw new InvalidOperationException("Prepared salt and nonce parameters were already consumed.");
+            _salt = null;
+            _fullNonce = null;
+            _secondSalt = null;
+            _secondFullNonce = null;
+        }
+
+        LockedSensitiveBuffer? firstNonce = null;
+        LockedSensitiveBuffer? secondNonce = null;
+        try
+        {
+            firstNonce = TakeNonce(fullNonce, parameters.NonceBytes);
+            secondNonce = TakeNonce(secondFullNonce, parameters.NonceBytes);
+            var result = new TwoRoundEncryptionParameters(salt, firstNonce, secondSalt, secondNonce);
+            firstNonce = null;
+            secondNonce = null;
+            return result;
+        }
+        catch
+        {
+            firstNonce?.Dispose();
+            secondNonce?.Dispose();
+            secondFullNonce.Dispose();
+            secondSalt.Dispose();
+            fullNonce.Dispose();
+            salt.Dispose();
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Takes a suite's nonce off the front of the prepared block, disposing the
+    /// block when it is wider than the suite needs.
+    /// </summary>
+    private static LockedSensitiveBuffer TakeNonce(LockedSensitiveBuffer fullNonce, int nonceBytes)
+    {
+        if (nonceBytes == fullNonce.Bytes.Length)
+        {
+            return fullNonce;
+        }
+
+        LockedSensitiveBuffer selected = LockedSensitiveBuffer.Create(nonceBytes);
+        try
+        {
+            fullNonce.Bytes.AsSpan(0, nonceBytes).CopyTo(selected.Bytes);
+            fullNonce.Dispose();
+            return selected;
+        }
+        catch
+        {
+            selected.Dispose();
+            throw;
         }
     }
 
@@ -627,7 +1015,8 @@ internal sealed class GeneratedArchiveEntropy : IDisposable
         {
             lock (_gate)
             {
-                return _salt is not null && _fullNonce is not null;
+                return _salt is not null && _fullNonce is not null
+                    && _secondSalt is not null && _secondFullNonce is not null;
             }
         }
     }
@@ -660,6 +1049,13 @@ internal sealed class GeneratedArchiveEntropy : IDisposable
             fullNonce = _fullNonce ?? throw new InvalidOperationException("Prepared salt and nonce parameters were already consumed.");
             _salt = null;
             _fullNonce = null;
+
+            // A one-round suite never asks for the prepared second round, so it
+            // is wiped here rather than left sitting in locked memory.
+            _secondSalt?.Dispose();
+            _secondFullNonce?.Dispose();
+            _secondSalt = null;
+            _secondFullNonce = null;
         }
 
         int nonceBytes = EncryptionSuiteCatalog.Get(suite).NonceBytes;
@@ -689,16 +1085,24 @@ internal sealed class GeneratedArchiveEntropy : IDisposable
     {
         LockedSensitiveBuffer? salt;
         LockedSensitiveBuffer? fullNonce;
+        LockedSensitiveBuffer? secondSalt;
+        LockedSensitiveBuffer? secondFullNonce;
         lock (_gate)
         {
             salt = _salt;
             fullNonce = _fullNonce;
+            secondSalt = _secondSalt;
+            secondFullNonce = _secondFullNonce;
             _salt = null;
             _fullNonce = null;
+            _secondSalt = null;
+            _secondFullNonce = null;
             _firstPassword = null;
             _secondPassword = null;
         }
 
+        secondFullNonce?.Dispose();
+        secondSalt?.Dispose();
         fullNonce?.Dispose();
         salt?.Dispose();
     }

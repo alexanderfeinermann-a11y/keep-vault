@@ -543,13 +543,17 @@ public enum SignatureState
 internal static class NativeToolIntegrity
 {
     internal static IReadOnlyList<string> RequiredLogicalToolNames { get; } =
-        new[] { "zpaq.exe", "kalyna_ref.dll", "threefish_ref.dll", "argon2_ref.dll", "argon2.exe" };
+        new[] { "zpaq.exe", "kalyna_ref.dll", "threefish_ref.dll", "mars_ref.dll", "shacal2_ref.dll", "aes_ref.dll", "chachapoly_ref.dll", "argon2_ref.dll", "argon2.exe" };
 
     private static readonly IReadOnlyDictionary<string, string> MacNames = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
     {
         ["zpaq.exe"] = "zpaq",
         ["kalyna_ref.dll"] = "libkalyna_ref.dylib",
         ["threefish_ref.dll"] = "libthreefish_ref.dylib",
+        ["mars_ref.dll"] = "libmars_ref.dylib",
+        ["shacal2_ref.dll"] = "libshacal2_ref.dylib",
+        ["aes_ref.dll"] = "libaes_ref.dylib",
+        ["chachapoly_ref.dll"] = "libchachapoly_ref.dylib",
         ["argon2_ref.dll"] = "libargon2_ref.dylib",
         ["argon2.exe"] = "argon2",
     };

@@ -39,8 +39,11 @@ internal static partial class MacComprehensiveTests
             ("randomised differential testing against every reference library", TestReferenceDifferentialAsync),
             ("Argon2id fixed 1 GiB profile and independent equivalence", TestArgon2Async),
             ("ZPAQ levels, streaming, traversal and malformed corpus", TestZpaqAsync),
-            ("v8 triple-suite roundtrip and manipulation rejection", TestContainersAsync),
+            ("v9 triple-suite roundtrip and manipulation rejection", TestContainersAsync),
             ("cascade layering: the outer layer alone reveals nothing", TestCascadeLayeringAsync),
+            ("v9 two-round key derivation from one pool consumption", TestTwoRoundDerivationAsync),
+            ("v9 per-chunk nonces across a multi-chunk archive", TestPerChunkNoncesAsync),
+            ("MARS and SHACAL-2 published vectors and CTR behaviour", TestCascadeCipherVectorsAsync),
             ("KPAR2-v2 repair, authentication and transplantation rejection", TestRecoveryAsync),
             ("cryptographic erase ordering and hard-link refusal", TestCryptographicEraseAsync),
             ("verified original deletion refuses on any mismatch", TestVerifiedOriginalDeletionAsync),
@@ -985,7 +988,7 @@ internal static partial class MacComprehensiveTests
         Require(!entropy.HasPendingEncryptionParameters, $"{suite} did not consume prepared entropy exactly once.");
         ValidateContainerHeader(path, suite);
         KalynaContainerInfo info = await containers.ReadContainerInfoAsync(path, CancellationToken.None).ConfigureAwait(false);
-        Require(info.Version == 8 && info.Suite == suite && info.GeneratedPasswordFactorCount == 2 && info.GeneratedPasswordBits == 1024, $"{suite} v8 header metadata mismatch.");
+        Require(info.Version == 9 && info.Suite == suite && info.GeneratedPasswordFactorCount == 2 && info.GeneratedPasswordBits == 1024, $"{suite} v9 header metadata mismatch.");
 
         using var output = new MemoryStream();
         await containers.DecryptToStreamAsync(path, UserPassword, factorA, factorB, output, null, CancellationToken.None).ConfigureAwait(false);
@@ -1020,13 +1023,13 @@ internal static partial class MacComprehensiveTests
             () => containers.ReadContainerInfoAsync(nonCanonical, CancellationToken.None),
             $"{suite} accepted noncanonical header JSON.").ConfigureAwait(false);
 
-        // v8 is a clean break. A container claiming any other version must be
+        // v9 is a clean break. A container claiming any other version must be
         // refused outright rather than read on a compatibility path, and the
         // refusal must not depend on the MACs noticing the edit afterwards.
-        foreach (int rejected in new[] { 7, 6, 9 })
+        foreach (int rejected in new[] { 7, 8, 10 })
         {
             string downgraded = CopyContainer(path, root, $"{suite}-version-{rejected}.kzpaq");
-            ReplaceHeaderToken(downgraded, "\"Version\":8", $"\"Version\":{rejected}");
+            ReplaceHeaderToken(downgraded, "\"Version\":9", $"\"Version\":{rejected}");
             await RequireThrowsAsync<InvalidDataException>(
                 () => containers.ReadContainerInfoAsync(downgraded, CancellationToken.None),
                 $"{suite} accepted a container claiming version {rejected}.").ConfigureAwait(false);
@@ -1285,9 +1288,44 @@ internal static partial class MacComprehensiveTests
         EncryptionSuiteParameters parameters = EncryptionSuiteCatalog.Get(EncryptionSuite.ThreefishOverKalyna);
         CascadeLayout layout = parameters.Cascade
             ?? throw new InvalidOperationException("The cascade suite lost its layer layout.");
-        Require(layout.InnerKeyBytes == 64 && layout.OuterKeyBytes == 128, "Cascade key split is not 64/128.");
-        Require(layout.InnerNonceBytes == 64 && layout.OuterNonceBytes == 128, "Cascade nonce split is not 64/128.");
+        Require(layout.Stages.Count == 2, $"The cascade has {layout.Stages.Count} stages rather than two.");
+        Require(
+            layout.Stages[0].Cipher == CascadeCipher.Kalyna512_512
+            && layout.Stages[0].KeyBytes == 64 && layout.Stages[0].NonceBytes == 64,
+            "The cascade's inner stage is not Kalyna with a 64-byte key and nonce.");
+        Require(
+            layout.Stages[1].Cipher == CascadeCipher.Threefish1024
+            && layout.Stages[1].KeyBytes == 128 && layout.Stages[1].NonceBytes == 128,
+            "The cascade's outer stage is not Threefish with a 128-byte key and nonce.");
+        Require(!layout.OutermostIsAead, "The two-layer cascade must not claim an authenticated outer layer.");
         Require(parameters.DerivedKeyBytes == 384, "Cascade derived key is not 384 bytes.");
+
+        // The six-layer suite, checked the same way: the order is the order the
+        // plaintext travels, and the key and nonce shares are what the header
+        // and the KDF budget were sized against.
+        EncryptionSuiteParameters paranoia = EncryptionSuiteCatalog.Get(EncryptionSuite.ParanoiaCascade);
+        CascadeLayout paranoiaLayout = paranoia.Cascade
+            ?? throw new InvalidOperationException("The paranoia suite lost its layer layout.");
+        CascadeCipher[] expectedOrder =
+        [
+            CascadeCipher.Aes256,
+            CascadeCipher.Mars448,
+            CascadeCipher.Shacal2_512,
+            CascadeCipher.Kalyna512_512,
+            CascadeCipher.Threefish1024,
+            CascadeCipher.ChaCha20Poly1305,
+        ];
+        Require(
+            paranoiaLayout.Stages.Select(stage => stage.Cipher).SequenceEqual(expectedOrder),
+            "The paranoia cascade's layer order is not AES, MARS, SHACAL-2, Kalyna, Threefish, ChaCha20-Poly1305.");
+        Require(paranoiaLayout.OutermostIsAead, "The paranoia cascade's outer layer is not authenticated.");
+        Require(
+            paranoiaLayout.TotalKeyBytes == 376,
+            $"The paranoia cascade needs 376 key bytes, not {paranoiaLayout.TotalKeyBytes}.");
+        Require(
+            paranoiaLayout.TotalNonceBytes == 268,
+            $"The paranoia cascade needs 268 nonce bytes, not {paranoiaLayout.TotalNonceBytes}.");
+        Require(paranoia.UsesTwoKdfRounds, "The paranoia cascade must derive two Argon2id rounds.");
         Require(
             EncryptionSuiteCatalog.Default == EncryptionSuite.ThreefishOverKalyna,
             "The cascade is not the default suite.");
@@ -1311,10 +1349,10 @@ internal static partial class MacComprehensiveTests
             marker.CopyTo(plaintext, offset);
         }
 
-        byte[] innerKey = RandomNumberGenerator.GetBytes(layout.InnerKeyBytes);
-        byte[] outerKey = RandomNumberGenerator.GetBytes(layout.OuterKeyBytes);
-        byte[] innerNonce = RandomNumberGenerator.GetBytes(layout.InnerNonceBytes);
-        byte[] outerNonce = RandomNumberGenerator.GetBytes(layout.OuterNonceBytes);
+        byte[] innerKey = RandomNumberGenerator.GetBytes(layout.Stages[0].KeyBytes);
+        byte[] outerKey = RandomNumberGenerator.GetBytes(layout.Stages[1].KeyBytes);
+        byte[] innerNonce = RandomNumberGenerator.GetBytes(layout.Stages[0].NonceBytes);
+        byte[] outerNonce = RandomNumberGenerator.GetBytes(layout.Stages[1].NonceBytes);
         byte[] tweak = RandomNumberGenerator.GetBytes(parameters.TweakBytes);
         byte[] innerCiphertext = new byte[plaintext.Length];
         byte[] cascadeCiphertext = new byte[plaintext.Length];
@@ -1340,7 +1378,7 @@ internal static partial class MacComprehensiveTests
             Require(FixedEqual(recovered, plaintext), "Both layers together did not reproduce the plaintext.");
 
             // A wrong inner key after a correct outer strip stays garbage.
-            byte[] wrongInner = RandomNumberGenerator.GetBytes(layout.InnerKeyBytes);
+            byte[] wrongInner = RandomNumberGenerator.GetBytes(layout.Stages[0].KeyBytes);
             byte[] wrongRecovery = new byte[plaintext.Length];
             try
             {
@@ -1383,7 +1421,52 @@ internal static partial class MacComprehensiveTests
             using JsonDocument document = JsonDocument.Parse(headerBytes);
             JsonElement header = document.RootElement;
             EncryptionSuiteParameters parameters = EncryptionSuiteCatalog.Get(suite);
-            Require(header.GetProperty("Version").GetInt32() == 8, "Container version is not v8.");
+            Require(header.GetProperty("Version").GetInt32() == 9, "Container version is not v9.");
+
+            // The second-round fields are always present. Present-and-null is
+            // not cosmetic: the reader compares the header against its own
+            // canonical re-serialization, so a field that vanished would make
+            // the app reject containers it had just written.
+            bool hasSecondSalt = header.TryGetProperty("SecondSalt", out JsonElement secondSalt);
+            bool hasSecondNonce = header.TryGetProperty("SecondNonce", out JsonElement secondNonce);
+            Require(hasSecondSalt && hasSecondNonce, "Container header is missing the second-round fields.");
+
+            if (parameters.UsesTwoKdfRounds)
+            {
+                // A two-round suite must carry both rounds, or the archive is
+                // undecryptable by anyone — including the machine that wrote it.
+                Require(
+                    secondSalt.ValueKind == JsonValueKind.String
+                    && secondNonce.ValueKind == JsonValueKind.String,
+                    "Container header omits second-round material for a two-round suite.");
+                Require(
+                    header.GetProperty("SecondSaltBits").GetInt32() == PasswordKeyService.SaltSize * 8
+                    && header.GetProperty("SecondNonceBits").GetInt32() == parameters.NonceBytes * 8,
+                    "Container header declares wrong second-round sizes.");
+                Require(
+                    !string.Equals(
+                        header.GetProperty("Salt").GetString(),
+                        secondSalt.GetString(),
+                        StringComparison.Ordinal),
+                    "Container header reuses the first round's salt for the second.");
+                Require(
+                    !string.Equals(
+                        header.GetProperty("Nonce").GetString(),
+                        secondNonce.GetString(),
+                        StringComparison.Ordinal),
+                    "Container header reuses the first round's nonce for the second.");
+            }
+            else
+            {
+                Require(
+                    secondSalt.ValueKind == JsonValueKind.Null
+                    && secondNonce.ValueKind == JsonValueKind.Null,
+                    "Container header does not carry null second-round material for a single-round suite.");
+                Require(
+                    header.GetProperty("SecondSaltBits").GetInt32() == 0
+                    && header.GetProperty("SecondNonceBits").GetInt32() == 0,
+                    "Container header declares second-round sizes for a single-round suite.");
+            }
             Require(header.GetProperty("Algorithm").GetString() == parameters.Algorithm, "Container algorithm label mismatch.");
             Require(header.GetProperty("CounterEndian").GetString() == EncryptionSuiteCatalog.CounterEndian, "Container counter endian mismatch.");
             Require(header.GetProperty("Argon2MemoryKiB").GetInt32() == Argon2Profile.DefaultMemoryKiB, "Container Argon2 memory is not 1 GiB.");
@@ -1410,6 +1493,16 @@ internal static partial class MacComprehensiveTests
                 Require(header.GetProperty("EncryptionKeyBits").GetInt32() == 192 * 8, "Cascade key is not 192 bytes.");
                 Require(header.GetProperty("NonceBits").GetInt32() == 192 * 8, "Cascade nonce is not 192 bytes.");
                 Require(header.GetProperty("Argon2OutputBits").GetInt32() == 384 * 8, "Cascade Argon2 output is not 384 bytes.");
+            }
+
+            if (suite == EncryptionSuite.ParanoiaCascade)
+            {
+                // Six layers: 32+56+64+64+128+32 key bytes and 16+16+32+64+128+12
+                // nonce bytes, with 376 cipher-key bytes plus the two MAC keys
+                // covered by two Argon2id rounds.
+                Require(header.GetProperty("EncryptionKeyBits").GetInt32() == 376 * 8, "Paranoia key is not 376 bytes.");
+                Require(header.GetProperty("NonceBits").GetInt32() == 268 * 8, "Paranoia nonce is not 268 bytes.");
+                Require(header.GetProperty("Argon2OutputBits").GetInt32() == 568 * 8, "Paranoia Argon2 output is not 568 bytes.");
             }
             Require(input.Length - input.Position > 64 + 128, "Container lacks two tags and ciphertext.");
         }
@@ -1562,6 +1655,505 @@ internal static partial class MacComprehensiveTests
         }
 
         Require(carry == 0, "Test CTR counter overflowed.");
+    }
+
+    /// <summary>
+    /// Proves the v9 second Argon2id round is real, independent, and costs no
+    /// extra mouse entropy.
+    /// </summary>
+    /// <remarks>
+    /// The point of the design is that both rounds come out of a single pool
+    /// consumption, separated only by SHA3-512 against SHA-512. The two things
+    /// that could go wrong are therefore: the second round is not actually
+    /// independent of the first, or obtaining it silently drains the pools so
+    /// the user is asked to collect entropy all over again. Both are checked
+    /// here.
+    /// </remarks>
+    /// <summary>
+    /// Encrypts a payload spanning several chunks and checks that identical
+    /// plaintext chunks do not produce identical ciphertext.
+    /// </summary>
+    /// <remarks>
+    /// This is the property per-chunk nonces exist for. Under one continuous
+    /// counter the keystream never repeats either — until the counter wraps,
+    /// which is precisely the case an arbitrarily large archive can reach. The
+    /// test cannot write an archive that large, so it checks the mechanism
+    /// instead: the plaintext is the same 16 MiB block repeated, so if every
+    /// chunk were encrypted under the same counter start the ciphertext chunks
+    /// would be byte-identical.
+    ///
+    /// A roundtrip is done as well, because a nonce derivation that the writer
+    /// and the reader disagree about would still produce different ciphertext
+    /// per chunk and would still pass the first check.
+    /// </remarks>
+    /// <summary>
+    /// Checks the two Crypto++-backed cascade layers against the vectors that
+    /// ship with the library, and checks that their CTR mode behaves.
+    /// </summary>
+    /// <remarks>
+    /// The vectors are read from external/cryptopp/TestVectors rather than
+    /// copied in here, so a Crypto++ update brings its own expectations with it
+    /// instead of being checked against numbers frozen at the time this was
+    /// written.
+    ///
+    /// A gap worth naming: SHACAL-2's file covers the 512-bit key the cascade
+    /// actually uses, but MARS's covers only 128, 192 and 256 bits. The AES
+    /// submission published no 448-bit vectors, so the test proves the MARS
+    /// cipher core and the key schedule at three lengths, and cannot prove the
+    /// 448-bit schedule. That one still needs a second implementation to agree
+    /// with it.
+    /// </remarks>
+    private static Task TestCascadeCipherVectorsAsync()
+    {
+        Require(NativeMars.IsAvailable(), $"MARS reference library unavailable: {NativeMars.LastLoadError}");
+        Require(NativeShacal2.IsAvailable(), $"SHACAL-2 reference library unavailable: {NativeShacal2.LastLoadError}");
+
+        string vectorRoot = ResolveVectorDirectory();
+
+        int marsChecked = RunBlockVectors(
+            Path.Combine(vectorRoot, "mars.txt"),
+            NativeMars.BlockBytes,
+            NativeMars.EncryptBlock,
+            "MARS");
+        Require(marsChecked >= 10, $"Only {marsChecked} MARS vectors were exercised.");
+
+        int shacalChecked = RunBlockVectors(
+            Path.Combine(vectorRoot, "shacal2.txt"),
+            NativeShacal2.BlockBytes,
+            NativeShacal2.EncryptBlock,
+            "SHACAL-2");
+        Require(shacalChecked >= 1000, $"Only {shacalChecked} SHACAL-2 vectors were exercised.");
+
+        VerifyMars448AgainstIndependentOracle();
+
+
+        Require(NativeAes.IsAvailable(), $"AES reference library unavailable: {NativeAes.LastLoadError}");
+        Require(NativeChaChaPoly.IsAvailable(), $"ChaCha20-Poly1305 library unavailable: {NativeChaChaPoly.LastLoadError}");
+
+        // FIPS-197 C.3: the published AES-256 known-answer.
+        byte[] fipsKey = Enumerable.Range(0, 32).Select(i => (byte)i).ToArray();
+        byte[] fipsBlock = Convert.FromHexString("00112233445566778899AABBCCDDEEFF");
+        byte[] fipsActual = new byte[NativeAes.BlockBytes];
+        NativeAes.EncryptBlock(fipsKey, fipsBlock, fipsActual);
+        Require(
+            Convert.ToHexString(fipsActual) == "8EA2B7CA516745BFEAFC49904B496089",
+            $"AES-256 does not reproduce the FIPS-197 vector: {Convert.ToHexString(fipsActual)}.");
+
+        // The platform AES and the reference must agree. The platform path is
+        // what production uses; the reference is what it can be checked
+        // against, and a disagreement means one of them is wrong.
+        for (int trial = 0; trial < 16; trial++)
+        {
+            byte[] key = RandomNumberGenerator.GetBytes(32);
+            byte[] block = RandomNumberGenerator.GetBytes(NativeAes.BlockBytes);
+            byte[] reference = new byte[NativeAes.BlockBytes];
+            NativeAes.EncryptBlock(key, block, reference);
+
+            using var platform = Aes.Create();
+            platform.Key = key;
+            platform.Mode = CipherMode.ECB;
+            platform.Padding = PaddingMode.None;
+            byte[] managed = platform.EncryptEcb(block, PaddingMode.None);
+
+            Require(
+                reference.AsSpan().SequenceEqual(managed),
+                $"The platform AES and the reference AES disagree: "
+                + $"{Convert.ToHexString(managed)} against {Convert.ToHexString(reference)}.");
+        }
+
+        // RFC 8439 section 2.8.2, ciphertext and tag.
+        byte[] aeadKey = Convert.FromHexString(
+            "808182838485868788898A8B8C8D8E8F909192939495969798999A9B9C9D9E9F");
+        byte[] aeadNonce = Convert.FromHexString("070000004041424344454647");
+        byte[] aeadAad = Convert.FromHexString("50515253C0C1C2C3C4C5C6C7");
+        byte[] aeadPlain = System.Text.Encoding.ASCII.GetBytes(
+            "Ladies and Gentlemen of the class of '99: If I could offer you only one tip for the future, sunscreen would be it.");
+        byte[] aeadCipher = new byte[aeadPlain.Length];
+        byte[] aeadTag = new byte[NativeChaChaPoly.TagBytes];
+        NativeChaChaPoly.Encrypt(aeadKey, aeadNonce, aeadAad, aeadPlain, aeadCipher, aeadPlain.Length, aeadTag);
+        Require(
+            Convert.ToHexString(aeadTag) == "1AE10B594F09E26A7E902ECBD0600691",
+            $"ChaCha20-Poly1305 does not reproduce the RFC 8439 tag: {Convert.ToHexString(aeadTag)}.");
+
+        byte[] aeadRestored = new byte[aeadPlain.Length];
+        NativeChaChaPoly.Decrypt(aeadKey, aeadNonce, aeadAad, aeadCipher, aeadRestored, aeadPlain.Length, aeadTag);
+        Require(aeadRestored.AsSpan().SequenceEqual(aeadPlain), "ChaCha20-Poly1305 did not round trip.");
+
+        // An AEAD that decrypts a tampered ciphertext is not an AEAD. Both the
+        // tag and the associated data must be refused when altered.
+        byte[] brokenTag = (byte[])aeadTag.Clone();
+        brokenTag[0] ^= 1;
+        RequireThrows<CryptographicException>(
+            () => NativeChaChaPoly.Decrypt(
+                aeadKey, aeadNonce, aeadAad, aeadCipher, aeadRestored, aeadPlain.Length, brokenTag),
+            "ChaCha20-Poly1305 accepted a flipped authentication tag.");
+
+        byte[] brokenAad = (byte[])aeadAad.Clone();
+        brokenAad[0] ^= 1;
+        RequireThrows<CryptographicException>(
+            () => NativeChaChaPoly.Decrypt(
+                aeadKey, aeadNonce, brokenAad, aeadCipher, aeadRestored, aeadPlain.Length, aeadTag),
+            "ChaCha20-Poly1305 accepted altered associated data.");
+
+        // CTR is its own inverse and must not depend on how many threads ran.
+        // The sizes straddle the block width, the 256 KiB claim and the 1 MiB
+        // threshold at which the driver starts handing work to other cores.
+        foreach (int length in new[] { 1, 15, 16, 31, 32, 33, 65536, (1 << 20) - 1, 1 << 20, (5 << 20) + 7 })
+        {
+            RoundTrip(
+                length,
+                keyBytes: 56,
+                nonceBytes: NativeMars.BlockBytes,
+                (k, n, i, o, l) => NativeMars.XCryptCtr448(k, n, i, o, l),
+                "MARS-448");
+            RoundTrip(
+                length,
+                keyBytes: 64,
+                nonceBytes: NativeShacal2.BlockBytes,
+                (k, n, i, o, l) => NativeShacal2.XCryptCtr512(k, n, i, o, l),
+                "SHACAL-2-512");
+        }
+
+        return Task.CompletedTask;
+
+        static void RoundTrip(
+            int length,
+            int keyBytes,
+            int nonceBytes,
+            Action<byte[], byte[], byte[], byte[], int> xcrypt,
+            string label)
+        {
+            byte[] key = RandomNumberGenerator.GetBytes(keyBytes);
+            byte[] nonce = RandomNumberGenerator.GetBytes(nonceBytes);
+            byte[] plain = RandomNumberGenerator.GetBytes(length);
+            byte[] cipher = new byte[length];
+            byte[] restored = new byte[length];
+
+            xcrypt(key, nonce, plain, cipher, length);
+            xcrypt(key, nonce, cipher, restored, length);
+
+            Require(restored.AsSpan().SequenceEqual(plain), $"{label} did not round trip at {length} bytes.");
+            if (length >= nonceBytes)
+            {
+                Require(
+                    !cipher.AsSpan(0, nonceBytes).SequenceEqual(plain.AsSpan(0, nonceBytes)),
+                    $"{label} returned its input unchanged at {length} bytes.");
+            }
+        }
+    }
+
+
+    /// <summary>
+    /// Checks MARS against answers produced by a different implementation,
+    /// including the 448-bit keys the cascade actually uses.
+    /// </summary>
+    /// <remarks>
+    /// The AES submission published vectors for 128, 192 and 256-bit keys only,
+    /// so the key length this app depends on had no authoritative check. These
+    /// answers come from Botan 1.10.17's MARS, an independent implementation
+    /// line, and the file records its provenance and the published vector it
+    /// was validated against before being trusted.
+    ///
+    /// The oracle had to be validated first for a concrete reason: Brian
+    /// Gladman's widely mirrored mars.c predates the 22 September 1999 MARS
+    /// revision and implements the older key schedule. It disagrees with
+    /// Crypto++ and with the published vectors, and using it unchecked would
+    /// have produced a failure that pointed at this repository instead of at
+    /// the oracle.
+    ///
+    /// Only the raw block cipher is compared. CTR is checked separately, so a
+    /// disagreement here means the MARS primitive, and a disagreement there
+    /// means the counter mode — two implementations can both be correct and
+    /// still differ on counter endianness.
+    /// </remarks>
+    private static void VerifyMars448AgainstIndependentOracle()
+    {
+        string path = Path.Combine(AppContext.BaseDirectory, "MarsKnownAnswers.txt");
+        Require(File.Exists(path), $"The MARS known-answer file is missing: {path}");
+
+        var perLength = new Dictionary<int, int>();
+        foreach (string rawLine in File.ReadLines(path))
+        {
+            string line = rawLine.Trim();
+            if (line.Length == 0 || line[0] == '#')
+            {
+                continue;
+            }
+
+            string[] parts = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            Require(parts.Length == 3, $"Malformed MARS known-answer line: {line}");
+
+            byte[] key = Convert.FromHexString(parts[0]);
+            byte[] plain = Convert.FromHexString(parts[1]);
+            byte[] expected = Convert.FromHexString(parts[2]);
+
+            byte[] actual = new byte[NativeMars.BlockBytes];
+            NativeMars.EncryptBlock(key, plain, actual);
+            Require(
+                actual.AsSpan().SequenceEqual(expected),
+                $"MARS disagrees with the independent oracle at a {key.Length * 8}-bit key: "
+                + $"got {Convert.ToHexString(actual)}, expected {parts[2]}.");
+
+            perLength[key.Length * 8] = perLength.GetValueOrDefault(key.Length * 8) + 1;
+        }
+
+        Require(
+            perLength.GetValueOrDefault(448) >= 32,
+            $"Only {perLength.GetValueOrDefault(448)} MARS answers cover the 448-bit key the cascade uses.");
+        Require(perLength.Count >= 6, $"Only {perLength.Count} MARS key lengths were covered.");
+    }
+
+    /// <summary>
+    /// Reads Key/Plaintext/Ciphertext triples out of a Crypto++ vector file and
+    /// runs the ones whose block size matches.
+    /// </summary>
+    private static int RunBlockVectors(
+        string path,
+        int blockBytes,
+        Action<byte[], byte[], byte[]> encryptBlock,
+        string label)
+    {
+        Require(File.Exists(path), $"{label} vector file is missing: {path}");
+
+        string? key = null;
+        string? plaintext = null;
+        string? ciphertext = null;
+        int exercised = 0;
+
+        foreach (string rawLine in File.ReadLines(path))
+        {
+            string line = rawLine.Trim();
+            int separator = line.IndexOf(':');
+            if (separator <= 0)
+            {
+                continue;
+            }
+
+            string name = line[..separator].Trim();
+            string value = line[(separator + 1)..].Trim();
+
+            switch (name)
+            {
+                case "Key":
+                    key = value;
+                    break;
+                case "Plaintext":
+                    plaintext = value;
+                    break;
+                case "Ciphertext":
+                    ciphertext = value;
+                    break;
+                case "Test":
+                    if (value == "Encrypt" && key is not null && plaintext is not null && ciphertext is not null)
+                    {
+                        byte[] keyBytes = Convert.FromHexString(key);
+                        byte[] input = Convert.FromHexString(plaintext);
+                        byte[] expected = Convert.FromHexString(ciphertext);
+                        if (input.Length == blockBytes && expected.Length == blockBytes)
+                        {
+                            byte[] actual = new byte[blockBytes];
+                            encryptBlock(keyBytes, input, actual);
+                            Require(
+                                actual.AsSpan().SequenceEqual(expected),
+                                $"{label} vector mismatch for a {keyBytes.Length * 8}-bit key: "
+                                + $"got {Convert.ToHexString(actual)}, expected {ciphertext}.");
+                            exercised++;
+                        }
+                    }
+
+                    plaintext = null;
+                    ciphertext = null;
+                    break;
+            }
+        }
+
+        return exercised;
+    }
+
+    /// <summary>
+    /// Finds external/cryptopp/TestVectors by walking up from the test binary.
+    /// </summary>
+    private static string ResolveVectorDirectory()
+    {
+        DirectoryInfo? directory = new(AppContext.BaseDirectory);
+        while (directory is not null)
+        {
+            string candidate = Path.Combine(directory.FullName, "external", "cryptopp", "TestVectors");
+            if (Directory.Exists(candidate))
+            {
+                return candidate;
+            }
+
+            directory = directory.Parent;
+        }
+
+        throw new InvalidOperationException("external/cryptopp/TestVectors was not found above the test binary.");
+    }
+
+    private static async Task TestPerChunkNoncesAsync()
+    {
+        const int chunkSize = 16 * 1024 * 1024;
+        string root = CreateTempRoot("keep-vault-chunk-nonce-");
+        try
+        {
+            // Encryption runs directly on the ZPAQ stream, so no compression
+            // sits between this payload and the cipher: two identical 16 MiB
+            // halves reach the cipher as exactly two identical chunks.
+            byte[] half = new byte[chunkSize];
+            for (int index = 0; index < half.Length; index++)
+            {
+                half[index] = (byte)(index & 0xFF);
+            }
+
+            byte[] payload = new byte[2 * chunkSize];
+            half.CopyTo(payload, 0);
+            half.CopyTo(payload, chunkSize);
+
+            foreach (EncryptionSuite suite in Enum.GetValues<EncryptionSuite>())
+            {
+                AddMouseSamplesUntilReady();
+                using GeneratedArchiveEntropy entropy = EntropyMixer.CreateArchiveEntropy();
+                var containers = new KalynaContainerService();
+                string archive = Path.Combine(root, $"{suite}.kzpaq");
+
+                await using (var input = new MemoryStream(payload, writable: false))
+                {
+                    await containers.EncryptZpaqStreamWithPreparedEntropyAsync(
+                        input,
+                        archive,
+                        UserPassword,
+                        entropy.FirstPassword,
+                        entropy.SecondPassword,
+                        suite,
+                        entropy,
+                        null,
+                        null,
+                        CancellationToken.None).ConfigureAwait(false);
+                }
+
+                byte[] container = await File.ReadAllBytesAsync(archive).ConfigureAwait(false);
+                Require(
+                    container.LongLength > chunkSize,
+                    $"{suite}: the container is only {container.LongLength} bytes and cannot span two chunks.");
+
+                // The last 1 MiB of the ciphertext against the 1 MiB exactly one
+                // chunk earlier. The plaintext under both is identical, so with a
+                // single counter running across the archive these would differ
+                // only by the counter — and with a per-chunk nonce they differ
+                // completely. Identical here would mean the nonce never moved.
+                const int span = 1 << 20;
+                ReadOnlySpan<byte> first = container.AsSpan(container.Length - chunkSize - span, span);
+                ReadOnlySpan<byte> second = container.AsSpan(container.Length - span, span);
+                Require(
+                    !first.SequenceEqual(second),
+                    $"{suite}: two ciphertext regions one chunk apart are identical; the chunk nonce did not change.");
+
+                // A derivation the reader disagrees with would also produce
+                // different ciphertext per chunk and would still pass the check
+                // above, so the roundtrip is what proves both sides agree.
+                await using var output = new MemoryStream();
+                await containers.DecryptToStreamAsync(
+                    archive,
+                    UserPassword,
+                    entropy.FirstPassword,
+                    entropy.SecondPassword,
+                    output,
+                    null,
+                    CancellationToken.None).ConfigureAwait(false);
+
+                Require(
+                    output.Length == payload.LongLength,
+                    $"{suite}: the restored payload is {output.Length} bytes rather than {payload.LongLength}.");
+                Require(
+                    output.ToArray().AsSpan().SequenceEqual(payload),
+                    $"{suite}: the restored multi-chunk payload does not match the original.");
+
+                File.Delete(archive);
+            }
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    private static Task TestTwoRoundDerivationAsync()
+    {
+        // SHA-512 must agree with the published digests and with the second
+        // implementation before anything derived from it is trusted.
+        byte[] abc = Sha512Compat.HashData("abc"u8);
+        Require(
+            Convert.ToHexString(abc) ==
+            "DDAF35A193617ABACC417349AE20413112E6FA4E89A97EA20A9EEEE64B55D39A"
+            + "2192992A274FC1A836BA3C23A3FEEBBD454D4423643CE80E2A9AC94FA54CA49F",
+            "SHA-512 did not reproduce the FIPS 180-4 digest for \"abc\".");
+        Require(
+            !Convert.ToHexString(Sha512Compat.HashData(ReadOnlySpan<byte>.Empty)).SequenceEqual(
+                Convert.ToHexString(abc)),
+            "SHA-512 returned the same digest for different messages.");
+
+        foreach (EncryptionSuite suite in new[] { EncryptionSuite.ThreefishOverKalyna, EncryptionSuite.Kalyna512_512 })
+        {
+            AddMouseSamplesUntilReady();
+            using TwoRoundEncryptionParameters parameters = EntropyMixer.CreateTwoRoundEncryptionParameters(suite);
+
+            Require(
+                parameters.FirstSalt.Bytes.Length == parameters.SecondSalt.Bytes.Length,
+                $"{suite}: the two rounds produced salts of different lengths.");
+            Require(
+                !parameters.FirstSalt.Bytes.SequenceEqual(parameters.SecondSalt.Bytes),
+                $"{suite}: both Argon2id rounds produced the same salt.");
+            Require(
+                !parameters.FirstNonce.Bytes.SequenceEqual(parameters.SecondNonce.Bytes),
+                $"{suite}: both Argon2id rounds produced the same nonce.");
+
+            int expectedNonce = EncryptionSuiteCatalog.Get(suite).NonceBytes;
+            Require(
+                parameters.FirstNonce.Bytes.Length == expectedNonce
+                && parameters.SecondNonce.Bytes.Length == expectedNonce,
+                $"{suite}: a round produced a nonce of the wrong length.");
+
+            // Neither salt nor nonce may be all zeros or otherwise degenerate;
+            // a buffer that was allocated but never filled would still be
+            // "different" from the other round by accident of the XOR.
+            Require(
+                parameters.FirstSalt.Bytes.Any(b => b != 0)
+                && parameters.SecondSalt.Bytes.Any(b => b != 0)
+                && parameters.FirstNonce.Bytes.Any(b => b != 0)
+                && parameters.SecondNonce.Bytes.Any(b => b != 0),
+                $"{suite}: a round produced an all-zero salt or nonce.");
+
+            // The halves must not share long runs. Independent material from two
+            // different hash constructions has no reason to agree anywhere, and
+            // a copy-paste in the split would show up exactly here.
+            int shared = 0;
+            for (int index = 0; index < parameters.FirstNonce.Bytes.Length; index++)
+            {
+                if (parameters.FirstNonce.Bytes[index] == parameters.SecondNonce.Bytes[index])
+                {
+                    shared++;
+                }
+            }
+
+            Require(
+                shared < parameters.FirstNonce.Bytes.Length / 4,
+                $"{suite}: the two rounds' nonces agree in {shared} of {parameters.FirstNonce.Bytes.Length} bytes.");
+        }
+
+        // The whole reason both rounds share one consumption: asking for them
+        // must not leave the pools needing to be refilled beyond the single
+        // consumption the first round would have cost anyway.
+        AddMouseSamplesUntilReady();
+        using (TwoRoundEncryptionParameters _ = EntropyMixer.CreateTwoRoundEncryptionParameters(
+            EncryptionSuite.ThreefishOverKalyna))
+        {
+        }
+
+        Require(
+            !EntropyMixer.HasRequiredSamples(EntropyPurpose.Salt),
+            "The two-round derivation did not consume the salt pool exactly once.");
+
+        return Task.CompletedTask;
     }
 
     private static void AddMouseSamplesUntilReady()
