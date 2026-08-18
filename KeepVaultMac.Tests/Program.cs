@@ -31,7 +31,9 @@ Console.WriteLine($"{tests.Count} macOS smoke tests passed.");
 
 if (args.Contains("--full", StringComparer.Ordinal))
 {
-    await MacComprehensiveTests.RunAsync().ConfigureAwait(false);
+    int onlyIndex = Array.IndexOf(args, "--only");
+    string? only = onlyIndex >= 0 && onlyIndex + 1 < args.Length ? args[onlyIndex + 1] : null;
+    await MacComprehensiveTests.RunAsync(only).ConfigureAwait(false);
 }
 
 // Renders both language variants so the printed layout can be inspected as a

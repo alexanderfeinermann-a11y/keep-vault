@@ -86,6 +86,16 @@ for component in ${components[@]}; do
   done
 done
 
+# The ML-DSA reference adapter is a test oracle only: it is deliberately not
+# shipped inside the app, so it comes from the project tree rather than from the
+# signed bundle and carries no hybrid sidecars.
+mldsa_reference=${mac_project}/Native/osx-arm64/libmldsa87_ref.dylib
+if [[ ! -f ${mldsa_reference} || -L ${mldsa_reference} ]]; then
+  print -u2 "ML-DSA-87 reference oracle is missing: ${mldsa_reference}"
+  exit 1
+fi
+ditto ${mldsa_reference} ${destination}/libmldsa87_ref.dylib
+
 build_root=$(mktemp -d "${TMPDIR:-/tmp}/keep-vault-test-natives.XXXXXXXX")
 cleanup() {
   [[ -n ${build_root:-} && -d ${build_root} ]] && rm -rf -- ${build_root}

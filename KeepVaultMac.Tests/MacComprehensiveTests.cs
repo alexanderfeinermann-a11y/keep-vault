@@ -28,7 +28,12 @@ internal static partial class MacComprehensiveTests
     private const string UserPassword = "N!r7$Vq2#Lm8%Tx3&Jd9*Wp4+Kg5=Zu6?Ce";
     private const string WrongPassword = "Q!m8$Ls2#Vx7%Tp4&Jd9*Wr5+Kn6=Zu3?Ce";
 
-    internal static async Task RunAsync()
+    /// <summary>
+    /// Runs the comprehensive groups, optionally narrowed to those whose name
+    /// contains <paramref name="only"/>. The filter exists so a single group
+    /// can be re-run while fixing it; a full run passes null.
+    /// </summary>
+    internal static async Task RunAsync(string? only = null)
     {
         (string Name, Func<Task> Run)[] tests =
         [
@@ -45,6 +50,7 @@ internal static partial class MacComprehensiveTests
             ("v9 per-chunk nonces across a multi-chunk archive", TestPerChunkNoncesAsync),
             ("MARS and SHACAL-2 published vectors and CTR behaviour", TestCascadeCipherVectorsAsync),
             ("KPAR2-v2 repair, authentication and transplantation rejection", TestRecoveryAsync),
+            ("KPAR2-v2 accepts every catalogued suite, not just the first two", TestRecoveryAcrossSuitesAsync),
             ("cryptographic erase ordering and hard-link refusal", TestCryptographicEraseAsync),
             ("verified original deletion refuses on any mismatch", TestVerifiedOriginalDeletionAsync),
             // The GUI groups run last: they drive the real window through
@@ -53,6 +59,15 @@ internal static partial class MacComprehensiveTests
             // inherit.
             .. MacGuiTests.Tests,
         ];
+
+        if (only is not null)
+        {
+            tests = [.. tests.Where(test => test.Name.Contains(only, StringComparison.OrdinalIgnoreCase))];
+            if (tests.Length == 0)
+            {
+                throw new ArgumentException($"No comprehensive group matches '{only}'.", nameof(only));
+            }
+        }
 
         foreach ((string name, Func<Task> run) in tests)
         {
@@ -1109,6 +1124,98 @@ internal static partial class MacComprehensiveTests
         finally
         {
             CryptographicOperations.ZeroMemory(sentinel);
+        }
+    }
+
+    /// <summary>
+    /// A KPAR2 sidecar has to be creatable and verifiable for every suite the
+    /// catalogue offers.
+    /// </summary>
+    /// <remarks>
+    /// The locator used to validate its suite id against a hard-coded 0..1
+    /// range, so every suite introduced after the original two produced a
+    /// container the app would archive and then refuse to protect. The two
+    /// covered here are the ends of that failure: the two-round paranoia
+    /// cascade, whose key material has a different shape, and the highest
+    /// catalogued suite id. Both go through create and authenticated verify,
+    /// which is where the range check sat on either side.
+    /// </remarks>
+    private static async Task TestRecoveryAcrossSuitesAsync()
+    {
+        EncryptionSuite[] suites =
+        [
+            EncryptionSuite.ParanoiaCascade,
+            EncryptionSuite.MixedCascade,
+        ];
+
+        foreach (EncryptionSuite suite in suites)
+        {
+            string root = CreateTempRoot("keep-vault-kpar2-suite-");
+            try
+            {
+                string encrypted = Path.Combine(root, "suite.kzpaq");
+                byte[] payload = RandomNumberGenerator.GetBytes(64 * 1024);
+                AddMouseSamplesUntilReady();
+                using GeneratedArchiveEntropy entropy = EntropyMixer.CreateArchiveEntropy();
+                string factorA = entropy.FirstPassword;
+                string factorB = entropy.SecondPassword;
+                var containers = new KalynaContainerService();
+                await using (var input = new MemoryStream(payload, writable: false))
+                {
+                    await containers.EncryptZpaqStreamWithPreparedEntropyAsync(
+                        input,
+                        encrypted,
+                        UserPassword,
+                        factorA,
+                        factorB,
+                        suite,
+                        entropy,
+                        null,
+                        null,
+                        CancellationToken.None).ConfigureAwait(false);
+                }
+
+                var recovery = new RecoveryService();
+                string sidecar = await recovery.CreateAuthenticatedAsync(
+                    encrypted,
+                    UserPassword,
+                    factorA,
+                    factorB,
+                    null,
+                    CancellationToken.None).ConfigureAwait(false);
+                Require(File.Exists(sidecar), $"No KPAR2 sidecar was written for {suite}.");
+                Require(
+                    await recovery.TryReadProtectionModeAsync(encrypted, CancellationToken.None).ConfigureAwait(false)
+                        == RecoveryProtectionMode.DualAuthenticatedEncrypted,
+                    $"KPAR2 for {suite} is not marked dual authenticated.");
+
+                RecoveryRepairResult verified = await recovery.VerifyAndRepairAuthenticatedAsync(
+                    encrypted,
+                    UserPassword,
+                    factorA,
+                    factorB,
+                    null,
+                    CancellationToken.None).ConfigureAwait(false);
+                Require(
+                    verified.Authenticated && !verified.Repaired,
+                    $"KPAR2 verification for {suite} did not authenticate an undamaged archive.");
+
+                await RequireThrowsAsync<CryptographicException>(
+                    () => recovery.VerifyAndRepairAuthenticatedAsync(
+                        encrypted,
+                        WrongPassword,
+                        factorA,
+                        factorB,
+                        null,
+                        CancellationToken.None),
+                    $"A wrong user password authenticated the {suite} KPAR2 metadata.").ConfigureAwait(false);
+
+                Zero(payload);
+            }
+            finally
+            {
+                Directory.Delete(root, recursive: true);
+            }
         }
     }
 

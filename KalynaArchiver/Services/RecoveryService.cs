@@ -805,6 +805,16 @@ public sealed partial class RecoveryService
         }
     }
 
+    /// <summary>
+    /// Whether a locator's numeric suite id names a suite this build knows.
+    /// Asked of the catalogue instead of a hard-coded id range: the range form
+    /// only ever admitted the first two suites, so every suite added later was
+    /// refused here even though the container itself accepted it.
+    /// </summary>
+    private static bool IsKnownLocatorSuite(int encryptionSuite) =>
+        Enum.IsDefined((EncryptionSuite)encryptionSuite)
+        && EncryptionSuiteCatalog.IsKnown((EncryptionSuite)encryptionSuite);
+
     private async Task<RecoveryKeys> DeriveRecoveryKeysAsync(
         string userPassword,
         string firstGeneratedPassword,
@@ -813,7 +823,7 @@ public sealed partial class RecoveryService
         CancellationToken cancellationToken)
     {
         if (locator.ProtectionMode != RecoveryProtectionMode.DualAuthenticatedEncrypted
-            || locator.EncryptionSuite is < 0 or > 1
+            || !IsKnownLocatorSuite(locator.EncryptionSuite)
             || locator.Salt.Length != PasswordKeyService.SaltSize)
         {
             throw new InvalidDataException("KPAR2 has no valid encrypted KDF bootstrap parameters.");
@@ -1705,7 +1715,7 @@ public sealed partial class RecoveryService
         }
         else
         {
-            if (locator.EncryptionSuite is < 0 or > 1
+            if (!IsKnownLocatorSuite(locator.EncryptionSuite)
                 || locator.Salt.Length != PasswordKeyService.SaltSize)
             {
                 throw new InvalidDataException("Encrypted KPAR2 locator has invalid suite or salt parameters.");

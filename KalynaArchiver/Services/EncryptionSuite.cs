@@ -399,18 +399,21 @@ internal static class EncryptionSuiteCatalog
     /// The order the suites are offered in.
     /// </summary>
     /// <remarks>
-    /// The three recommendations come first, each labelled for what it is for:
-    /// the default, the paranoid option, and the fast one. The six individual
-    /// ciphers follow in descending key size, so the list reads from most to
-    /// least key material and a user scanning it top to bottom is never
-    /// surprised by a weaker option appearing above a stronger one.
+    /// The four cascades come first, each labelled for what it is for, and they
+    /// run from the everyday choice up to the most elaborate one: standard,
+    /// fast, mixed, paranoia. Somebody scanning the list stops at the first
+    /// entry that fits, and the one that costs six passes over the data sits at
+    /// the end where it will be chosen deliberately rather than by accident.
+    ///
+    /// The six individual ciphers follow in descending key size, so that half
+    /// of the list reads from most to least key material.
     /// </remarks>
     public static IReadOnlyList<EncryptionSuite> DisplayOrder { get; } =
     [
         EncryptionSuite.ThreefishOverKalyna,
-        EncryptionSuite.ParanoiaCascade,
         EncryptionSuite.ChaChaOverAes,
         EncryptionSuite.MixedCascade,
+        EncryptionSuite.ParanoiaCascade,
         EncryptionSuite.Threefish1024,
         EncryptionSuite.Kalyna512_512,
         EncryptionSuite.Shacal2_512,
