@@ -42,35 +42,9 @@ public sealed class PasswordKeyService
 
     private const double EntropySafetyFactor = 0.72;
     private static readonly UTF8Encoding StrictUtf8 = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
-    private static readonly byte[] KalynaFactorADomain = "Kalyna-ZPAQ/v9/Kalyna-512-512/SHA3-512/User+Factor-A"u8.ToArray();
-    private static readonly byte[] KalynaFactorBDomain = "Kalyna-ZPAQ/v9/Kalyna-512-512/SHA3-512/User+Factor-B"u8.ToArray();
-    private static readonly byte[] ThreefishFactorADomain = "Kalyna-ZPAQ/v9/Threefish-1024/SHA3-512/User+Factor-A"u8.ToArray();
-    private static readonly byte[] ThreefishFactorBDomain = "Kalyna-ZPAQ/v9/Threefish-1024/SHA3-512/User+Factor-B"u8.ToArray();
 
-    // The cascade gets its own domain rather than reusing either layer's. Two
-    // containers built from the same password and factors but different suites
-    // must not share a derived key, or a weakness found in one suite would
-    // carry over to the other.
-    private static readonly byte[] CascadeFactorADomain =
-        "Kalyna-ZPAQ/v9/Threefish-1024-over-Kalyna-512-512/SHA3-512/User+Factor-A"u8.ToArray();
-    /// <summary>
-    /// Domain separators for the six-layer cascade.
-    /// </summary>
-    /// <remarks>
-    /// Each suite gets its own pair so that the same password and the same two
-    /// printed factors cannot derive the same key under two different suites.
-    /// That matters most here: the paranoia cascade shares Kalyna and Threefish
-    /// with other suites, and without separation a key recovered from one
-    /// container would be a key into another.
-    /// </remarks>
-    private static readonly byte[] ParanoiaFactorADomain =
-        "Kalyna-ZPAQ/v9/ChaCha20-Poly1305-Threefish-Kalyna-SHACAL2-MARS-AES/SHA3-512/User+Factor-A"u8.ToArray();
 
-    private static readonly byte[] ParanoiaFactorBDomain =
-        "Kalyna-ZPAQ/v9/ChaCha20-Poly1305-Threefish-Kalyna-SHACAL2-MARS-AES/SHA3-512/User+Factor-B"u8.ToArray();
 
-    private static readonly byte[] CascadeFactorBDomain =
-        "Kalyna-ZPAQ/v9/Threefish-1024-over-Kalyna-512-512/SHA3-512/User+Factor-B"u8.ToArray();
     private static readonly string[] CommonPasswordTerms =
     [
         "PASSWORD", "PASSWORT", "LETMEIN", "WELCOME", "ADMIN", "CORRECTHORSEBATTERY",
@@ -550,8 +524,11 @@ public sealed class PasswordKeyService
             throw new ArgumentOutOfRangeException(nameof(argon2PasswordInput), $"Der Argon2id-Passworteingang muss {Argon2PasswordInputSize} Byte lang sein.");
         }
 
-        if (outputLength is not (KalynaDerivedKeySize or ThreefishDerivedKeySize
-            or CascadeDerivedKeySize or ParanoiaDerivedKeySize))
+        // Checked against what the catalogue actually publishes rather than
+        // against a written list. Every time a suite was added, this list was
+        // the thing that got forgotten, and a missing entry does not fail at
+        // the point of the mistake — it fails on the first archive.
+        if (!EncryptionSuiteCatalog.IsSupportedDerivedKeyLength(outputLength))
         {
             throw new ArgumentOutOfRangeException(nameof(outputLength), "Unsupported suite key length.");
         }
@@ -793,20 +770,26 @@ public sealed class PasswordKeyService
         return CommonPasswordTerms.Count(term => normalized.Contains(term, StringComparison.Ordinal));
     }
 
+    /// <summary>
+    /// The domain separator that binds a factor to one suite.
+    /// </summary>
+    /// <remarks>
+    /// Built from the suite's algorithm string instead of a hand-written table.
+    /// Two suites must never derive the same key from the same password and
+    /// factors, or a weakness found in one would carry straight over to the
+    /// other — and a table is exactly the kind of thing that gets forgotten
+    /// when a suite is added. Unlike a missing availability gate, that omission
+    /// would not crash: it would quietly produce a colliding key.
+    ///
+    /// The algorithm string already names the whole construction and is part of
+    /// the authenticated header, so it is both unique per suite and stable for
+    /// the life of the format.
+    /// </remarks>
     private static byte[] GetFactorDomain(EncryptionSuite suite, bool first)
     {
-        return (suite, first) switch
-        {
-            (EncryptionSuite.Kalyna512_512, true) => KalynaFactorADomain,
-            (EncryptionSuite.Kalyna512_512, false) => KalynaFactorBDomain,
-            (EncryptionSuite.Threefish1024, true) => ThreefishFactorADomain,
-            (EncryptionSuite.Threefish1024, false) => ThreefishFactorBDomain,
-            (EncryptionSuite.ThreefishOverKalyna, true) => CascadeFactorADomain,
-            (EncryptionSuite.ThreefishOverKalyna, false) => CascadeFactorBDomain,
-            (EncryptionSuite.ParanoiaCascade, true) => ParanoiaFactorADomain,
-            (EncryptionSuite.ParanoiaCascade, false) => ParanoiaFactorBDomain,
-            _ => throw new ArgumentOutOfRangeException(nameof(suite), suite, "Unknown encryption suite."),
-        };
+        EncryptionSuiteParameters parameters = EncryptionSuiteCatalog.Get(suite);
+        string domain = $"Kalyna-ZPAQ/v9/{parameters.Algorithm}/SHA3-512/User+Factor-{(first ? "A" : "B")}";
+        return Encoding.ASCII.GetBytes(domain);
     }
 
     private static void WriteLengthAndBytes(byte[] destination, ref int offset, byte[] source)

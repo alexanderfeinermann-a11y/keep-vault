@@ -28,24 +28,7 @@ public sealed partial class KalynaContainerService
     public static string? NativeKalynaLoadError => NativeKalyna.LastLoadError;
     public static string? NativeThreefishLoadError => NativeThreefish.LastLoadError;
 
-    public bool IsNativeSuiteAvailable(EncryptionSuite suite)
-    {
-        return suite switch
-        {
-            // threefish_ref also provides Skein for the second MAC, so every
-            // suite needs it; Kalyna is needed by its own suite and by the
-            // cascade that runs it underneath Threefish.
-            EncryptionSuite.Kalyna512_512 => IsNativeKalynaAvailable && IsNativeThreefishAvailable,
-            EncryptionSuite.Threefish1024 => IsNativeThreefishAvailable,
-            EncryptionSuite.ThreefishOverKalyna => IsNativeKalynaAvailable && IsNativeThreefishAvailable,
-            // The paranoia cascade needs all six, and the Skein provider on top.
-            EncryptionSuite.ParanoiaCascade =>
-                IsNativeKalynaAvailable && IsNativeThreefishAvailable
-                && NativeAes.IsAvailable() && NativeMars.IsAvailable()
-                && NativeShacal2.IsAvailable() && NativeChaChaPoly.IsAvailable(),
-            _ => false,
-        };
-    }
+    public bool IsNativeSuiteAvailable(EncryptionSuite suite) => MissingNativeLibraries(suite).Count == 0;
 
     public Task EncryptZpaqStreamAsync(
         Stream plainZpaqStream,
@@ -1284,11 +1267,18 @@ public sealed partial class KalynaContainerService
         long chunkIndex,
         int length)
     {
+        // The archive identity is a digest of the whole base nonce, not its
+        // first bytes: nonces range from 12 bytes for ChaCha20-Poly1305 alone to
+        // 536 for the two-round paranoia cascade, and slicing a fixed prefix
+        // both overruns the short ones and ignores most of the long ones.
         const int identityBytes = 16;
+        Span<byte> identityDigest = stackalloc byte[Sha3_512Compat.HashSizeInBytes];
+        _ = Sha3_512Compat.HashData(archiveNonce, identityDigest);
+
         byte[] associated = new byte[4 + 4 + identityBytes + sizeof(long) + sizeof(int)];
         BinaryPrimitives.WriteInt32BigEndian(associated.AsSpan(0), CurrentVersion);
         BinaryPrimitives.WriteInt32BigEndian(associated.AsSpan(4), (int)parameters.Suite);
-        archiveNonce[..identityBytes].CopyTo(associated.AsSpan(8));
+        identityDigest[..identityBytes].CopyTo(associated.AsSpan(8));
         BinaryPrimitives.WriteInt64BigEndian(associated.AsSpan(8 + identityBytes), chunkIndex);
         BinaryPrimitives.WriteInt32BigEndian(associated.AsSpan(8 + identityBytes + sizeof(long)), length);
         return associated;
@@ -1388,33 +1378,75 @@ public sealed partial class KalynaContainerService
         }
     }
 
+    /// <summary>
+    /// The reference libraries a suite needs that are not loadable.
+    /// </summary>
+    /// <remarks>
+    /// Derived from the suite's layer list rather than from its name. Every
+    /// time a suite was added, one of these gates was the thing that got
+    /// forgotten, and the failure does not appear where the mistake is — it
+    /// appears the first time somebody picks that suite. A suite is usable
+    /// exactly when every cipher it names can be loaded, and that question the
+    /// catalogue can already answer.
+    ///
+    /// threefish_ref is always required because it also provides Skein for the
+    /// second MAC, whichever ciphers the suite itself uses.
+    /// </remarks>
+    private static IReadOnlyList<string> MissingNativeLibraries(EncryptionSuite suite)
+    {
+        if (!EncryptionSuiteCatalog.IsKnown(suite))
+        {
+            return ["an unknown encryption suite"];
+        }
+
+        var missing = new List<string>();
+        if (!NativeThreefish.IsAvailable())
+        {
+            missing.Add("threefish_ref.dll");
+        }
+
+        EncryptionSuiteParameters parameters = EncryptionSuiteCatalog.Get(suite);
+        IEnumerable<CascadeCipher> ciphers = parameters.Cascade is { } layout
+            ? layout.Stages.Select(stage => stage.Cipher)
+            : [
+                suite == EncryptionSuite.Kalyna512_512
+                    ? CascadeCipher.Kalyna512_512
+                    : CascadeCipher.Threefish1024,
+            ];
+
+        foreach (CascadeCipher cipher in ciphers.Distinct())
+        {
+            (bool available, string library) = cipher switch
+            {
+                CascadeCipher.Aes256 => (NativeAes.IsAvailable(), "aes_ref.dll"),
+                CascadeCipher.Mars448 => (NativeMars.IsAvailable(), "mars_ref.dll"),
+                CascadeCipher.Shacal2_512 => (NativeShacal2.IsAvailable(), "shacal2_ref.dll"),
+                CascadeCipher.Kalyna512_512 => (NativeKalyna.IsAvailable(), "kalyna_ref.dll"),
+                CascadeCipher.Threefish1024 => (NativeThreefish.IsAvailable(), "threefish_ref.dll"),
+                CascadeCipher.ChaCha20Poly1305 => (NativeChaChaPoly.IsAvailable(), "chachapoly_ref.dll"),
+                _ => (false, "an unknown cipher"),
+            };
+            if (!available && !missing.Contains(library))
+            {
+                missing.Add(library);
+            }
+        }
+
+        return missing;
+    }
+
     private static void EnsureNativeAvailable(EncryptionSuite suite)
     {
-        // Every suite needs threefish_ref, because it also provides Skein for
-        // the second MAC. Kalyna is needed by its own suite and by the cascade.
-        bool available = suite switch
+        IReadOnlyList<string> missing = MissingNativeLibraries(suite);
+        if (missing.Count == 0)
         {
-            EncryptionSuite.Kalyna512_512 => NativeKalyna.IsAvailable() && NativeThreefish.IsAvailable(),
-            EncryptionSuite.Threefish1024 => NativeThreefish.IsAvailable(),
-            EncryptionSuite.ThreefishOverKalyna => NativeKalyna.IsAvailable() && NativeThreefish.IsAvailable(),
-            EncryptionSuite.ParanoiaCascade =>
-                NativeKalyna.IsAvailable() && NativeThreefish.IsAvailable()
-                && NativeAes.IsAvailable() && NativeMars.IsAvailable()
-                && NativeShacal2.IsAvailable() && NativeChaChaPoly.IsAvailable(),
-            _ => false,
-        };
-        if (!available)
-        {
-            string library = suite switch
-            {
-                EncryptionSuite.Threefish1024 => "threefish_ref.dll",
-                EncryptionSuite.ParanoiaCascade =>
-                    "aes_ref.dll, mars_ref.dll, shacal2_ref.dll, kalyna_ref.dll, "
-                    + "chachapoly_ref.dll and the Skein provider threefish_ref.dll",
-                _ => "kalyna_ref.dll and the Skein provider threefish_ref.dll",
-            };
-            throw new PlatformNotSupportedException($"The signed and dual-manifest-verified reference library {library} is unavailable.");
+            return;
         }
+
+        throw new PlatformNotSupportedException(
+            "The signed and dual-manifest-verified reference library "
+            + string.Join(", ", missing)
+            + " is unavailable.");
     }
 
     private static Argon2Profile GetArgon2Profile(ContainerHeader header)

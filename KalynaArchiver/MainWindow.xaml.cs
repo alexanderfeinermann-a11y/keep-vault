@@ -2221,6 +2221,7 @@ public sealed partial class MainWindow : Window, IDisposable
 
     private void ApplyLanguage()
     {
+        PopulateSuites();
         Title = T("windowTitle");
         TitleText.Text = T("title");
         SubtitleText.Text = T("subtitle");

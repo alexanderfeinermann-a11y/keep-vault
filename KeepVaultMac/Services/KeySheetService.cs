@@ -329,7 +329,7 @@ public sealed class KeySheetService
         return new ValidatedKeySheetData(
             canonicalArchivePath,
             data.Suite,
-            suite.DisplayName,
+            EncryptionSuiteCatalog.DisplayName(data.Suite, data.English),
             first,
             second,
             data.CreatedAt,

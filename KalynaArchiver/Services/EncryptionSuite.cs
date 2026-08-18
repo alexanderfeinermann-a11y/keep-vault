@@ -30,6 +30,35 @@ public enum EncryptionSuite
     /// whose outermost layer authenticates as well as encrypts.
     /// </remarks>
     ParanoiaCascade = 3,
+
+    /// <summary>ChaCha20-Poly1305 over AES-256, both hardware-friendly.</summary>
+    /// <remarks>
+    /// The fast option: two ciphers rather than six, chosen because both have
+    /// dedicated instructions on every machine this ships to. It is a cascade,
+    /// so it still survives either cipher falling.
+    /// </remarks>
+    ChaChaOverAes = 4,
+
+    /// <summary>AES-256 in CTR, alone.</summary>
+    Aes256 = 5,
+
+    /// <summary>MARS-448 in CTR, alone.</summary>
+    Mars448 = 6,
+
+    /// <summary>SHACAL-2-512 in CTR, alone.</summary>
+    Shacal2_512 = 7,
+
+    /// <summary>ChaCha20-Poly1305, alone.</summary>
+    ChaCha20Poly1305 = 8,
+
+    /// <summary>ChaCha20-Poly1305(Threefish-1024(AES-256)).</summary>
+    /// <remarks>
+    /// Three layers from three unrelated design families: a wide-block ARX
+    /// cipher between a substitution-permutation network and a stream cipher.
+    /// A structural break in one family leaves the other two standing, and the
+    /// key still fits in a single Argon2id round.
+    /// </remarks>
+    MixedCascade = 9,
 }
 
 /// <summary>
@@ -104,6 +133,14 @@ internal static class EncryptionSuiteCatalog
     public const string ParanoiaAlgorithm =
         "ChaCha20-Poly1305(Threefish-1024-CTR(Kalyna-512/512-CTR(SHACAL-2-512-CTR("
         + "MARS-448-CTR(AES-256-CTR)))))+HMAC-SHA3-512+Skein-MAC-1024";
+    public const string FastAlgorithm =
+        "ChaCha20-Poly1305(AES-256-CTR)+HMAC-SHA3-512+Skein-MAC-1024";
+    public const string Aes256Algorithm = "AES-256-CTR+HMAC-SHA3-512+Skein-MAC-1024";
+    public const string Mars448Algorithm = "MARS-448-CTR+HMAC-SHA3-512+Skein-MAC-1024";
+    public const string Shacal2Algorithm = "SHACAL-2-512-CTR+HMAC-SHA3-512+Skein-MAC-1024";
+    public const string ChaChaAlgorithm = "ChaCha20-Poly1305+HMAC-SHA3-512+Skein-MAC-1024";
+    public const string MixedAlgorithm =
+        "ChaCha20-Poly1305(Threefish-1024-CTR(AES-256-CTR))+HMAC-SHA3-512+Skein-MAC-1024";
     public const string KdfInputMode = "SHA3-512-LP(UserPassword,FactorA)||SHA3-512-LP(UserPassword,FactorB)";
     public const string CounterEndian = "BigEndian";
     public const string ThreefishTweakMode = "SHA3-512-LP(Domain,Nonce)[0..15]";
@@ -211,6 +248,90 @@ internal static class EncryptionSuiteCatalog
         ]),
         UsesTwoKdfRounds: true);
 
+    /// <summary>
+    /// A suite built from exactly one cipher.
+    /// </summary>
+    /// <remarks>
+    /// Declared as a one-stage cascade rather than as a special case, so the
+    /// transform, the counter and the AEAD handling all come from the same code
+    /// that drives the multi-layer suites. A single cipher is a cascade of
+    /// length one; treating it as anything else is how suites end up with their
+    /// own quietly divergent paths.
+    /// </remarks>
+    private static EncryptionSuiteParameters Single(
+        EncryptionSuite suite,
+        string algorithm,
+        string displayName,
+        CascadeCipher cipher,
+        int keyBytes,
+        int nonceBytes,
+        int blockBytes)
+    {
+        return new EncryptionSuiteParameters(
+            suite,
+            algorithm,
+            displayName,
+            BlockBytes: blockBytes,
+            NonceBytes: nonceBytes,
+            EncryptionKeyBytes: keyBytes,
+            Sha3MacKeyBytes: 64,
+            SkeinMacKeyBytes: 128,
+            TweakBytes: 0,
+            Cascade: new CascadeLayout([
+                new CascadeStage(cipher, keyBytes, nonceBytes, blockBytes),
+            ]));
+    }
+
+    private static readonly EncryptionSuiteParameters Fast = new(
+        EncryptionSuite.ChaChaOverAes,
+        FastAlgorithm,
+        "ChaCha20-Poly1305 over AES-256",
+        BlockBytes: 64,
+        NonceBytes: 28,
+        EncryptionKeyBytes: 64,
+        Sha3MacKeyBytes: 64,
+        SkeinMacKeyBytes: 128,
+        TweakBytes: 0,
+        Cascade: new CascadeLayout([
+            new CascadeStage(CascadeCipher.Aes256, KeyBytes: 32, NonceBytes: 16, BlockBytes: 16),
+            new CascadeStage(CascadeCipher.ChaCha20Poly1305, KeyBytes: 32, NonceBytes: 12, BlockBytes: 64),
+        ]));
+
+    /// <summary>
+    /// Three layers, three cipher families, one Argon2id round.
+    /// </summary>
+    private static readonly EncryptionSuiteParameters Mixed = new(
+        EncryptionSuite.MixedCascade,
+        MixedAlgorithm,
+        "ChaCha20-Poly1305 over Threefish-1024 and AES-256",
+        BlockBytes: 128,
+        NonceBytes: 156,
+        EncryptionKeyBytes: 192,
+        Sha3MacKeyBytes: 64,
+        SkeinMacKeyBytes: 128,
+        TweakBytes: 16,
+        Cascade: new CascadeLayout([
+            new CascadeStage(CascadeCipher.Aes256, KeyBytes: 32, NonceBytes: 16, BlockBytes: 16),
+            new CascadeStage(CascadeCipher.Threefish1024, KeyBytes: 128, NonceBytes: 128, BlockBytes: 128),
+            new CascadeStage(CascadeCipher.ChaCha20Poly1305, KeyBytes: 32, NonceBytes: 12, BlockBytes: 64),
+        ]));
+
+    private static readonly EncryptionSuiteParameters Aes = Single(
+        EncryptionSuite.Aes256, Aes256Algorithm, "AES-256",
+        CascadeCipher.Aes256, keyBytes: 32, nonceBytes: 16, blockBytes: 16);
+
+    private static readonly EncryptionSuiteParameters Mars = Single(
+        EncryptionSuite.Mars448, Mars448Algorithm, "MARS-448",
+        CascadeCipher.Mars448, keyBytes: 56, nonceBytes: 16, blockBytes: 16);
+
+    private static readonly EncryptionSuiteParameters Shacal2 = Single(
+        EncryptionSuite.Shacal2_512, Shacal2Algorithm, "SHACAL-2-512",
+        CascadeCipher.Shacal2_512, keyBytes: 64, nonceBytes: 32, blockBytes: 32);
+
+    private static readonly EncryptionSuiteParameters ChaCha = Single(
+        EncryptionSuite.ChaCha20Poly1305, ChaChaAlgorithm, "ChaCha20-Poly1305",
+        CascadeCipher.ChaCha20Poly1305, keyBytes: 32, nonceBytes: 12, blockBytes: 64);
+
     public static EncryptionSuiteParameters Get(EncryptionSuite suite)
     {
         return suite switch
@@ -219,6 +340,12 @@ internal static class EncryptionSuiteCatalog
             EncryptionSuite.Threefish1024 => Threefish,
             EncryptionSuite.ThreefishOverKalyna => Cascade,
             EncryptionSuite.ParanoiaCascade => Paranoia,
+            EncryptionSuite.ChaChaOverAes => Fast,
+            EncryptionSuite.MixedCascade => Mixed,
+            EncryptionSuite.Aes256 => Aes,
+            EncryptionSuite.Mars448 => Mars,
+            EncryptionSuite.Shacal2_512 => Shacal2,
+            EncryptionSuite.ChaCha20Poly1305 => ChaCha,
             _ => throw new ArgumentOutOfRangeException(nameof(suite), suite, "Unknown encryption suite."),
         };
     }
@@ -231,6 +358,12 @@ internal static class EncryptionSuiteCatalog
             ThreefishAlgorithm => Threefish,
             CascadeAlgorithm => Cascade,
             ParanoiaAlgorithm => Paranoia,
+            FastAlgorithm => Fast,
+            MixedAlgorithm => Mixed,
+            Aes256Algorithm => Aes,
+            Mars448Algorithm => Mars,
+            Shacal2Algorithm => Shacal2,
+            ChaChaAlgorithm => ChaCha,
             _ => throw new InvalidDataException("Container header specifies an unsupported encryption suite."),
         };
     }
@@ -247,9 +380,95 @@ internal static class EncryptionSuiteCatalog
     public static int MaxNonceBytes { get; } =
         Enum.GetValues<EncryptionSuite>().Where(IsKnown).Max(suite => Get(suite).NonceBytes);
 
+    /// <summary>
+    /// Every Argon2id output length any suite asks for, including the per-round
+    /// length of the two-round suite.
+    /// </summary>
+    private static readonly HashSet<int> SupportedDerivedKeyLengths =
+    [
+        .. Enum.GetValues<EncryptionSuite>().Where(IsKnown).Select(suite => Get(suite).DerivedKeyBytes),
+        // A two-round suite runs two calls of the single-round cascade length
+        // and truncates their concatenation, so that length must be accepted
+        // even though no suite publishes it as its own.
+        .. Enum.GetValues<EncryptionSuite>()
+            .Where(suite => IsKnown(suite) && Get(suite).UsesTwoKdfRounds)
+            .Select(_ => PasswordKeyService.CascadeDerivedKeySize),
+    ];
+
+    /// <summary>
+    /// The order the suites are offered in.
+    /// </summary>
+    /// <remarks>
+    /// The three recommendations come first, each labelled for what it is for:
+    /// the default, the paranoid option, and the fast one. The six individual
+    /// ciphers follow in descending key size, so the list reads from most to
+    /// least key material and a user scanning it top to bottom is never
+    /// surprised by a weaker option appearing above a stronger one.
+    /// </remarks>
+    public static IReadOnlyList<EncryptionSuite> DisplayOrder { get; } =
+    [
+        EncryptionSuite.ThreefishOverKalyna,
+        EncryptionSuite.ParanoiaCascade,
+        EncryptionSuite.ChaChaOverAes,
+        EncryptionSuite.MixedCascade,
+        EncryptionSuite.Threefish1024,
+        EncryptionSuite.Kalyna512_512,
+        EncryptionSuite.Shacal2_512,
+        EncryptionSuite.Mars448,
+        EncryptionSuite.Aes256,
+        EncryptionSuite.ChaCha20Poly1305,
+    ];
+
+    /// <summary>
+    /// The suite's name as a person reads it, in the app's language.
+    /// </summary>
+    /// <remarks>
+    /// Kept here rather than in either GUI because the printed key sheets need
+    /// the same wording. A sheet that names the suite differently from the
+    /// window that produced it is a sheet its owner cannot match to an archive
+    /// years later.
+    ///
+    /// The cipher names themselves are proper nouns and stay untranslated; only
+    /// the roles around them change language.
+    /// </remarks>
+    public static string DisplayName(EncryptionSuite suite, bool english)
+    {
+        return suite switch
+        {
+            EncryptionSuite.ThreefishOverKalyna => english
+                ? "Standard: Threefish-1024 over Kalyna-512/512"
+                : "Standard: Threefish-1024 über Kalyna-512/512",
+            EncryptionSuite.ParanoiaCascade => english
+                ? "Paranoia: ChaCha20-Poly1305 over Threefish-1024, Kalyna-512/512, SHACAL-2-512, MARS-448 and AES-256"
+                : "Paranoia: ChaCha20-Poly1305 über Threefish-1024, Kalyna-512/512, SHACAL-2-512, MARS-448 und AES-256",
+            EncryptionSuite.ChaChaOverAes => english
+                ? "Fast: ChaCha20-Poly1305 over AES-256"
+                : "Schnell: ChaCha20-Poly1305 über AES-256",
+            EncryptionSuite.MixedCascade => english
+                ? "Mixed: ChaCha20-Poly1305 over Threefish-1024 and AES-256"
+                : "Gemischt: ChaCha20-Poly1305 über Threefish-1024 und AES-256",
+            EncryptionSuite.Threefish1024 => "Threefish-1024",
+            EncryptionSuite.Kalyna512_512 => "Kalyna-512/512",
+            EncryptionSuite.Shacal2_512 => "SHACAL-2-512",
+            EncryptionSuite.Mars448 => "MARS-448",
+            EncryptionSuite.Aes256 => "AES-256",
+            EncryptionSuite.ChaCha20Poly1305 => "ChaCha20-Poly1305",
+            _ => throw new ArgumentOutOfRangeException(nameof(suite), suite, "Unknown encryption suite."),
+        };
+    }
+
+    public static bool IsSupportedDerivedKeyLength(int outputLength) =>
+        SupportedDerivedKeyLengths.Contains(outputLength);
+
     public static bool IsKnown(EncryptionSuite suite) =>
         suite is EncryptionSuite.Kalyna512_512
             or EncryptionSuite.Threefish1024
             or EncryptionSuite.ThreefishOverKalyna
-            or EncryptionSuite.ParanoiaCascade;
+            or EncryptionSuite.ParanoiaCascade
+            or EncryptionSuite.ChaChaOverAes
+            or EncryptionSuite.MixedCascade
+            or EncryptionSuite.Aes256
+            or EncryptionSuite.Mars448
+            or EncryptionSuite.Shacal2_512
+            or EncryptionSuite.ChaCha20Poly1305;
 }

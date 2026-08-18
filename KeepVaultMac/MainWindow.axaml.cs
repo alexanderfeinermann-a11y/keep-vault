@@ -68,6 +68,7 @@ public sealed partial class MainWindow : Window, IDisposable
 
         _language = LoadLanguage();
         SelectLanguage(_language);
+        PopulateSuites();
         SelectSuite(LoadSuite());
         CompressionBox.SelectedIndex = LoadCompression();
         EncryptBox.PropertyChanged += EncryptBox_PropertyChanged;

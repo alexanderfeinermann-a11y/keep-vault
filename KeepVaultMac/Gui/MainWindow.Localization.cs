@@ -21,6 +21,7 @@ public sealed partial class MainWindow
         TitleText.Text = "Keep Vault";
         SubtitleText.Text = T("subtitle");
         LanguageLabel.Text = T("language");
+        PopulateSuites();
         ArchiveTab.Header = T("archiveTab");
         ExtractTab.Header = T("extractTab");
         EraseTab.Header = T("eraseTab");
@@ -390,6 +391,35 @@ public sealed partial class MainWindow
         }
 
         LanguageBox.SelectedIndex = 0;
+    }
+
+    /// <summary>
+    /// Rebuilds the cipher picker in the current language.
+    /// </summary>
+    /// <remarks>
+    /// Built from the catalogue rather than written into the window, so a suite
+    /// cannot be offered that the catalogue does not know, and one it does know
+    /// cannot be left out. The selection is preserved across the rebuild, which
+    /// matters because this also runs when the user switches language.
+    /// </remarks>
+    private void PopulateSuites()
+    {
+        EncryptionSuite selected = CipherSuiteBox.SelectedItem is ComboBoxItem { Tag: string tag }
+            && Enum.TryParse(tag, ignoreCase: false, out EncryptionSuite current)
+            ? current
+            : EncryptionSuiteCatalog.Default;
+
+        CipherSuiteBox.Items.Clear();
+        foreach (EncryptionSuite suite in EncryptionSuiteCatalog.DisplayOrder)
+        {
+            CipherSuiteBox.Items.Add(new ComboBoxItem
+            {
+                Content = EncryptionSuiteCatalog.DisplayName(suite, IsEnglish),
+                Tag = suite.ToString(),
+            });
+        }
+
+        SelectSuite(selected);
     }
 
     private void SelectSuite(EncryptionSuite suite)
