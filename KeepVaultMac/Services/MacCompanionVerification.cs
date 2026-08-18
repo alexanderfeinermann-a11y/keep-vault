@@ -127,7 +127,8 @@ internal static class MacCompanionVerification
 
     private static IEnumerable<string> CandidateDirectories()
     {
-        // Beside the app bundle: Contents/MacOS/<binary> -> three levels up.
+        // The directory the bundle sits in: Contents/MacOS/<binary> up to the
+        // bundle, then one more to its parent.
         string? bundleParent = Path.GetDirectoryName(
             Path.GetDirectoryName(
                 Path.GetDirectoryName(
