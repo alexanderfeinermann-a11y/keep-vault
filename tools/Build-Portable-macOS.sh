@@ -24,6 +24,22 @@ architecture='universal'
 identity=${KEEPVAULT_CODESIGN_IDENTITY:-}
 pfx_path=${KEEPVAULT_HYBRID_PFX:-${HOME}/Library/Application Support/Keep Vault/ReleaseKeys/hybrid-rsa4096.pfx}
 mldsa_private_key=${KEEPVAULT_MLDSA_PRIVATE_KEY:-${HOME}/Library/Application Support/Keep Vault/ReleaseKeys/mldsa87-private.key}
+mldsa_private_key_encrypted=${KEEPVAULT_MLDSA_PRIVATE_KEY_ENCRYPTED:-${mldsa_private_key}.enc}
+mldsa_keychain_service=${KEEPVAULT_MLDSA_KEYCHAIN_SERVICE:-de.michael-feinermann.keep-vault.mldsa-key}
+mldsa_keychain_account=${KEEPVAULT_MLDSA_KEYCHAIN_ACCOUNT:-${USER:-}}
+
+# The ML-DSA-87 signing key is used encrypted when it has been wrapped, with the
+# wrapping key held in the Keychain behind a per-read prompt. The plaintext path
+# stays as a fallback so a tree that has not been migrated still builds.
+mldsa_key_arguments=(--mldsa-private-key ${mldsa_private_key})
+if [[ -f ${mldsa_private_key_encrypted} && ! -L ${mldsa_private_key_encrypted} ]]; then
+  mldsa_key_arguments=(
+    --mldsa-private-key-encrypted ${mldsa_private_key_encrypted}
+    --mldsa-key-keychain-service ${mldsa_keychain_service}
+    --mldsa-key-keychain-account ${mldsa_keychain_account}
+  )
+fi
+
 mldsa_public_key=${KEEPVAULT_MLDSA_PUBLIC_KEY:-${packaging_dir}/Keys/mldsa87-public.key}
 pfx_password_service=${KEEPVAULT_PFX_KEYCHAIN_SERVICE:-de.michael-feinermann.keep-vault.hybrid-pfx}
 pfx_password_account=${KEEPVAULT_PFX_KEYCHAIN_ACCOUNT:-${USER:-}}
@@ -249,7 +265,7 @@ package_signature_arguments=(
   ${signer_dll}
   sign
   --pfx ${pfx_path}
-  --mldsa-private-key ${mldsa_private_key}
+  ${mldsa_key_arguments[@]}
   --mldsa-public-key ${mldsa_public_key}
   --reference-library ${mac_project}/Native/osx-arm64/libmldsa87_ref.dylib
   --policy ${props}
@@ -295,7 +311,7 @@ signer_arguments=(
   ${signer_dll}
   sign
   --pfx ${pfx_path}
-  --mldsa-private-key ${mldsa_private_key}
+  ${mldsa_key_arguments[@]}
   --mldsa-public-key ${mldsa_public_key}
   --reference-library ${mac_project}/Native/osx-arm64/libmldsa87_ref.dylib
   --policy ${props}

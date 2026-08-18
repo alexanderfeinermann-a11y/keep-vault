@@ -20,6 +20,22 @@ identity=${KEEPVAULT_CODESIGN_IDENTITY:-}
 notary_profile=${KEEPVAULT_NOTARY_PROFILE:-}
 pfx_path=${KEEPVAULT_HYBRID_PFX:-${HOME}/Library/Application Support/Keep Vault/ReleaseKeys/hybrid-rsa4096.pfx}
 mldsa_private_key=${KEEPVAULT_MLDSA_PRIVATE_KEY:-${HOME}/Library/Application Support/Keep Vault/ReleaseKeys/mldsa87-private.key}
+mldsa_private_key_encrypted=${KEEPVAULT_MLDSA_PRIVATE_KEY_ENCRYPTED:-${mldsa_private_key}.enc}
+mldsa_keychain_service=${KEEPVAULT_MLDSA_KEYCHAIN_SERVICE:-de.michael-feinermann.keep-vault.mldsa-key}
+mldsa_keychain_account=${KEEPVAULT_MLDSA_KEYCHAIN_ACCOUNT:-${USER:-}}
+
+# The ML-DSA-87 signing key is used encrypted when it has been wrapped, with the
+# wrapping key held in the Keychain behind a per-read prompt. The plaintext path
+# stays as a fallback so a tree that has not been migrated still builds.
+mldsa_key_arguments=(--mldsa-private-key ${mldsa_private_key})
+if [[ -f ${mldsa_private_key_encrypted} && ! -L ${mldsa_private_key_encrypted} ]]; then
+  mldsa_key_arguments=(
+    --mldsa-private-key-encrypted ${mldsa_private_key_encrypted}
+    --mldsa-key-keychain-service ${mldsa_keychain_service}
+    --mldsa-key-keychain-account ${mldsa_keychain_account}
+  )
+fi
+
 mldsa_public_key=${KEEPVAULT_MLDSA_PUBLIC_KEY:-${packaging_dir}/Keys/mldsa87-public.key}
 pfx_password_service=${KEEPVAULT_PFX_KEYCHAIN_SERVICE:-de.michael-feinermann.keep-vault.hybrid-pfx}
 pfx_password_account=${KEEPVAULT_PFX_KEYCHAIN_ACCOUNT:-${USER:-}}
@@ -174,8 +190,15 @@ fi
 
 pfx_path=${pfx_path:A}
 mldsa_private_key=${mldsa_private_key:A}
+mldsa_private_key_encrypted=${mldsa_private_key_encrypted:A}
 mldsa_public_key=${mldsa_public_key:A}
-for private_path in ${pfx_path} ${mldsa_private_key}; do
+# Once the key has been wrapped the plaintext file is meant to be gone, so the
+# gate checks whichever form this tree actually signs with.
+mldsa_key_material=${mldsa_private_key}
+if [[ ${mldsa_key_arguments[1]} == --mldsa-private-key-encrypted ]]; then
+  mldsa_key_material=${mldsa_private_key_encrypted}
+fi
+for private_path in ${pfx_path} ${mldsa_key_material}; do
   if [[ ${private_path} == ${repo_root}/* ]]; then
     print -u2 "RELEASE GATE: private signing material must remain outside the repository: ${private_path}"
     exit 2
@@ -495,7 +518,7 @@ signer_arguments=(
   ${signer_dll}
   sign
   --pfx ${pfx_path}
-  --mldsa-private-key ${mldsa_private_key}
+  ${mldsa_key_arguments[@]}
   --mldsa-public-key ${mldsa_public_key}
   --reference-library ${repo_root}/KeepVaultMac/Native/$([[ ${architecture} == universal ]] && print osx-universal || print osx-arm64)/libmldsa87_ref.dylib
   --policy ${mac_project}/Directory.Build.props
@@ -599,7 +622,7 @@ supervisor_signature_arguments=(
   ${signer_dll}
   sign
   --pfx ${pfx_path}
-  --mldsa-private-key ${mldsa_private_key}
+  ${mldsa_key_arguments[@]}
   --mldsa-public-key ${mldsa_public_key}
   --reference-library ${repo_root}/KeepVaultMac/Native/$([[ ${architecture} == universal ]] && print osx-universal || print osx-arm64)/libmldsa87_ref.dylib
   --policy ${mac_project}/Directory.Build.props
@@ -761,7 +784,7 @@ launcher_signature_common=(
   ${signer_dll}
   sign
   --pfx ${pfx_path}
-  --mldsa-private-key ${mldsa_private_key}
+  ${mldsa_key_arguments[@]}
   --mldsa-public-key ${mldsa_public_key}
   --reference-library ${repo_root}/KeepVaultMac/Native/$([[ ${architecture} == universal ]] && print osx-universal || print osx-arm64)/libmldsa87_ref.dylib
   --policy ${mac_project}/Directory.Build.props
@@ -810,7 +833,7 @@ archive_common=(
   ${signer_dll}
   sign
   --pfx ${pfx_path}
-  --mldsa-private-key ${mldsa_private_key}
+  ${mldsa_key_arguments[@]}
   --mldsa-public-key ${mldsa_public_key}
   --reference-library ${repo_root}/KeepVaultMac/Native/$([[ ${architecture} == universal ]] && print osx-universal || print osx-arm64)/libmldsa87_ref.dylib
   --policy ${mac_project}/Directory.Build.props

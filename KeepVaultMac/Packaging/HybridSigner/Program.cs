@@ -17,6 +17,12 @@ static async Task<int> RunAsync(string[] args)
         }
 
         (Dictionary<string, string> options, List<string> targets) = ParseOptions(args[1..]);
+        if (string.Equals(args[0], "wrap-mldsa-key", StringComparison.OrdinalIgnoreCase))
+        {
+            // No --target: this command consumes a key, not artifacts.
+            return WrapMldsaKey(options);
+        }
+
         if (targets.Count == 0)
         {
             return Usage("At least one --target is required.");
@@ -40,15 +46,13 @@ static async Task<int> RunAsync(string[] args)
 static async Task<int> SignAsync(Dictionary<string, string> options, IReadOnlyList<string> targets)
 {
     string pfxPath = Require(options, "pfx");
-    string privateKeyPath = Require(options, "mldsa-private-key");
     string publicKeyPath = Require(options, "mldsa-public-key");
     string referencePath = Require(options, "reference-library");
     string policyPath = Require(options, "policy");
     string launcherPinsPath = Require(options, "launcher-pins");
 
     RequirePrivateFileProtection(pfxPath, "RSA PFX");
-    RequirePrivateFileProtection(privateKeyPath, "ML-DSA-87 private key");
-    byte[] privateKey = ReadExactFile(privateKeyPath, Mldsa87.PrivateKeyBytes, "ML-DSA-87 private key");
+    byte[] privateKey = ReadMldsaPrivateKey(options);
     byte[] publicKey = ReadExactFile(publicKeyPath, Mldsa87.PublicKeyBytes, "ML-DSA-87 public key");
     string password = ReadPfxPassword(options);
     string? macTemporaryKeychainDirectory = OperatingSystem.IsMacOS()
@@ -356,6 +360,243 @@ static HybridSignaturePolicy LoadPolicy(string path, byte[] publicKey)
         Property("KalynaExpectedMldsa87Sha3_512"),
         Property("KalynaExpectedMldsa87Skein1024"),
         publicKey);
+}
+
+/// <summary>
+/// Wraps a plaintext ML-DSA-87 private key into the encrypted envelope that
+/// <c>sign</c> reads, and proves the round trip before writing anything.
+/// </summary>
+/// <remarks>
+/// Encrypting lives in the same file as decrypting on purpose. A wrapping tool
+/// that reimplements the format is a tool that can drift from it, and the way
+/// that failure shows up is an envelope nobody can open -- with the plaintext
+/// already deleted.
+///
+/// The plaintext key is never touched. Removing it stays a separate, deliberate
+/// step for whoever knows whether a backup exists.
+/// </remarks>
+static int WrapMldsaKey(Dictionary<string, string> options)
+{
+    string privateKeyPath = Require(options, "mldsa-private-key");
+    string envelopePath = Require(options, "mldsa-private-key-encrypted");
+    string service = Require(options, "mldsa-key-keychain-service");
+    string account = options.GetValueOrDefault("mldsa-key-keychain-account") ?? Environment.UserName;
+
+    RequirePrivateFileProtection(privateKeyPath, "ML-DSA-87 private key");
+    if (File.Exists(envelopePath))
+    {
+        throw new IOException($"An envelope already exists and will not be overwritten: {envelopePath}");
+    }
+
+    byte[] privateKey = ReadExactFile(privateKeyPath, Mldsa87.PrivateKeyBytes, "ML-DSA-87 private key");
+    byte[] wrappingKey = ReadKeychainSecret(service, account, "ML-DSA-87 wrapping key");
+    byte[]? envelope = null;
+    try
+    {
+        if (wrappingKey.Length != 32)
+        {
+            throw new CryptographicException(
+                $"The ML-DSA-87 wrapping key must be 32 bytes, not {wrappingKey.Length}.");
+        }
+
+        byte[] magic = MldsaEnvelopeMagic();
+        const int nonceBytes = 12;
+        const int tagBytes = 16;
+        envelope = new byte[magic.Length + nonceBytes + privateKey.Length + tagBytes];
+        magic.CopyTo(envelope, 0);
+        RandomNumberGenerator.Fill(envelope.AsSpan(magic.Length, nonceBytes));
+        using (var aes = new AesGcm(wrappingKey, tagBytes))
+        {
+            aes.Encrypt(
+                envelope.AsSpan(magic.Length, nonceBytes),
+                privateKey,
+                envelope.AsSpan(magic.Length + nonceBytes, privateKey.Length),
+                envelope.AsSpan(envelope.Length - tagBytes, tagBytes),
+                magic);
+        }
+
+        string temporary = envelopePath + ".partial";
+        File.WriteAllBytes(temporary, envelope);
+        File.SetUnixFileMode(temporary, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+
+        // Open it again through the very path sign uses, and compare. An
+        // envelope that only this method can read is worth nothing.
+        byte[] recovered = DecryptMldsaEnvelope(temporary, wrappingKey);
+        try
+        {
+            if (!CryptographicOperations.FixedTimeEquals(recovered, privateKey))
+            {
+                File.Delete(temporary);
+                throw new CryptographicException("The wrapped key did not decrypt back to the original.");
+            }
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(recovered);
+        }
+
+        File.Move(temporary, envelopePath);
+        Console.WriteLine($"envelope={envelopePath}");
+        Console.WriteLine($"roundtrip_verified=yes");
+        Console.WriteLine($"plaintext_key_left_in_place={privateKeyPath}");
+        return 0;
+    }
+    finally
+    {
+        CryptographicOperations.ZeroMemory(privateKey);
+        CryptographicOperations.ZeroMemory(wrappingKey);
+        if (envelope is not null)
+        {
+            CryptographicOperations.ZeroMemory(envelope);
+        }
+    }
+}
+
+/// <summary>
+/// The ML-DSA-87 private key, either from a plain file or from an encrypted
+/// envelope whose wrapping key lives in the macOS Keychain.
+/// </summary>
+/// <remarks>
+/// The RSA half has always been a PKCS#12 container whose password sits in the
+/// Keychain, so copying the file alone gains nothing. The ML-DSA half was a raw
+/// 4896-byte key on disk: whoever copied the file had the key. This closes that
+/// asymmetry.
+///
+/// Encryption at rest stops the file from being useful once it leaves the
+/// machine -- in a backup, on a cloned disk, inside a tar of the home directory.
+/// It does not stop malware running as the same user, which can simply ask the
+/// Keychain the way this code does. What raises that bar is the Keychain item's
+/// own access control: created with no trusted application, it prompts on every
+/// read, so a use nobody triggered is visible rather than silent.
+/// </remarks>
+static byte[] ReadMldsaPrivateKey(Dictionary<string, string> options)
+{
+    if (options.TryGetValue("mldsa-private-key-encrypted", out string? envelopePath))
+    {
+        string service = options.GetValueOrDefault("mldsa-key-keychain-service")
+            ?? throw new CryptographicException(
+                "--mldsa-private-key-encrypted requires --mldsa-key-keychain-service.");
+        RequirePrivateFileProtection(envelopePath, "ML-DSA-87 key envelope");
+        byte[] wrappingKey = ReadKeychainSecret(
+            service,
+            options.GetValueOrDefault("mldsa-key-keychain-account") ?? Environment.UserName,
+            "ML-DSA-87 wrapping key");
+        try
+        {
+            return DecryptMldsaEnvelope(envelopePath, wrappingKey);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(wrappingKey);
+        }
+    }
+
+    string privateKeyPath = Require(options, "mldsa-private-key");
+    RequirePrivateFileProtection(privateKeyPath, "ML-DSA-87 private key");
+    return ReadExactFile(privateKeyPath, Mldsa87.PrivateKeyBytes, "ML-DSA-87 private key");
+}
+
+/// <summary>
+/// Envelope layout: magic, 12-byte nonce, ciphertext, 16-byte AES-GCM tag.
+/// </summary>
+/// <remarks>
+/// The Keychain secret is 32 random bytes and is used directly as the AES-256
+/// key. No password-based derivation is involved because nothing here is a
+/// human-chosen password -- a KDF would add cost without adding entropy.
+/// </remarks>
+static byte[] MldsaEnvelopeMagic() => "KVMLDSA1"u8.ToArray();
+
+static byte[] DecryptMldsaEnvelope(string path, byte[] wrappingKey)
+{
+    const int nonceBytes = 12;
+    const int tagBytes = 16;
+    byte[] magic = MldsaEnvelopeMagic();
+    int expected = magic.Length + nonceBytes + Mldsa87.PrivateKeyBytes + tagBytes;
+    byte[] envelope = File.ReadAllBytes(path);
+    try
+    {
+        if (envelope.Length != expected)
+        {
+            throw new CryptographicException(
+                $"The ML-DSA-87 key envelope must be {expected} bytes, not {envelope.Length}.");
+        }
+
+        if (!CryptographicOperations.FixedTimeEquals(envelope.AsSpan(0, magic.Length), magic))
+        {
+            throw new CryptographicException("The ML-DSA-87 key envelope has an unknown format.");
+        }
+
+        if (wrappingKey.Length != 32)
+        {
+            throw new CryptographicException(
+                $"The ML-DSA-87 wrapping key must be 32 bytes, not {wrappingKey.Length}.");
+        }
+
+        byte[] privateKey = new byte[Mldsa87.PrivateKeyBytes];
+        try
+        {
+            using var aes = new AesGcm(wrappingKey, tagBytes);
+            aes.Decrypt(
+                envelope.AsSpan(magic.Length, nonceBytes),
+                envelope.AsSpan(magic.Length + nonceBytes, Mldsa87.PrivateKeyBytes),
+                envelope.AsSpan(expected - tagBytes, tagBytes),
+                privateKey,
+                magic);
+            return privateKey;
+        }
+        catch
+        {
+            CryptographicOperations.ZeroMemory(privateKey);
+            throw;
+        }
+    }
+    finally
+    {
+        CryptographicOperations.ZeroMemory(envelope);
+    }
+}
+
+/// <summary>
+/// Reads a base64 secret out of the login Keychain.
+/// </summary>
+static byte[] ReadKeychainSecret(string service, string account, string description)
+{
+    if (!OperatingSystem.IsMacOS())
+    {
+        throw new CryptographicException($"The {description} can only be read from the macOS Keychain.");
+    }
+
+    var start = new ProcessStartInfo("/usr/bin/security")
+    {
+        RedirectStandardOutput = true,
+        RedirectStandardError = true,
+        UseShellExecute = false,
+    };
+    start.ArgumentList.Add("find-generic-password");
+    start.ArgumentList.Add("-s");
+    start.ArgumentList.Add(service);
+    start.ArgumentList.Add("-a");
+    start.ArgumentList.Add(account);
+    start.ArgumentList.Add("-w");
+    using Process process = Process.Start(start)
+        ?? throw new InvalidOperationException("Unable to start macOS Keychain lookup.");
+    string encoded = process.StandardOutput.ReadToEnd().TrimEnd('\r', '\n');
+    string error = process.StandardError.ReadToEnd();
+    process.WaitForExit();
+    if (process.ExitCode != 0 || encoded.Length == 0)
+    {
+        throw new CryptographicException(
+            $"macOS Keychain did not provide the {description}: {error.Trim()}");
+    }
+
+    try
+    {
+        return Convert.FromBase64String(encoded);
+    }
+    catch (FormatException)
+    {
+        throw new CryptographicException($"The {description} in the Keychain is not valid base64.");
+    }
 }
 
 static string ReadPfxPassword(Dictionary<string, string> options)
