@@ -433,25 +433,29 @@ internal static class EncryptionSuiteCatalog
     /// </remarks>
     public static string DisplayName(EncryptionSuite suite, bool english)
     {
+        // Cascades are written the way the layers actually nest, outermost
+        // first, the way VeraCrypt names its own: reading the name tells you
+        // what reaches the data last and what touches it first. The single
+        // ciphers keep their plain names, since there is nothing to nest.
+        string data = english ? "Data" : "Daten";
         return suite switch
         {
-            EncryptionSuite.ThreefishOverKalyna => english
-                ? "Standard: Threefish-1024 over Kalyna-512/512"
-                : "Standard: Threefish-1024 über Kalyna-512/512",
-            EncryptionSuite.ParanoiaCascade => english
-                ? "Paranoia: ChaCha20-Poly1305 over Threefish-1024, Kalyna-512/512, SHACAL-2-512, MARS-448 and AES-256"
-                : "Paranoia: ChaCha20-Poly1305 über Threefish-1024, Kalyna-512/512, SHACAL-2-512, MARS-448 und AES-256",
+            EncryptionSuite.ThreefishOverKalyna =>
+                $"Standard: Threefish 1024(Kalyna 512/512({data}))",
+            EncryptionSuite.ParanoiaCascade =>
+                "Paranoia: ChaCha20-Poly1305(Threefish 1024(Kalyna 512/512("
+                + $"SHACAL-2 512(MARS 448(AES 256({data}))))))",
             EncryptionSuite.ChaChaOverAes => english
-                ? "Fast: ChaCha20-Poly1305 over AES-256"
-                : "Schnell: ChaCha20-Poly1305 über AES-256",
+                ? $"Fast: ChaCha20-Poly1305(AES 256({data}))"
+                : $"Schnell: ChaCha20-Poly1305(AES 256({data}))",
             EncryptionSuite.MixedCascade => english
-                ? "Mixed: ChaCha20-Poly1305 over Threefish-1024 and AES-256"
-                : "Gemischt: ChaCha20-Poly1305 über Threefish-1024 und AES-256",
-            EncryptionSuite.Threefish1024 => "Threefish-1024",
-            EncryptionSuite.Kalyna512_512 => "Kalyna-512/512",
-            EncryptionSuite.Shacal2_512 => "SHACAL-2-512",
-            EncryptionSuite.Mars448 => "MARS-448",
-            EncryptionSuite.Aes256 => "AES-256",
+                ? $"Mixed: ChaCha20-Poly1305(Threefish 1024(AES 256({data})))"
+                : $"Gemischt: ChaCha20-Poly1305(Threefish 1024(AES 256({data})))",
+            EncryptionSuite.Threefish1024 => "Threefish 1024",
+            EncryptionSuite.Kalyna512_512 => "Kalyna 512/512",
+            EncryptionSuite.Shacal2_512 => "SHACAL-2 512",
+            EncryptionSuite.Mars448 => "MARS 448",
+            EncryptionSuite.Aes256 => "AES 256",
             EncryptionSuite.ChaCha20Poly1305 => "ChaCha20-Poly1305",
             _ => throw new ArgumentOutOfRangeException(nameof(suite), suite, "Unknown encryption suite."),
         };

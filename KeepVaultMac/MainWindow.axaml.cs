@@ -65,6 +65,10 @@ public sealed partial class MainWindow : Window, IDisposable
         _settingsStore = settingsStore ?? throw new ArgumentNullException(nameof(settingsStore));
         InitializeComponent();
         LoadLogo();
+        // Set from the constant rather than in the markup: a raised sample
+        // requirement with a stale maximum leaves the bar full from the start
+        // and tells the user nothing.
+        EntropyProgress.Maximum = EntropyMixer.RequiredMouseSamplesPerPurpose;
 
         _language = LoadLanguage();
         SelectLanguage(_language);

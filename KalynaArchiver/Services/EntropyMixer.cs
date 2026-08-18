@@ -19,7 +19,15 @@ public static partial class EntropyMixer
     // the first would make one layer's keystream a function of the other's, and
     // the whole point of the cascade is that the two are independent.
     private const int PurposeCount = 6;
-    public const long RequiredMouseSamplesPerPurpose = 512;
+    /// <summary>
+    /// Mouse samples each pool needs before factors can be generated.
+    /// </summary>
+    /// <remarks>
+    /// Raised from 512 to 1024. The pools are the only entropy the app gathers
+    /// that an attacker cannot model, and doubling the requirement costs the
+    /// user seconds of pointer movement once per archive.
+    /// </remarks>
+    public const long RequiredMouseSamplesPerPurpose = 1024;
     private static readonly object Gate = new();
     private static readonly EntropyPurpose[] SamplePurposes =
     [

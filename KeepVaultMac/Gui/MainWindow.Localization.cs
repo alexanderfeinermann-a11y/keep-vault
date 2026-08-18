@@ -153,8 +153,8 @@ public sealed partial class MainWindow
                 : "24 bis 128 Zeichen, mindestens 3 Zeichengruppen, 12 verschiedene und 12 Nicht-Hex-Zeichen, keine Hex-Folge ab 8 Zeichen und mindestens 128 Bit konservative Bewertung.",
             "generatorTitle" => en ? "Two independent 512-bit factors" : "Zwei unabhängige 512-Bit-Faktoren",
             "generatorHelp" => en
-                ? "Six separate entropy pools need at least 512 mouse samples each. Generation atomically creates factors A/B, the salt and all three nonce parts, then consumes all source pools."
-                : "Sechs getrennte Entropiepools benötigen je mindestens 512 Maus-Samples. Generieren erzeugt Faktoren A/B, Salt und alle drei Nonce-Teile atomar und verbraucht danach alle Quellpools.",
+                ? $"Six separate entropy pools need at least {EntropyMixer.RequiredMouseSamplesPerPurpose} mouse samples each. Generation atomically creates factors A/B, the salt and all three nonce parts, then consumes all source pools."
+                : $"Sechs getrennte Entropiepools benötigen je mindestens {EntropyMixer.RequiredMouseSamplesPerPurpose} Maus-Samples. Generieren erzeugt Faktoren A/B, Salt und alle drei Nonce-Teile atomar und verbraucht danach alle Quellpools.",
             "factorA" => en ? "Generated factor A" : "Generierter Faktor A",
             "factorB" => en ? "Generated factor B" : "Generierter Faktor B",
             "printKeySheets" => en ? "Print separately" : "Getrennt drucken",

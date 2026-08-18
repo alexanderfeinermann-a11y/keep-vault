@@ -246,7 +246,7 @@
                       <TextBlock x:Name="PasswordGeneratorHelpText"
                                  Text="Fünf getrennte Entropiepools benötigen je 512 Maus-Samples."
                                  Classes="muted" FontSize="12" TextWrapping="Wrap" />
-                      <ProgressBar x:Name="EntropyProgress" Minimum="0" Maximum="512" Height="7" Foreground="#5DE4EC" />
+                      <ProgressBar x:Name="EntropyProgress" Minimum="0" Height="7" Foreground="#5DE4EC" />
                       <TextBlock x:Name="EntropyStatusText" Text="Entropie wird gesammelt …" Foreground="#5DE4EC" FontSize="12" TextWrapping="Wrap" />
                       <Button x:Name="GeneratePasswordButton" Content="Generieren" HorizontalAlignment="Left" Click="GeneratePassword_Click" />
                       <TextBlock x:Name="GeneratedPasswordFirstLabel" Text="Faktor A" Classes="label" Margin="0" />
