@@ -119,7 +119,36 @@ public sealed partial class MainWindow : Window, IDisposable
             Log(_containers.IsNativeThreefishAvailable
                 ? T("threefishAvailable")
                 : $"{T("threefishMissing")} — {KalynaContainerService.NativeThreefishLoadError ?? T("notFound")}");
+            LogCompanionScannerState();
         }
+    }
+
+    /// <summary>
+    /// Reports whether the QR scanner shipped alongside is signed by the same
+    /// pinned keys as Keep Vault.
+    /// </summary>
+    /// <remarks>
+    /// The scanner reads the two secret factors off the printed sheets, and it
+    /// cannot vouch for itself — a replaced app would simply say it is fine.
+    /// Keep Vault checks it because it holds the same six key fingerprints and
+    /// is verified before it runs.
+    ///
+    /// A failure is loud but not fatal: the scanner is a separate program whose
+    /// code Keep Vault never loads, so refusing to archive over it would punish
+    /// the wrong thing.
+    /// </remarks>
+    private void LogCompanionScannerState()
+    {
+        CompanionVerificationResult scanner = MacCompanionVerification.VerifyQrScanner();
+        if (!scanner.Found)
+        {
+            Log(T("scannerAbsent"));
+            return;
+        }
+
+        Log(scanner.Trusted
+            ? $"{T("scannerTrusted")}: {scanner.Path}"
+            : $"{T("scannerUntrusted")}: {scanner.Message}");
     }
 
     private void Window_Activated(object? sender, EventArgs e) => UpdatePrivacyShield();

@@ -317,6 +317,15 @@ public sealed partial class MainWindow
             "cipherSuiteSelected" => en ? "Cipher suite selected: {0}" : "Verschlüsselungsverfahren gewählt: {0}",
             "selectedSuiteMissing" => en ? "The signed, manifest-verified native reference library for {0} is unavailable." : "Die signierte und manifestgeprüfte native Referenzbibliothek für {0} ist nicht verfügbar.",
             "kalynaAvailable" => en ? "Kalyna reference library: available" : "Kalyna-Referenzbibliothek: verfügbar",
+            "scannerAbsent" => en
+                ? "QR-Scanner.app was not found; nothing to verify."
+                : "QR-Scanner.app wurde nicht gefunden; nichts zu prüfen.",
+            "scannerTrusted" => en
+                ? "QR-Scanner.app verified against the pinned RSA-PSS/SHA-512 and ML-DSA-87 keys"
+                : "QR-Scanner.app gegen die fest gebundenen RSA-PSS/SHA-512- und ML-DSA-87-Schlüssel geprüft",
+            "scannerUntrusted" => en
+                ? "WARNING: QR-Scanner.app failed its dual signature check — do not scan key sheets with it"
+                : "WARNUNG: QR-Scanner.app hat die doppelte Signaturprüfung nicht bestanden — damit keine Schlüsselzettel scannen",
             "kalynaMissing" => en ? "Kalyna reference library: unavailable" : "Kalyna-Referenzbibliothek: nicht verfügbar",
             "threefishAvailable" => en ? "Threefish reference library: available" : "Threefish-Referenzbibliothek: verfügbar",
             "archiveCreatedOriginalsDeleted" => en

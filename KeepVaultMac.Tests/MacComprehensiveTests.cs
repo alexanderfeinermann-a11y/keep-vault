@@ -40,6 +40,7 @@ internal static partial class MacComprehensiveTests
             ("macOS process hardening", TestProcessHardeningAsync),
             ("signed native trust and tamper rejection", TestNativeTrustAsync),
             ("every Mach-O in the release bundle carries a hybrid signature", TestBundleMachOClosureAsync),
+            ("the companion QR scanner is checked against the pinned keys", TestCompanionScannerAsync),
             ("SHA3, Skein, Kalyna and Threefish reference vectors", TestPrimitiveVectorsAsync),
             ("ML-DSA-87 managed/reference interoperability", TestMldsaInteropAsync),
             ("randomised differential testing against every reference library", TestReferenceDifferentialAsync),
@@ -297,6 +298,87 @@ internal static partial class MacComprehensiveTests
         Require(checkedFiles >= 10, $"Only {checkedFiles} Mach-O files were found in the bundle; the walk is wrong.");
         Require(missing.Count == 0, $"Mach-O files without a hybrid signature: {string.Join(", ", missing)}");
         return Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// The QR scanner has to be verifiable by Keep Vault against the same
+    /// pinned keys, and a tampered signature has to be refused.
+    /// </summary>
+    /// <remarks>
+    /// The scanner reads the two secret factors off the printed sheets and
+    /// cannot vouch for itself. It shipped for a while with an Apple signature
+    /// and nothing else, so nothing in the package could tell a replaced
+    /// scanner from the real one.
+    ///
+    /// The negative half matters more than the positive one: a check that only
+    /// ever runs against a good copy proves nothing, so this copies the bundle,
+    /// corrupts the signature and asserts the refusal.
+    /// </remarks>
+    private static async Task TestCompanionScannerAsync()
+    {
+        CompanionVerificationResult live = MacCompanionVerification.VerifyQrScanner();
+        Require(live.Found, "QR-Scanner.app was not found; install the portable package before the full suite.");
+        Require(live.Trusted, $"The installed QR scanner is not trusted: {live.Message}");
+
+        string root = CreateTempRoot("keep-vault-scanner-");
+        try
+        {
+            string bundle = Path.Combine(root, "QR-Scanner.app");
+            CopyDirectory(live.Path!, bundle);
+            foreach (string suffix in new[] { ".khsig", ".sha3", ".skein", ".sha3.khsig", ".skein.khsig" })
+            {
+                string sidecar = live.Path! + suffix;
+                Require(File.Exists(sidecar), $"The scanner is missing its {suffix} sidecar.");
+                File.Copy(sidecar, bundle + suffix);
+            }
+
+            HybridSignaturePolicy policy = SigningTrustPolicy.HybridPolicy
+                ?? throw new InvalidOperationException("The compiled hybrid signing policy is unavailable.");
+            string executable = Path.Combine(bundle, "Contents", "MacOS", "QR-Scanner");
+            Require(
+                HybridSignatureService.VerifyFile(executable, bundle + ".khsig", policy).IsTrusted,
+                "The copied scanner did not verify, so the negative cases below would prove nothing.");
+
+            byte[] signature = await File.ReadAllBytesAsync(bundle + ".khsig").ConfigureAwait(false);
+            byte[] corrupted = [.. signature];
+            corrupted[^64] ^= 0xFF;
+            await File.WriteAllBytesAsync(bundle + ".khsig", corrupted).ConfigureAwait(false);
+            Require(
+                !HybridSignatureService.VerifyFile(executable, bundle + ".khsig", policy).IsTrusted,
+                "A corrupted ML-DSA-87 signature was accepted for the scanner.");
+
+            await File.WriteAllBytesAsync(bundle + ".khsig", signature).ConfigureAwait(false);
+            byte[] binary = await File.ReadAllBytesAsync(executable).ConfigureAwait(false);
+            byte[] patched = [.. binary];
+            patched[patched.Length / 2] ^= 0x01;
+            await File.WriteAllBytesAsync(executable, patched).ConfigureAwait(false);
+            Require(
+                !HybridSignatureService.VerifyFile(executable, bundle + ".khsig", policy).IsTrusted,
+                "A modified scanner binary was accepted against its unchanged signature.");
+
+            File.Delete(bundle + ".khsig");
+            Require(
+                !HybridSignatureService.VerifyFile(executable, bundle + ".khsig", policy).IsTrusted,
+                "A missing scanner signature was treated as valid.");
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    private static void CopyDirectory(string source, string destination)
+    {
+        Directory.CreateDirectory(destination);
+        foreach (string directory in Directory.EnumerateDirectories(source, "*", SearchOption.AllDirectories))
+        {
+            Directory.CreateDirectory(Path.Combine(destination, Path.GetRelativePath(source, directory)));
+        }
+
+        foreach (string file in Directory.EnumerateFiles(source, "*", SearchOption.AllDirectories))
+        {
+            File.Copy(file, Path.Combine(destination, Path.GetRelativePath(source, file)), overwrite: true);
+        }
     }
 
     private static string? LocateReleaseBundle()

@@ -98,6 +98,31 @@ for launcher_sidecar_suffix in .sha3 .skein .khsig .sha3.khsig .skein.khsig; do
   fi
   ditto ${launcher_sidecar} ${install_root}/Keep\ Vault.app.launcher${launcher_sidecar_suffix}
 done
+
+# The QR scanner reads the two secret factors off the printed key sheets, and
+# Keep Vault checks its dual signature at every start. That check needs the
+# scanner's sidecars installed beside it, so the scanner is only installed when
+# its signature comes with it -- an installed scanner Keep Vault has to warn
+# about at every launch is worse than no installed scanner.
+scanner_source=${source_app:h}/QR-Scanner.app
+install_scanner=0
+if [[ -d ${scanner_source} && ! -L ${scanner_source} ]]; then
+  install_scanner=1
+  for scanner_sidecar_suffix in .sha3 .skein .khsig .sha3.khsig .skein.khsig; do
+    if [[ ! -f ${scanner_source}${scanner_sidecar_suffix} || -L ${scanner_source}${scanner_sidecar_suffix} ]]; then
+      print -u2 "QR-Scanner.app has no ${scanner_sidecar_suffix} signature beside it and will not be installed."
+      install_scanner=0
+      break
+    fi
+  done
+fi
+if (( install_scanner )); then
+  ditto ${scanner_source} ${install_root}/QR-Scanner.app
+  for scanner_sidecar_suffix in .sha3 .skein .khsig .sha3.khsig .skein.khsig; do
+    ditto ${scanner_source}${scanner_sidecar_suffix} ${install_root}/QR-Scanner.app${scanner_sidecar_suffix}
+  done
+fi
+
 ${script_dir}/Verify-KeepVault-macOS.sh --app ${staged_app} --allow-development
 
 destination=${applications_dir}/Keep\ Vault.app
@@ -152,6 +177,19 @@ for launcher_sidecar_suffix in .sha3 .skein .khsig .sha3.khsig .skein.khsig; do
   final_sidecar=${applications_dir}/Keep\ Vault.app.launcher${launcher_sidecar_suffix}
   mv -f -- ${staged_sidecar} ${final_sidecar}
 done
+
+if (( install_scanner )); then
+  scanner_destination=${applications_dir}/QR-Scanner.app
+  # Sidecars first: a scanner bundle that is briefly present without its
+  # signature is exactly the state Keep Vault is built to refuse.
+  for scanner_sidecar_suffix in .sha3 .skein .khsig .sha3.khsig .skein.khsig; do
+    mv -f -- ${install_root}/QR-Scanner.app${scanner_sidecar_suffix} \
+      ${applications_dir}/QR-Scanner.app${scanner_sidecar_suffix}
+  done
+  rm -rf -- ${scanner_destination}
+  mv ${install_root}/QR-Scanner.app ${scanner_destination}
+  print "installed_scanner=${scanner_destination}"
+fi
 
 if ! ${script_dir}/Verify-KeepVault-macOS.sh --app ${destination} --allow-development --require-launcher-signature; then
   if [[ -d ${backup_path} && ! -L ${backup_path} ]]; then

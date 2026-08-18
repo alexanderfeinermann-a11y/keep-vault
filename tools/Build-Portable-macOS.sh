@@ -161,9 +161,11 @@ ditto ${verifier_path} ${portable_dir}/Keep\ Vault\ Release\ Verifier
 # Vault — it travels in the same package only because the two are used together
 # and should be versioned together.
 scanner_app=${repo_root}/QrCodeScanner/dist/QR-Scanner.app
+bundled_scanner=0
 if [[ -d ${scanner_app} && ! -L ${scanner_app} ]]; then
   ditto ${scanner_app} ${portable_dir}/QR-Scanner.app
   codesign --verify --strict --verbose=2 ${portable_dir}/QR-Scanner.app
+  bundled_scanner=1
   print "bundled_scanner=${portable_dir}/QR-Scanner.app"
 else
   print -u2 'QR-Scanner.app was not built; the package will contain Keep Vault only.'
@@ -221,11 +223,9 @@ recording the way Windows can. Keep Vault conceals secret views when it is
 deactivated, but capture prevention cannot be guaranteed on this platform.
 README
 
-# --- Archive, manifests, hybrid signatures ----------------------------------
-ditto -c -k --sequesterRsrc --keepParent ${portable_dir} ${portable_zip}
-
-# Signing the archive also emits its SHA3-512 and Skein-1024 manifests and
-# signs those in turn, so all five sidecars appear next to the ZIP.
+# The hybrid signer and its scratch keychain are resolved once here: the scanner
+# is signed before the archive is built, and the archive is signed after, so both
+# steps need them.
 signer_dll=${packaging_dir}/HybridSigner/bin/Release/net10.0/KeepVaultMac.HybridSigner.dll
 if [[ ! -f ${signer_dll} || -L ${signer_dll} ]]; then
   (
@@ -233,6 +233,63 @@ if [[ ! -f ${signer_dll} || -L ${signer_dll} ]]; then
     ${dotnet_command} build Packaging/HybridSigner/KeepVaultMac.HybridSigner.csproj -c Release --nologo
   )
 fi
+keychain_temp=${build_root}/keychain-temp
+mkdir -p ${keychain_temp}
+
+# Everything in the package that is executable code gets the same post-quantum
+# pair, so no component rests on Apple's signature alone. That includes the
+# verifier itself: a tool that vouches for the rest while carrying no signature
+# of its own is the obvious thing to replace.
+#
+# The scanner's sidecars go beside its bundle rather than inside it. Apple's
+# seal covers Contents/Resources, so a file added there afterwards would
+# invalidate the very signature it sits under -- the same reason the launcher's
+# own signature lives outside the bundle.
+package_signature_arguments=(
+  ${signer_dll}
+  sign
+  --pfx ${pfx_path}
+  --mldsa-private-key ${mldsa_private_key}
+  --mldsa-public-key ${mldsa_public_key}
+  --reference-library ${mac_project}/Native/osx-arm64/libmldsa87_ref.dylib
+  --policy ${props}
+  --launcher-pins ${build_root}/PackageHybridPins.swift
+  --target ${portable_dir}/Keep\ Vault\ Release\ Verifier
+)
+(( bundled_scanner )) && package_signature_arguments+=(--target ${portable_dir}/QR-Scanner.app/Contents/MacOS/QR-Scanner)
+if [[ -n ${pfx_password_service} ]]; then
+  package_signature_arguments+=(--pfx-password-keychain-service ${pfx_password_service})
+  [[ -n ${pfx_password_account} ]] && package_signature_arguments+=(--pfx-keychain-account ${pfx_password_account})
+fi
+(
+  cd ${mac_project}
+  TMPDIR=${keychain_temp} \
+    KEEPVAULT_KEYCHAIN_TEMP_ROOT=${keychain_temp} \
+    DOTNET_EnableDiagnostics=0 \
+    ${dotnet_command} ${package_signature_arguments[@]}
+)
+print "verifier_dual_signature=${portable_dir}/Keep Vault Release Verifier.khsig"
+
+if (( bundled_scanner )); then
+  scanner_sidecar_source=${portable_dir}/QR-Scanner.app/Contents/MacOS/QR-Scanner
+  for sidecar_suffix in .sha3 .skein .khsig .sha3.khsig .skein.khsig; do
+    if [[ ! -f ${scanner_sidecar_source}${sidecar_suffix} ]]; then
+      print -u2 "The scanner's dual signature is incomplete: ${sidecar_suffix}"
+      exit 1
+    fi
+    mv -- ${scanner_sidecar_source}${sidecar_suffix} ${portable_dir}/QR-Scanner.app${sidecar_suffix}
+  done
+
+  # Moving the sidecars out again leaves the bundle byte-identical to what Apple
+  # sealed, which this re-check proves rather than assumes.
+  codesign --verify --strict --verbose=2 ${portable_dir}/QR-Scanner.app
+  print "scanner_dual_signature=${portable_dir}/QR-Scanner.app.khsig"
+fi
+
+# --- Archive, manifests, hybrid signatures ----------------------------------
+# Signing the archive also emits its SHA3-512 and Skein-1024 manifests and signs
+# those in turn, so all five sidecars appear next to the ZIP.
+ditto -c -k --sequesterRsrc --keepParent ${portable_dir} ${portable_zip}
 
 signer_arguments=(
   ${signer_dll}
@@ -250,8 +307,6 @@ if [[ -n ${pfx_password_service} ]]; then
   [[ -n ${pfx_password_account} ]] && signer_arguments+=(--pfx-keychain-account ${pfx_password_account})
 fi
 
-keychain_temp=${build_root}/keychain-temp
-mkdir -p ${keychain_temp}
 (
   cd ${mac_project}
   TMPDIR=${keychain_temp} \
@@ -265,6 +320,10 @@ mkdir -p ${keychain_temp}
 # release cannot be published unless its own tool accepts it.
 ${portable_dir}/Keep\ Vault\ Release\ Verifier ${portable_zip}
 ${portable_dir}/Keep\ Vault\ Release\ Verifier ${portable_dir}/Keep\ Vault.app
+# The whole folder, which is what a user actually points the tool at: it covers
+# the scanner and the verifier as well and refuses any executable that has no
+# signature.
+${portable_dir}/Keep\ Vault\ Release\ Verifier ${portable_dir}
 
 print "portable_folder=${portable_dir}"
 print "portable_archive=${portable_zip}"
