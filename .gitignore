@@ -29,3 +29,6 @@ KeepVaultMac.ReleaseVerifier/obj/
 # Crypto++ static archive: a per-architecture build intermediate for the
 # adapters, never shipped in the bundle. Rebuilt by Build-Native-macOS.sh.
 KeepVaultMac/Native/*/libcryptopp.a
+
+# Downloaded vendor archives: the extracted trees beside them are what builds.
+external/skein-reference.zip
