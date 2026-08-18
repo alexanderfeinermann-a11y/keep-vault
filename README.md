@@ -1,736 +1,577 @@
 # Keep Vault
 
-Anwendung zum Archivieren, Entpacken und kryptografischen Loeschen von ZPAQ-
-Archiven, fuer **Windows** (WPF) und **macOS** (Avalonia). Beide Fassungen
-teilen denselben Kryptografiekern und erzeugen dasselbe Containerformat, sodass
-ein Archiv auf der jeweils anderen Plattform gelesen werden kann. Verschluesselte Archive verwenden
-standardmaessig die Kaskade Threefish-1024 ueber Kalyna-512/512; Kalyna-512/512
-und Threefish-1024 stehen einzeln weiterhin zur Wahl. Beide Suites nutzen Argon2id aus den PHC-
-Referenzquellen, HMAC-SHA3-512, Skeins nativen keyed MAC und zwei getrennt
-erzeugte 512-Bit-Passwortfaktoren.
+Archiving, extraction and cryptographic erasure of ZPAQ archives for **macOS**.
+Encrypted archives use container format **v9**: a chosen cascade of up to six
+independent ciphers over the compressed stream, keys from Argon2id at a fixed
+1 GiB profile, two separate MACs, and a three-part password made of one you
+choose and two the app generates.
 
-Die Anwendung befindet sich in Entwicklung. Sie ersetzt kein externes
-Kryptografie-Audit, kein HSM und keine Betriebssystemhaertung.
+The application is under development. It is not a substitute for an external
+cryptographic audit, an HSM, or operating-system hardening.
 
-## Installation
+> **macOS only.** The Windows source tree has been moved to v9 but the WPF
+> application can only be built on Windows and has never been built or tested
+> against v9. No Windows package is published, and the macOS version is the only
+> one that should be used.
 
-Fertige Pakete liegen unter
-[Releases](https://github.com/alexanderfeinermann-a11y/keep-vault/releases).
-Jedes Paket traegt neben Apples bzw. Authenticodes Signatur eine zweite,
-unabhaengige Signatur aus RSA-PSS/SHA-512 und ML-DSA-87 (FIPS 204). Die
-zugehoerigen `.sha3`-, `.skein`- und `.khsig`-Dateien gehoeren zum Paket und
-duerfen nicht getrennt werden.
+---
 
-### Windows
+## Install
 
-Der QR-Scanner ist derzeit nur fuer macOS verfuegbar; unter Windows werden die
-Faktoren von Hand eingetippt.
+Prebuilt packages are on the
+[Releases](https://github.com/alexanderfeinermann-a11y/keep-vault/releases) page.
+Requires macOS 14 or newer, Apple silicon or Intel (universal binary).
 
-1. `Keep Vault-portable-win-x64.zip` herunterladen.
-2. Vor dem Entpacken in den Dateieigenschaften **Zulassen** setzen, sonst
-   blockiert Windows die enthaltenen Programme.
-3. ZIP entpacken.
-4. `Install-KeepVaultShortcuts.ps1` in PowerShell ausfuehren, um Startmenue-
-   und Desktop-Verknuepfungen anzulegen, oder `KalynaArchiver.exe` direkt
-   starten.
-5. Optional vorab pruefen:
-   `"Keep Vault Release Verifier-win-x64.exe" "Keep Vault-portable-win-x64.zip"`
+The package contains **two applications**: `Keep Vault.app` and
+`QR-Scanner.app`. The second one reads the QR codes from the printed key sheets;
+it is a separate, sandboxed program with its own bundle identifier. Keep Vault
+itself never requests camera access and declares no hardware capability at all.
 
-### macOS
+1. Download and unpack `Keep Vault-portable-macOS.zip`.
+2. Check it before launching anything — see [Verify a download](#verify-a-download).
+3. Run `tools/Install-KeepVault-macOS.sh`. It verifies the signatures, installs
+   to `/Applications`, installs the scanner alongside when the scanner's own
+   signature is present, and puts an alias on the Desktop. It must **not** be
+   run with `sudo`.
 
-Voraussetzung: macOS 14 oder neuer, Apple Silicon oder Intel (universelles
-Binary).
+The files named `Keep Vault.app.launcher.*` belong **beside** `Keep Vault.app`
+and have to stay there: the launcher checks its own dual signature at every
+start and will not run without them. The same applies to `QR-Scanner.app.*`.
 
-Das macOS-Paket enthaelt **beide Anwendungen**: `Keep Vault.app` und
-`QR-Scanner.app`. Die zweite liest die QR-Codes von den gedruckten
-Schluesselzetteln; sie ist ein eigenstaendiges, sandboxed Programm mit eigener
-Kennung und eigener Signatur. Keep Vault selbst fordert keinen Kamerazugriff an.
+At every start the app checks Apple's code signature, its compiled cdhash pins,
+and the dual signature of every executable in the bundle. If any of these fails,
+it does not start.
 
-1. `Keep Vault-portable-macOS.zip` herunterladen und entpacken.
-2. Die Dateien `Keep Vault.app.launcher.*` gehoeren **neben** `Keep Vault.app`
-   und muessen dort bleiben: der Launcher prueft bei jedem Start seine eigene
-   duale Signatur und startet ohne diese Dateien nicht.
-3. `tools/Install-KeepVault-macOS.sh` ausfuehren. Das Skript prueft die
-   Signaturen, installiert nach `/Applications` und legt ein Alias auf dem
-   Schreibtisch an. Es darf **nicht** mit `sudo` laufen.
-4. `QR-Scanner.app` nach Belieben ebenfalls nach `/Applications` legen. Beim
-   ersten Start fragt macOS einmal nach der Kamera.
-5. Optional vorab pruefen:
-   `"./Keep Vault Release Verifier" "Keep Vault.app"`
+### Verify a download
 
-Beim Start prueft die App Apples Code-Signatur, die eingebetteten CDHash-Pins
-und die duale Signatur jeder mitgelieferten ausfuehrbaren Datei. Schlaegt eine
-dieser Pruefungen fehl, startet sie nicht.
+The package ships with the verifier that produced it:
 
-Das Einscannen der QR-Codes von den gedruckten Schluesselzetteln uebernimmt eine
-eigenstaendige Anwendung. Keep Vault selbst fordert keinerlei Hardwarezugriff an
-und deklariert auch keine entsprechende Berechtigung.
+```sh
+"./Keep Vault Release Verifier" "Keep Vault-portable-macOS"
+```
 
-## Formatpolitik
+Point it at the whole folder — that covers the app, the scanner, the verifier
+itself and every hash manifest:
 
-Die App erzeugt und liest ausschliesslich das verschluesselte Containerformat
-Version 9. Jede andere Version wird abgewiesen, auch Version 8; ein Legacy-
-Entschluesselungspfad ist nicht vorhanden und ist auch nicht vorgesehen. Mit v8
-erzeugte Archive lassen sich mit dieser Fassung nicht mehr oeffnen.
+```
+verified_artifacts=51
+RESULT: TRUSTED - RSA-PSS/SHA-512 and ML-DSA-87 verification passed.
+```
 
-Auch die Domaenentrenner der Schluesselableitung tragen `v9`, sodass ein
-v9-Schluessel selbst bei identischem Passwort und identischen Faktoren niemals
-mit einem v8-Schluessel zusammenfaellt.
+It also accepts a single bundle, a single file, or the ZIP. Exit codes are `0`
+for TRUSTED, `2` for NOT COVERED (a real artifact that these keys never signed),
+`3` for BLOCKED, and `1` for a usage error.
 
-### Optionen
+A verifier that travels with the thing it vouches for can only tell you the
+package is internally consistent. To make it evidence against a determined
+attacker, obtain the verifier and its pins through a separate, trusted channel.
 
-Zehn Verfahren, in dieser Reihenfolge angeboten:
+---
 
-1. **Standard:** Threefish-1024 ueber Kalyna-512/512
-2. **Paranoia:** ChaCha20-Poly1305 ueber Threefish-1024, Kalyna-512/512,
-   SHACAL-2-512, MARS-448 und AES-256 — sechs Chiffren, zwei Argon2id-Runden
-3. **Schnell:** ChaCha20-Poly1305 ueber AES-256
-4. **Gemischt:** ChaCha20-Poly1305 ueber Threefish-1024 und AES-256
-5. Die sechs Chiffren einzeln, nach Schluessellaenge absteigend: Threefish-1024,
-   Kalyna-512/512, SHACAL-2-512, MARS-448, AES-256, ChaCha20-Poly1305
+## Format policy
 
-Jeder Chunk erhaelt seine eigene Nonce, aus der Basis-Nonce und dem
-Chunk-Index ueber SHA3-512 abgeleitet. Ein durchgehender CTR-Zaehler ueber
-unbegrenzt grosse Archive wiederholt sich irgendwann, und ein wiederholter
-Zaehlerblock unter einem Schluessel gibt den XOR zweier Klartexte preis.
+The app writes and reads container format **version 9 only**. Every other
+version is refused, including version 8; there is no legacy decryption path and
+none is planned. Archives written with v8 cannot be opened with this release.
 
-Bei der Paranoia-Option laeuft Argon2id zweimal: die erste Runde wie bei allen
-anderen Verfahren, die zweite mit einem eigenen Salt. Beide Runden liefern je
-384 Byte, aus denen die 568 Byte fuer sechs Schichten und die beiden
-MAC-Schluessel entnommen werden. Die beiden Faktoren bleiben gleich — nur der
-Salt unterscheidet sich, weshalb dafuer keine neuen Entropiepools noetig sind:
-die erste Erweiterung nutzt SHA3-512, die zweite SHA-512 auf demselben
-Schnappschuss.
+The key-derivation domain separators also carry `v9`, so a v9 key never
+coincides with a v8 key even for an identical password and identical factors.
 
-### Kaskade (Standard)
+### The ten options
 
-`Threefish-1024-CTR(Kalyna-512/512-CTR)` verschluesselt zweifach mit getrennten
-Schluesseln und getrennten Nonces:
+Offered in this order:
 
-- Argon2id liefert 384 Byte. Die ersten 192 Byte sind Chiffrierschluessel: davon
-  gehen die ersten 64 Byte an die innere Kalyna-Schicht und die restlichen 128
-  Byte an die aeussere Threefish-Schicht. Die uebrigen 192 Byte sind die beiden
-  MAC-Schluessel.
-- Die Nonce ist 192 Byte lang, ebenso aufgeteilt: 64 Byte innen, 128 Byte
-  aussen. Dafuer gibt es einen dritten Entropiepool; die drei Nonce-Teile werden
-  unabhaengig voneinander gewonnen.
-- Die Reihenfolge ist Kalyna innen, Threefish aussen. Wer nur die aeussere
-  Schicht bricht, haelt Kalyna-Chiffrat in der Haenden — nicht den Klartext und
-  nicht die Struktur des Archivs. Saemtliche Nutzdaten samt Dateinamen, Groessen
-  und Zeitstempeln liegen im ZPAQ-Strom innerhalb beider Schichten. Ein
-  automatisierter Test weist das nach, statt es nur zu behaupten.
-- Beide Schichten sind Schluesselstromverfahren. Die Sicherheit bleibt bestehen,
-  solange mindestens eines der beiden Verfahren ungebrochen ist.
+| # | Option | Layers, outermost first | Nonce | Cipher key |
+|---|---|---|---|---|
+| 1 | **Standard** | Threefish-1024 → Kalyna-512/512 | 192 B | 192 B |
+| 2 | **Fast** | ChaCha20-Poly1305 → AES-256 | 28 B | 64 B |
+| 3 | **Mixed** | ChaCha20-Poly1305 → Threefish-1024 → AES-256 | 156 B | 192 B |
+| 4 | **Paranoia** | ChaCha20-Poly1305 → Threefish-1024 → Kalyna-512/512 → SHACAL-2-512 → MARS-448 → AES-256 | 268 B | 376 B |
+| 5 | Threefish-1024 | single cipher | 128 B | 128 B |
+| 6 | Kalyna-512/512 | single cipher | 64 B | 64 B |
+| 7 | SHACAL-2-512 | single cipher | 32 B | 64 B |
+| 8 | MARS-448 | single cipher | 16 B | 56 B |
+| 9 | AES-256 | single cipher | 16 B | 32 B |
+| 10 | ChaCha20-Poly1305 | single cipher | 12 B | 32 B |
 
-Gemeinsame Eigenschaften:
+The four cascades come first, running from the everyday choice up to the most
+elaborate one. Somebody scanning the list stops at the first entry that fits,
+and the option that costs six passes over the data sits at the end where it gets
+chosen deliberately rather than by accident. The six individual ciphers follow
+in descending key size.
 
-- Magie `KZPAQ1\0`, UTF-8-JSON-Kopf, 64-Byte-HMAC-SHA3-512-Tag,
-  128-Byte-Skein-1024-MAC-Tag und Chiffretext
-- Passwortmodus `UserPassword+GeneratedHex512x2`
-- KDF-Modus
-  `SHA3-512-LP(UserPassword,FactorA)||SHA3-512-LP(UserPassword,FactorB)`
-- 64-Byte-/512-Bit-Salt
-- Argon2id 0x13 mit festem Produktionsprofil `m=1 GiB` (`1048576 KiB`),
-  `t=4`, `p=4`
-- Encrypt-then-MAC mit zwei getrennten Schluesseln und verpflichtender
-  Verifikation beider Tags
+Names are shown in the app and on the printed sheets in bracket notation, in
+German or English depending on the selected language — for example
+`Paranoia: ChaCha20-Poly1305(Threefish 1024(Kalyna 512/512(SHACAL-2 512(MARS 448(AES 256(Data))))))`.
 
-Waehlt der User Kalyna, enthaelt der Kopf:
+### How a cascade works
 
-- `Kalyna-512/512-CTR+HMAC-SHA3-512+Skein-MAC-1024`
-- 64-Byte-Kalyna-Schluessel, 64-Byte-HMAC-Schluessel und
-  128-Byte-Skein-MAC-Schluessel
-- 64-Byte-/512-Bit-Nonce und keinen Threefish-Tweak
-- 256 Byte Argon2id-Ausgabe
+Each layer gets its own slice of the Argon2id output as its key and its own
+slice of the nonce. For the standard cascade that is 64 bytes of key and 64
+bytes of nonce for the inner Kalyna layer, 128 and 128 for the outer Threefish
+layer.
 
-Waehlt der User Threefish, enthaelt der Kopf:
+The order matters. Breaking only the outer layer yields the inner layer's
+ciphertext — not the plaintext, and not the archive's structure. Every payload
+byte, along with file names, sizes and timestamps, lives in the ZPAQ stream
+*inside* all layers. An automated test demonstrates this rather than asserting
+it: it strips the outer layer with the correct key and searches the result for a
+known marker.
 
-- `Threefish-1024-CTR+HMAC-SHA3-512+Skein-MAC-1024`
-- 128-Byte-Threefish-Schluessel, 64-Byte-HMAC-Schluessel und
-  128-Byte-Skein-MAC-Schluessel
-- 128-Byte-/1024-Bit-Nonce
-- 16-Byte-/128-Bit-Tweak, domaenensepariert per SHA3-512 aus der Nonce abgeleitet
-- 320 Byte Argon2id-Ausgabe
+All layers except the outermost ChaCha20-Poly1305 are keystream constructions,
+so security holds as long as at least one of them is unbroken.
 
-Der authentisierte Kopf bindet Version, Suite, Blockgroesse, Salt, Nonce,
-Tweak, KDF-Modus, Argon2id-Profil, Ausgabelaenge und Passwortmodell. Beide MACs
-umfassen dieselbe Magie, Kopflaenge, denselben Kopf und den gesamten Chiffretext.
-Beide Tags werden vollstaendig und ohne Kurzschluss verglichen, bevor Klartext
-in die ZPAQ-Pipe gelangt.
+### Per-chunk nonces
 
-Der v9-Reader akzeptiert nur das feste Produktionsprofil `1 GiB / 4 / 4`.
-Abweichende Kopfwerte werden vor der KDF verworfen, damit ein manipuliertes
-Archiv weder schwaechere noch hoehere Argon2-Kosten erzwingen kann. Der native
-Adapter erzwingt dasselbe Profil unabhaengig ein zweites Mal, vergroessert fuer
-den KDF-Lauf kontrolliert das Windows-Working-Set und koordiniert diese
-Reservierung mit den verwalteten `VirtualLock`-Puffern. Dadurch koennen
-gleichzeitige GUI-/Mausereignisse die 1-GiB-Quote nicht waehrend der KDF
-verkleinern. Der native Adapter
-verlangt, dass `VirtualLock` die gesamte Argon2-Matrix sperrt. Scheitert diese
-Sperre, bricht die KDF geschlossen ab; auslagerbarer Argon2-Arbeitsspeicher wird
-nicht akzeptiert. Nach der KDF wird die Matrix vor `VirtualUnlock` und
-`VirtualFree` vollstaendig genullt und die vorherige Working-Set-Konfiguration
-wiederhergestellt.
+For **every** option, each 16 MiB chunk gets its own nonce, derived from the base
+nonce and the chunk index through SHA3-512. A continuous CTR counter over
+arbitrarily large archives eventually repeats, and a repeated counter block under
+one key leaks the XOR of two plaintexts.
 
-Bei gesunden verschluesselten Archiven ersetzt der Dual-MAC-Prueflauf den separaten
-vollstaendigen KPAR2-Vorabhash. Recovery wird nur bei beschaedigter Kennung/
-Kopfzeile oder MAC-Fehler ausgefuehrt; nach erfolgreicher Reparatur erfolgt genau
-ein neuer Authentifizierungs-/Entschluesselungsversuch. Dadurch benoetigt der
-gesunde verschluesselte Pfad zwei statt drei vollstaendige Archiv-Lesepasses.
+### Two Argon2id rounds for Paranoia
 
-## Bedienung
+Paranoia needs 568 bytes of key material — 376 for six layers plus 64 and 128
+for the two MAC keys — and one Argon2id call is kept at 384 bytes. It therefore
+runs two rounds and truncates their concatenation. Both rounds use the same
+password and the same two factors; only the salt differs, which is what makes
+the second round independent without asking the user for more entropy: the first
+expansion of the pool snapshot uses SHA3-512, the second SHA-512.
 
-Die GUI hat drei Tabs:
+Both salts and both nonces are stored in the header. A v9 archive whose header
+carried only the first round could not be decrypted by anyone, including the
+machine that wrote it.
 
-1. **Archive**: Dateien/Ordner auswaehlen oder ablegen, Ziel festlegen,
-   Verschluesselung aktivieren und Threefish oder Kalyna waehlen. Threefish-1024
-   steht an erster Stelle und ist die Werkseinstellung.
-2. **Extract**: `.zpaq` oder `.kzpaq` ablegen; die Suite wird zunaechst aus dem
-   noch unbestaetigten v9-Kopf angezeigt und vor jeder Klartextausgabe durch beide
-   MACs authentisiert. Der Zielordner wird konfliktfrei vorgeschlagen.
-   Extrahiert wird nur in einen neuen oder leeren Nicht-Reparse-Point-Ordner.
-   Eine `.kzpaq` ohne gueltige Containerkennung und ohne nutzbares KPAR2-Sidecar
-   wird geschlossen abgewiesen und niemals als unverschluesseltes ZPAQ an den
-   nativen Parser weitergereicht.
-3. **Cryptographic erase**: Einen gueltigen verschluesselten v9-Container
-   analysieren, zuerst das rekonstruierbare Recovery-Sidecar entfernen und danach
-   Kopf/Schluesselparameter sowie Container loeschen.
+### The container
 
-Vorgeschlagene Archiv- und Zielordnernamen erhalten mindestens `(1)`. Die
-Standardsprache ist Englisch. Sprache, zuletzt gewaehlte Verschluesselungssuite
-und ZPAQ-Kompressionsstufe werden als strikt validierte Komforteinstellungen im
-Benutzerprofil gespeichert. Einstellungsdateien sind auf 64 Byte begrenzt;
-ungueltige Werte fallen auf Englisch, Threefish beziehungsweise Kompressionsstufe 1
-zurueck. Passwoerter, Zufallsfaktoren, Salt und Nonce werden dort nie abgelegt.
-Beim Entpacken bestimmt weiterhin ausschliesslich der authentisierte Archivkopf
-die Verschluesselungssuite; die gespeicherte GUI-Auswahl hat darauf keinen Einfluss.
-Die Kompression ist Bestandteil des ZPAQ-Datenstroms und muss beim Entpacken nicht
-erneut ausgewaehlt werden; die gespeicherte Stufe ist nur der Vorschlag fuer das
-naechste neu erzeugte Archiv.
-Erfolgreiche Archivierung beziehungsweise Extraktion leert die zugehoerigen
-Passwort- und Faktor-Felder automatisch; beide Bereiche besitzen zusaetzlich
-eine manuelle Schaltflaeche **Clear secrets**. Fehlgeschlagene Archivierungen
-entfernen Teilarchive, Dualmanifeste und Recovery-Reste. Fehlgeschlagene oder
-abgebrochene Extraktionen entfernen ihren partiellen Ausgabeordner.
+- Magic `KZPAQ1\0`, UTF-8 JSON header, 64-byte HMAC-SHA3-512 tag, 128-byte
+  Skein-1024 MAC tag, then ciphertext
+- Password mode `UserPassword+GeneratedHex512x2`
+- KDF mode `SHA3-512-LP(UserPassword,FactorA)||SHA3-512-LP(UserPassword,FactorB)`
+- 64-byte salt; Argon2id 0x13 at the fixed production profile `m=1 GiB`, `t=4`,
+  `p=4`
+- Encrypt-then-MAC with two separate keys, both tags mandatory
 
-## Passwortmodell
+The authenticated header binds version, suite, block size, salt, nonce, tweak,
+KDF mode, Argon2id profile, output length and password model. Both MACs cover
+the same magic, header length, header and the entire ciphertext, and both tags
+are compared in full and without short-circuiting before any plaintext reaches
+the ZPAQ pipe.
 
-Zum Entpacken sind alle drei Werte erforderlich:
+The v9 reader accepts only the fixed production profile. Deviating header values
+are rejected before the KDF, so a manipulated archive can force neither weaker
+nor higher Argon2 cost. The native adapter enforces the same profile a second
+time, independently, and requires that the entire Argon2 matrix be locked
+against paging; if that lock fails the KDF aborts rather than accepting swappable
+memory. After the KDF the matrix is zeroed before it is unlocked and freed.
 
-1. Userpasswort mit 24 bis 128 Zeichen.
-2. Faktor A mit 128 Hexadezimalzeichen = 64 Byte = 512 Bit.
-3. Faktor B mit 128 Hexadezimalzeichen = 64 Byte = 512 Bit.
+---
 
-Der Kopf speichert keinen dieser Werte. Er speichert nur oeffentliche,
-notwendige Parameter wie Salt, Nonce, Tweak, Suite und Argon2id-Profil.
-Der optionale Hinweis liegt ebenfalls oeffentlich im Kopf und darf keine
-Passwortteile enthalten. Vor erfolgreicher MAC-Pruefung zeigt die GUI ihn
-ausdruecklich als unbestaetigten Headertext an.
+## Using it
 
-### Userpasswort-Richtlinie
+The window has three tabs.
 
-Neue Archive verlangen:
+**Archive** — select or drop files and folders, choose a target, enable
+encryption and pick an option. Suggested archive and output names always get at
+least a `(1)`. Before encrypting, the current combination of archive path, suite
+and both factors must be printed or deliberately exported as a test PDF.
 
-- mindestens 24 und hoechstens 128 Zeichen
-- mindestens 3 Zeichengruppen
-- mindestens 12 verschiedene Zeichen
-- mindestens 12 Zeichen ausserhalb `0-9`, `A-F`, `a-f`
-- keine zusammenhaengende Hexadezimalfolge mit 8 oder mehr Zeichen
-- keine Gleichheit mit Faktor A oder B
-- Faktor A und Faktor B muessen voneinander verschieden sein
-- mindestens 128 Bit konservative lokale Bewertung
+**Extract** — drop a `.zpaq` or `.kzpaq`. The suite is shown from the not-yet
+authenticated header first and is authenticated by both MACs before any
+plaintext is written. Extraction only ever goes into a new or empty folder. A
+`.kzpaq` with neither a valid container header nor usable KPAR2 data is refused
+outright and never handed to the native parser as plain ZPAQ.
 
-Die GUI aktualisiert Bewertung und verletzte Bedingungen beim Tippen. Die
-Bewertung begrenzt das angenommene Alphabet und bestraft Wiederholungen,
-Sequenzen, Tastaturmuster und bekannte Begriffe. Sie ist eine pessimistische
-Richtlinie, kein mathematischer Entropiebeweis fuer menschliche Passwoerter.
+**Cryptographic erase** — analyse a valid encrypted v9 container, then destroy
+the reconstructable recovery sidecar first and afterwards corrupt and delete the
+container itself, through the same exclusive file handle. The button refuses
+until the SSD/APFS limitation is explicitly acknowledged.
 
-### Dual-SHA3-512 und Argon2id
+A successful archive or extraction clears the associated password and factor
+fields; both panels also have a manual **Clear secrets** button. Failed archive
+runs remove partial archives, dual manifests and recovery leftovers; failed or
+cancelled extractions remove their partial output folder.
 
-Fuer jede Suite existieren getrennte Domains fuer A und B. `LP` bedeutet, dass
-Domain, UTF-8-Userpasswort und normalisierter ASCII-Hex-Faktor jeweils ein
-explizites 32-Bit-Laengenfeld erhalten. Danach berechnet die App:
+Language, the last selected suite and the ZPAQ compression level are stored as
+strictly validated convenience settings in the user profile, capped at 64 bytes,
+falling back to English / the default suite / level 1 on anything invalid.
+Passwords, factors, salt and nonce are never stored there. On extraction the
+authenticated archive header alone determines the suite; the remembered GUI
+selection has no influence on it.
+
+---
+
+## Password model
+
+Extraction requires all three values:
+
+1. A user password of 24 to 128 characters.
+2. Factor A: 128 hex characters = 64 bytes = 512 bits.
+3. Factor B: 128 hex characters = 64 bytes = 512 bits.
+
+The header stores none of them. It stores only public, necessary parameters:
+salt, nonce, tweak, suite and the Argon2id profile. The optional hint is also
+public, must not contain password material, and is shown explicitly as
+unauthenticated header text until the MAC check succeeds.
+
+### User-password policy
+
+- at least 24 and at most 128 characters
+- at least 3 character groups
+- at least 12 distinct characters
+- at least 12 characters outside `0-9`, `A-F`, `a-f`
+- no contiguous hex run of 8 or more characters
+- not equal to factor A or B, and A and B must differ from each other
+- at least 128 bits by a conservative local estimate
+
+The estimate caps the assumed alphabet and penalises repetition, sequences,
+keyboard patterns and known words. It is a pessimistic policy, not a proof of
+entropy for human passwords.
+
+### Dual SHA3-512 and Argon2id
+
+Each suite has separate domains for A and B. `LP` means domain, UTF-8 user
+password and normalised ASCII hex factor each get an explicit 32-bit length
+field:
 
 ```text
 H_A = SHA3-512(LP(domain_A, userPassword, factorA))
 H_B = SHA3-512(LP(domain_B, userPassword, factorB))
-argonPassword = H_A || H_B                     # 128 Byte / 1024 Bit
+argonPassword = H_A || H_B                     # 128 bytes / 1024 bits
 ```
 
-`argonPassword` und der 64-Byte-Salt gehen unverkuerzt in Argon2id. Die
-Ausgabelaenge ist 256 Byte fuer Kalyna beziehungsweise 320 Byte fuer Threefish.
-Die Byte-Zielpuffer fuer UTF-8/ASCII-Kodierung, Laengenrahmen, beide SHA3-Hashes
-und das zusammengesetzte `argonPassword` werden jeweils vor dem ersten
-Schreibzugriff per `VirtualLock` gebunden. Nach Argon2id werden sie noch im
-gesperrten Zustand genullt. Auch die aus der gesperrten Argon2-Ausgabe
-abgetrennten Chiffre- und MAC-Schluessel werden nur in zuvor gesperrte Puffer
-kopiert und dort vor dem Entsperren genullt.
-Die App kompiliert direkt die unveraenderten PHC-Argon2-Kernquellen. Tests
-vergleichen den nativen Adapter mit der PHC-CLI und den exakten 128-Byte-v9-Pfad
-zusaetzlich mit Bouncy Castles unabhaengiger Argon2id-Implementierung.
+`argonPassword` and the 64-byte salt go into Argon2id untruncated. The app
+compiles the unmodified PHC Argon2 reference sources; tests compare the native
+adapter against the PHC CLI and the exact 128-byte v9 path additionally against
+Bouncy Castle's independent Argon2id implementation.
 
-Ein Salt verhindert vorab berechnete Tabellen fuer identisches Passwortmaterial.
-Er macht ein schwaches Userpasswort allein nicht stark; die beiden unabhaengigen
-Zufallsfaktoren und die speicherharte KDF liefern hier den wesentlichen Schutz.
+Every intermediate buffer — the encoding targets, the length frames, both SHA3
+hashes and the assembled `argonPassword` — is locked against paging before its
+first write and zeroed while still locked. The cipher and MAC keys split out of
+the locked Argon2 output are copied only into previously locked buffers.
 
-## Zufall, Salt, Nonce und Tweak
+A salt prevents precomputed tables for identical password material. It does not
+make a weak user password strong on its own; the two independent factors and the
+memory-hard KDF are what carry the protection here.
 
-Fuenf getrennte Pools sammeln Mausdaten fuer Faktor A, Faktor B, Salt, Nonce 1
-und Nonce 2. Faktor- und Salt-Ausgaben sind jeweils das XOR aus:
+---
 
-- `BCryptGenRandom(..., BCRYPT_USE_SYSTEM_PREFERRED_RNG)` als primaerer CSPRNG
-- einer domaenenseparierten SHA3-512-Expansion des jeweiligen Mauspools
+## Randomness, salt, nonce and tweak
 
-Die Nonce verwendet fuer beide Suites immer denselben 128-Byte-Quellpfad:
+Six separate pools collect mouse samples: factor A, factor B, salt, and three
+nonce parts. Each pool needs at least **1024 samples** before archive entropy can
+be produced; with round-robin distribution that is at least 6144 mouse events per
+epoch, and the six counters differ by at most one.
 
-```text
-H1 = SHA3-512(Nonce-1-Pool || Ableitungszaehler || Blockindex || Zweck)
-H2 = SHA3-512(Nonce-2-Pool || Ableitungszaehler || Blockindex || Zweck)
-R  = BCryptGenRandom(128 Byte, BCRYPT_USE_SYSTEM_PREFERRED_RNG)
-N  = R XOR (H1 || H2)
-```
+That count is not a claim of 512 bits of physical mouse entropy. Security may
+already rest on the operating-system CSPRNG alone; the mouse data is additional
+diversity. Every output is the XOR of two independent things:
 
-Threefish verwendet alle 128 Byte von `N`; Kalyna verwendet `N[0..63]`. Damit
-ist die Erzeugungspipeline einheitlich. Wegen der abschliessenden Trunkierung
-beeinflusst `H2` die ausgegebene Kalyna-Nonce mathematisch nicht; Kalynas 64 Byte
-bleiben `R[0..63] XOR H1`.
+- `SecRandomCopyBytes` as the primary CSPRNG
+- a domain-separated SHA3-512 expansion of the relevant mouse pool
 
-Vor der gemeinsamen Archiventropie-Ausgabe benoetigt jeder Pool mindestens 512 Samples. Durch die
-Rundlaufverteilung sind pro Entropie-Epoche mindestens 2560 Mausereignisse
-erforderlich; die fuenf Zaehler unterscheiden sich dabei hoechstens um eins.
-Die Anzahl beweist keine 512 Bit physikalische Mausentropie; Sicherheit darf
-bereits auf `BCryptGenRandom` beruhen. Die Mausdaten sind nur zusaetzliche
-Diversitaet.
+The factors, salt and all three nonce parts are generated together and atomically
+from one epoch, each from its own pool. Afterwards every pool is replaced, zeroed
+while locked, and its counter reset to zero — so zero in that state means
+*consumed*, not *insufficient*. Salt and the full nonce stay in locked RAM until
+encryption begins and are taken exactly once. If that attempt fails after they
+were taken, A and B stay valid, but the retry derives a fresh salt and fresh
+nonces from a new epoch, so a nonce is never reused under the same key.
 
-Faktor A, Faktor B, Salt, Nonce 1 und Nonce 2 werden mit einem Klick gemeinsam
-und atomar aus derselben Epoche, aber aus ihren fuenf getrennten Pools erzeugt.
-Danach werden alle Pools ersetzt, im gesperrten Zustand genullt und ihre
-aktuellen Zaehler auf null gesetzt. Null bedeutet in diesem Zustand daher
-`verbraucht`, nicht `unzureichend`. Salt und der vollstaendige 128-Byte-Noncewert
-bleiben bis zum Beginn der Verschluesselung ausschliesslich in gesperrtem RAM.
-Beim ersten Verschluesselungsversuch werden sie genau einmal entnommen. Schlaegt
-dieser Versuch nach der Entnahme fehl, bleiben A und B gueltig; fuer den
-Wiederholungsversuch erzeugt die App aus einer frischen Epoche einen neuen Salt
-und neue Nonces, damit niemals ein Nonce mit demselben Schluessel wiederverwendet
-wird. Der in der GUI gezeigte Gesamtwert ist die Summe der aktuell noch nicht
-verbrauchten Poolproben und kein historischer Lebenszeitzaehler.
-Pool-Snapshots, Zaehlerrahmen, SHA3-Expansionsbloecke und CSPRNG-Zielpuffer
-werden vor dem ersten Schreibzugriff gesperrt. Ersetzte Pools werden im
-gesperrten Zustand genullt; Besitztransfers und Fehlerpfade werden durch die
-Test-Suite gegen verbleibende `VirtualLock`-Leases geprueft.
+Salt is 64 bytes for every suite. The public 16-byte Threefish tweak is derived
+deterministically and domain-separated from the nonce and stored in the
+authenticated header. Salt, nonce and tweak do not need to be secret.
 
-Salt ist fuer beide Suites 64 Byte lang. Kalyna verwendet eine 64-Byte-Nonce,
-Threefish eine 128-Byte-Nonce. Der oeffentliche 16-Byte-Threefish-Tweak wird
-deterministisch und domaenensepariert aus der Threefish-Nonce abgeleitet und im
-authentisierten Kopf gespeichert. Salt, Nonce und Tweak muessen nicht geheim sein.
+---
 
-## Schluesselzettel
+## Key sheets
 
-Vor dem Verschluesseln muss die aktuelle Kombination aus Archivpfad, Suite und
-beiden Faktoren gedruckt oder bewusst als Test-PDF exportiert werden.
+Before encrypting, the current combination of archive path, suite and both
+factors must be printed or deliberately exported as a test PDF.
 
-- Standard ist der physische Druck ohne von der App erzeugte PDF-Datei.
-- Offensichtliche virtuelle PDF-/XPS-/OneNote-/Fax-Drucker werden blockiert.
-- Seitenfolge: Faktor A, wirklich leere Trennseite, Faktor B.
-- Jede Geheimnisseite nennt Suite, Archivname/-pfad, genau einen Faktor, ein
-  leeres handschriftliches Userpasswortfeld und den QR-Code dieses Faktors.
-- A und B sollen getrennt und offline gelagert werden.
-- **Save test PDF** schreibt beide Faktoren absichtlich dauerhaft auf den
-  ausgewaehlten Datentraeger und ist kein sicherer Standardpfad.
+- Physical printing without a file is the default path.
+- Obvious virtual PDF/XPS/fax printers are blocked.
+- Page order: factor A, a genuinely blank separator page carrying the
+  installation instructions, factor B.
+- Each secret page names the suite, the device name, the archive path, exactly
+  one factor, a blank handwritten field for the user password, and that factor's
+  QR code twice.
+- A and B are meant to be stored separately and offline.
+- **Save test PDF** deliberately writes both factors to the chosen volume
+  permanently and is not a safe default path.
 
-Windows-Spooler, Treiber und Drucker koennen ausserhalb der App eigene temporaere
-Daten anlegen.
+`QR-Scanner.app` from the same package reads the codes back. Printer spoolers,
+drivers and printers can create their own temporary data outside the app.
 
-## Streaming und Parallelisierung
+---
 
-ZPAQ liegt unter `external\zpaq`, Kalyna unter `external\Kalyna-reference` und die
-offizielle Skein-1.3-/Threefish-Quelle unter `external\Skein-reference`.
+## Streaming and parallelism
 
-Die angepasste ZPAQ-`--pipe`-Schnittstelle fuehrt das unverschluesselte ZPAQ-
-Archiv direkt im RAM zwischen ZPAQ und dem Containerdienst. Es wird kein
-unverschluesseltes Zwischenarchiv auf dem Datentraeger erzeugt. Der finale
-Container wird zuerst unter einem zufaelligen Namen als bereits verschluesselter
-Ciphertext geschrieben, auf den Datentraeger gespuelt und anschliessend atomar
-ohne Ueberschreiben auf den Zielnamen verschoben.
+ZPAQ lives under `external/zpaq`, Kalyna under `external/Kalyna-reference`, the
+official Skein 1.3 / Threefish source under `external/Skein-reference`, and
+Crypto++ 8.9.0 under `external/cryptopp`.
 
-Die lokale ZPAQ-Anpassung verwirft beim Entpacken absolute, UNC-/Drive- und
-`..`-Pfade, Windows-ADS, mehrdeutige Punkt-/Leerzeichen-Enden sowie reservierte
-Geraetenamen. Dadurch duerfen Archivmitglieder den leeren Zielordner nicht per
-Pfad-Traversal verlassen. Der Erzeugungspfad laesst NTFS Alternate Data Streams
-bewusst aus, damit die App weder versteckte Streams erzeugt noch Archive schreibt,
-die ihr eigener gehaerteter Extraktor abweisen muesste. Die Extraktion erfolgt in
-einem zufaelligen versteckten Schwesterordner und wird erst nach Erfolg per
-Verzeichnis-Rename installiert.
+The adapted ZPAQ `--pipe` interface carries the unencrypted ZPAQ archive
+directly in RAM between ZPAQ and the container service; no unencrypted
+intermediate archive is ever written to disk. The final container is written
+under a random name as already-encrypted ciphertext, flushed, and then moved
+atomically onto the target name without overwriting.
 
-Direkte Datei-Eingaben werden waehrend des gesamten ZPAQ-Aufrufs mit einem nicht
-schreib-/loeschteilbaren Handle gebunden; Symlink-Aliase werden abgewiesen.
-Archivziele duerfen weder mit einer Eingabe identisch sein noch innerhalb eines
-eingelesenen Verzeichnisbaums liegen. Verifizierte Klartextarchive bleiben vom
-Dualhash bis zum Ende des ZPAQ-Aufrufs ueber dasselbe kanonische Dateiobjekt
-gesperrt. Der native ZPAQ-JIT ist deaktiviert; Modell-/Indexgroessen und
-prozessseitige Diagnoseausgaben besitzen harte Grenzen.
+On extraction the local ZPAQ adaptation rejects absolute paths, `..`, ambiguous
+trailing dots and spaces, and reserved device names, so archive members cannot
+escape the empty target folder by path traversal. Extraction happens in a random
+hidden sibling folder and is installed by directory rename only after success.
 
-Der angepasste Pipe-Extraktor arbeitet in einem einzigen Vorwaertspass und puffert
-nicht das gesamte entschluesselte Archiv. Sein Speicherbedarf wird durch einen
-ZPAQ-Block/ein Modell, die 16-MiB-Containerpuffer und Prozessmetadaten bestimmt,
-nicht durch die Archivgroesse. Kurze Archivschreibvorgaenge, Pipefehler und
-Seekfehler werden als harte Fehler behandelt.
+Direct file inputs are pinned for the whole ZPAQ call with a handle that cannot
+be renamed or deleted from under them; symlink aliases are refused. Archive
+targets may neither equal an input nor lie inside a directory tree being read.
+The native ZPAQ JIT is disabled, and model and index sizes have hard limits.
 
-`native\kalyna_ref_export.c` und `native\threefish_ref_export.c` teilen grosse
-CTR-Aufrufe in disjunkte Block-/Counterbereiche fuer bis zu vier Worker. Die
-Worker schreiben in disjunkte Ausgabebereiche; dadurch bleibt die Ausgabe
-bitgenau identisch zum seriellen CTR-Pfad. Die Umgebungsvariablen
-`KALYNA_CTR_THREADS` und `THREEFISH_CTR_THREADS` koennen 1 bis 4 Worker festlegen.
-HMAC-SHA3-512 und Skein-MAC-1024 sind logisch sequenziell ueber denselben
-resultierenden Chiffretext und werden in einem gemeinsamen Streaming-Pass
-aktualisiert.
+The extractor works in a single forward pass and does not buffer the whole
+decrypted archive. Its memory needs are set by one ZPAQ block, the 16 MiB
+container buffers and process metadata — not by archive size.
 
-Der Threefish-Adapter nutzt die 80 Runden, Rotationen und Key-Schedule der
-offiziellen `Skein1024_Process_Block`-Referenz unveraendert. Er entfernt nur den
-Skein-UBI-Feedforward, um den rohen Threefish-Block zu erhalten. Tests pruefen den
-offiziellen Skein-1.3-Golden-KAT, den offiziellen 128-Byte-keyed-MAC-KAT,
-unabhaengige Bouncy-Castle-Vergleiche, Parallel-/Seriell-Aequivalenz und
-CTR-Roundtrips.
+`native/kalyna_ref_export.c` and `native/threefish_ref_export.c` split large CTR
+calls into disjoint block and counter ranges across workers that claim chunks
+from a shared atomic counter. Workers write into disjoint output ranges, so the
+output stays bit-identical to the serial CTR path. Both MACs are logically
+sequential over the resulting ciphertext and are updated in one shared streaming
+pass.
 
-CTR allein authentisiert nichts. Manipulationsschutz liefern gemeinsam der
-HMAC-SHA3-512 mit 64-Byte-Schluessel/64-Byte-Tag und Skeins nativer keyed mode
-mit 128-Byte-Schluessel/128-Byte-Tag. Beide Schluessel sind disjunkte Bereiche
-der Argon2id-Ausgabe.
+The Threefish adapter uses the 80 rounds, rotations and key schedule of the
+official `Skein1024_Process_Block` reference unchanged, removing only the Skein
+UBI feed-forward to obtain the raw Threefish block.
 
-Unverschluesselte `.zpaq`-Archive erhalten stattdessen die verpflichtenden
-Sidecars `<Archiv>.sha3` und `<Archiv>.skein`. Diese erkennen Korruption und
-algorithmusspezifische Kollisionen, sind ohne privaten Signaturschluessel aber
-kein Schutz gegen einen aktiven Angreifer, der Archiv und beide Sidecars ersetzt.
+CTR authenticates nothing by itself. Tamper protection comes from HMAC-SHA3-512
+with a 64-byte key and tag together with Skein's native keyed mode with a
+128-byte key and tag. Both keys are disjoint ranges of the Argon2id output.
 
-## Bitfehlerkorrektur
+Unencrypted `.zpaq` archives instead get mandatory `<archive>.sha3` and
+`<archive>.skein` sidecars. These detect corruption but, without a private
+signing key, are not protection against an active attacker who replaces the
+archive and both sidecars.
 
-Zu jedem Archiv wird ein nicht abwaertskompatibles KPAR2-v2-Sidecar
-`<Archivname>.kpar2` erstellt:
+---
 
-- Reed-Solomon `RS(20,3)`: 20 Daten- plus 3 Parity-Shards, 15 Prozent Overhead
-- getrennte Parity-Bereiche fuer Kopf und Archivkoerper
-- 4096-Byte-ausgerichtete Archiv-Shards und duale SHA3-512-/Skein-1024-Digests
-- acht raeumlich getrennte, selbst dual gehashte 4096-Byte-Lokatoren: vier am
-  Anfang, vier am Ende; mindestens fuenf identische gueltige Kopien sind Pflicht
-- ein eigener Metadatenbereich aus exakt 4096 Byte grossen, selbst dual gehashten
-  Bloecken; auch dieser Bereich ist stripeweise mit `RS(20,3)` geschuetzt
-- das kanonische Manifest, beide Zertifikate/MAC-Tags, Suite, Salt,
-  Argon2id-Profil und alle Shard-Digests liegen innerhalb dieses geschuetzten
-  Metadatenbereichs
+## Bit-error correction
 
-Damit bleiben Lokatoren, Manifest und beide Zertifikate auch beim vollstaendigen
-Ausfall von bis zu drei beliebigen 4096-Byte-Bloecken rekonstruierbar. Einzelbits
-und vollstaendig unlesbare 4-KiB-Bloecke im Archiv sind reparierbar, solange sie
-pro Archiv-Stripe hoechstens drei Daten-Shards betreffen und noch mindestens so
-viele gueltige Parity-Shards vorhanden sind. Vier ausgefallene Datenbloecke in
-einem Stripe werden bewusst abgelehnt.
+Every archive gets a non-backward-compatible KPAR2-v2 sidecar
+`<archive>.kpar2`:
 
-Blockorientierte `RandomAccess`-Lesezugriffe behandeln auch vom Dateisystem
-gemeldete I/O-Lesefehler als Erasures. Beim Kopieren eines beschaedigten Archivs
-faellt der Dienst nach einem fehlgeschlagenen grossen Lesezugriff auf 4096-Byte-
-Leseeinheiten zurueck, markiert nur die unlesbaren Bloecke und rekonstruiert sie
-im neuen Kandidaten. Daten- und Parity-Puffer werden pro Abschnitt einmal
-angelegt und stripeweise wiederverwendet; der Arbeitsspeicherbedarf waechst daher
-nicht mit der Archivgroesse.
+- Reed-Solomon `RS(20,3)`: 20 data plus 3 parity shards, 15 percent overhead
+- separate parity regions for header and archive body
+- 4096-byte aligned archive shards with dual SHA3-512 and Skein-1024 digests
+- eight spatially separated, themselves dual-hashed 4096-byte locators — four at
+  the start, four at the end; at least five identical valid copies are required
+- a metadata region of exactly 4096-byte blocks, itself protected stripe-wise
+  with `RS(20,3)`; the canonical manifest, both certificates, suite, salt,
+  Argon2id profile and all shard digests live inside it
 
-Fuer **verschluesselte Archive** ist das KPAR2-Manifest immer zweifach
-authentifiziert: HMAC-SHA3-512 und Skein-1024 keyed mode verwenden eigene,
-domaenensepariert aus den disjunkten Archiv-MAC-Schluesseln und einer zufaelligen
-Archiv-ID abgeleitete Recovery-Schluessel. Das authentifizierte Manifest bindet
-die komplette Locator-Geometrie, Salt/Suite/KDF-Parameter, beide Archivdigests,
-alle Daten-/Parity-Digests und deren Offsets. Falsche Passwortfaktoren oder eine
-ausgetauschte KPAR2-Datei werden vor dem Erzeugen eines Reparaturkandidaten
-abgelehnt.
+Single bits and entirely unreadable 4 KiB blocks are repairable as long as they
+affect at most three data shards per stripe. Block-oriented reads treat I/O
+errors reported by the file system as erasures.
 
-Fuer **unverschluesselte Archive** sind dieselben SHA3-/Skein-Werte ausdruecklich
-nur unkeyed Fehlererkennungswerte. Sie sind keine Signatur und bieten keine
-Authentizitaet gegen einen Angreifer, der Archiv und Sidecars ersetzen kann. Eine
-Reparatur wird deshalb immer in eine konfliktfrei benannte neue Datei geschrieben;
-das beschaedigte Original bleibt unveraendert.
+For **encrypted archives** the KPAR2 manifest is always dual-authenticated:
+HMAC-SHA3-512 and Skein-1024 keyed mode use their own recovery keys, derived
+domain-separated from the archive MAC keys and a random archive ID. Wrong
+password factors or a swapped KPAR2 file are refused before any repair candidate
+is produced. Every suite in the catalogue is covered — an earlier release
+validated the locator's suite id against a hard-coded range that admitted only
+the first two, which meant most suites produced an archive the app would encrypt
+and then refuse to protect.
 
-Der getrennte **Notfallmodus** ueberspringt die KPAR2-Metadaten-Authentifizierung,
-schreibt ausnahmslos eine neue Datei und veraendert nie das Original. Bei einem
-verschluesselten Archiv muessen trotzdem alle drei Passwortfaktoren vorliegen und
-der fertige Kandidat muss die eingebetteten HMAC-SHA3-512- und Skein-1024-MACs des
-Containers bestehen. Es gibt keinen automatischen Rueckfall vom normalen in den
-Notfallmodus.
+For **unencrypted archives** the same SHA3 and Skein values are explicitly
+unkeyed error-detection values. A repair is therefore always written to a new,
+conflict-free file name and the damaged original is left untouched.
 
-KPAR2 enthaelt bei verschluesselten Archiven nur Kopf- und Chiffretextparitaet,
-keinen ZPAQ-Klartext. Cryptographic erase ueberschreibt und loescht auch das
-Sidecar. Dabei werden Anfang und Ende zerstoert: am Anfang liegen saemtliche
-Header-Parity-Shards, an beiden Enden die redundanten Lokatoren und am Ende der
-Metadatenabschluss. Ein Vollueberschreiben eines bei 1 TB rund 150 GiB grossen
-Sidecars waere auf SSDs weder physisch verlaesslich noch zweckmaessig.
+The separate **emergency mode** skips KPAR2 metadata authentication, always
+writes a new file and never modifies the original. For an encrypted archive all
+three password factors are still required and the finished candidate must pass
+the container's own two MACs. There is no automatic fallback from the normal
+mode into emergency mode.
 
-## Integritaet und Signierung
+---
 
-Folgende native Laufzeitdateien brauchen Authenticode, eine hybride Signatur
-`.khsig`, die kompilierten Schluesselpins und nach dem Signieren **beide**
-Hashsidecars `.sha3` und `.skein`:
+## Integrity and signing
 
-- `zpaq.exe`
-- `argon2.exe`
-- `argon2_ref.dll`
-- `kalyna_ref.dll`
-- `threefish_ref.dll`
+Every executable in the package carries two independent signatures: Apple's, and
+a detached pair of RSA-PSS/SHA-512 (RSA-4096) and ML-DSA-87 (NIST FIPS 204).
+**Both** must verify; there is no OR fallback. Seventeen Mach-O files are
+covered:
 
-Native Dateien werden nur neben der App oder in `tools` akzeptiert. Ein nicht
-schreib-/loeschteilbares Handle haelt genau das gehashte und signaturgepruefte
-Dateiobjekt bis zum Laden/Start gesperrt. Argon2, Kalyna und Threefish rufen ihre
-Exporte direkt ueber Funktionszeiger aus genau diesem geprueften Modul-Handle auf;
-eine zweite DLL-Namenssuche findet nicht statt. Geladene DLLs bleiben fuer die
-Prozesslebensdauer durch Windows gebunden. Der vom gesperrten Handle aufgeloeste
-finale DOS-Pfad muss exakt im erwarteten App-Verzeichnis liegen.
+- `Keep Vault`, `Keep Vault Launcher`, `Keep Vault Supervisor`
+- `zpaq`, `argon2`
+- `libargon2_ref`, `libkalyna_ref`, `libthreefish_ref`, `libaes_ref`,
+  `libmars_ref`, `libshacal2_ref`, `libchachapoly_ref`
+- `libAvaloniaNative`, `libHarfBuzzSharp`, `libSkiaSharp`
+- `Keep Vault Release Verifier`
+- `QR-Scanner`
 
-Die App-EXE wird ebenfalls gegen beide Manifeste, Authenticode und `.khsig`
-geprueft. Bei einem nicht gebuendelten Build gilt das fuer jede lokale EXE/DLL
-im App- und optionalen `tools`-Ordner, einschliesslich App-Assembly, Bouncy
-Castle, PDFsharp und QRCoder. Im Portable-Single-File liegen die verwalteten
-Abhaengigkeiten innerhalb der geprueften EXE. Das GUI bleibt gesperrt, bis alle
-verpflichtenden Artefakte jede Pruefschicht erfuellen.
+The signing targets are enumerated from the bundle rather than listed by hand,
+and both the launcher and the standalone verifier refuse any Mach-O in the tree
+that has no signature. A hand-written list only ever covers what somebody
+remembered to add: the three Avalonia and Skia libraries were once signed by
+Apple and left out of the dual signature, running inside the process that holds
+the archive keys on Apple's signature alone — the single layer this app is built
+not to depend on.
 
-Authenticode verlangt genau eine primaere RSA-4096-Signatur mit
-SHA-512-Dateidigest. Das Signaturzertifikat muss selbst mit RSA/SHA-512 signiert
-sein, Digital-Signature-Key-Usage und Code-Signing-EKU besitzen. SignTool nutzt
-auch fuer den RFC-3161-Zeitstempel SHA-512. Sekundaere Authenticode-Signaturen
-werden blockiert, damit keine mehrdeutige Signerzuordnung entsteht.
+Two signatures cannot live inside the bundle they cover and are therefore
+published beside it:
 
-Jedes signierte Artefakt besitzt zusaetzlich ein streng kodiertes `.khsig`-
-Sidecar. Es bindet Domaene, Dateilaenge und SHA-512-Dateidigest und verlangt
-gleichzeitig:
+- the launcher's, because codesign writes the bundle seal into the launcher
+  itself, so a signature over its own bytes would invalidate itself;
+- the scanner's, because Apple's seal covers `Contents/Resources` and a file
+  added there afterwards would break the seal it sits under.
 
-- RSA-PSS mit RSA-4096 und SHA-512
-- ML-DSA-87 nach NIST FIPS 204
+Keep Vault verifies `QR-Scanner.app` against the same pinned keys at every start
+and reports the result in the security log. The scanner reads the two secret
+factors off the printed sheets and cannot vouch for itself — a replaced app
+would simply claim to be fine. A failure is loud but does not stop Keep Vault:
+the scanner is a separate program whose code Keep Vault never loads.
 
-Beide Signaturen muessen gueltig sein; ein ODER-Rueckfall existiert nicht.
-Abgeschnittene Sidecars, unbekannte Versionen und nachgestellte Daten werden
-abgewiesen. Bei PE-Dateien muss der im Sidecar enthaltene RSA-Signer genau dem
-primaeren Authenticode-Signer derselben Datei entsprechen.
-
-RSA-SubjectPublicKeyInfo und roher ML-DSA-87-Public-Key sind jeweils dreifach
-gepinnt:
+Both public keys are pinned three times each, and all six fingerprints must
+match exactly:
 
 - SHA-256
 - SHA3-512
 - Skein-1024
 
-Alle sechs Fingerprints muessen exakt passen. Der Zertifikat-Thumbprint dient
-nur als Build-Auswahl und zur Bindung von Authenticode an `.khsig`; er ist kein
-konfigurierter Vertrauenspin. Mehrere Hashes addieren keine Sicherheitsbits,
-vermeiden aber eine einzelne Hash-/Provider-Abhaengigkeit bei der
-Schluesselidentifikation.
+Multiple hashes add no security bits; they avoid a single hash or provider
+dependency in key identification. macOS validates only the Apple signature;
+ML-DSA-87 is checked by the launcher, by the app, and by the standalone
+verifier. This is a hybrid application signature, not a dual X.509 certificate.
+ML-KEM-1024 from FIPS 203 is a KEM and cannot sign software, which is why
+ML-DSA-87 from FIPS 204 provides the post-quantum half.
 
-Windows Authenticode kennt derzeit keine ML-DSA-Signatur. Das Betriebssystem
-validiert daher nur den RSA/SHA-512-Anteil; ML-DSA wird von der App und dem
-separaten `KalynaReleaseVerifier` geprueft. Dies ist eine hybride
-Anwendungssignatur und kein duales Windows-X.509-Zertifikat. ML-KEM-1024 aus
-FIPS 203 ist ein KEM und kann keine Software signieren; fuer den
-Post-Quanten-Signaturanteil wird deshalb ML-DSA-87 aus FIPS 204 verwendet.
+The imported `pq-crystals/dilithium` reference sources are pinned to commit
+`d35ba3fe5449bee3e6d43e1f296c3ca818bd36be`, and the native build requires
+matching SHA-256, SHA3-512 and Skein-1024 source manifests for exactly the 21
+included reference files.
 
-Die importierten `pq-crystals/dilithium`-Referenzquellen sind auf Commit
-`d35ba3fe5449bee3e6d43e1f296c3ca818bd36be` festgelegt. Der Native-Build
-verlangt fuer genau 21 einbezogene Referenzdateien passende SHA-256-,
-SHA3-512- und Skein-1024-Quellmanifeste. Interoperabilitaetstests pruefen
-verwaltete ML-DSA-87-Signaturen gegen diesen kompilierten Referenzadapter in
-beiden Richtungen.
+A root-owned rollback anchor at
+`/Library/Application Support/Keep Vault/minimum-version` records the lowest
+acceptable build number, so a user-level attacker cannot reinstate an older,
+weaker release.
 
-Die lokale Entwicklungs-PKI ist nur fuer Entwicklung geeignet:
+---
 
-- Root: `CN=Keep Vault Development Root SHA512`
-- Leaf: `CN=Keep Vault Development Signing SHA512`
-- Standard-Pins: `Directory.Build.props`
+## Build from source
 
-Das Signierskript verweigert `-TrustDevelopmentCertificate` und bricht ab,
-falls die Entwicklungs-Root in `CurrentUser\Root` liegt. Die App akzeptiert die
-nicht global vertraute Entwicklungssignatur nur ueber die sechs exakt
-einkompilierten Fingerprints. Der RSA-Entwicklungsschluessel liegt nicht
-exportierbar in `CurrentUser\My`; der ML-DSA-Entwicklungsschluessel liegt als
-DPAPI-CurrentUser-Container vor. Prozesse mit denselben Benutzerrechten koennen
-beide Signierpfade dennoch benutzen.
+Requires Xcode command-line tools and the pinned .NET 10 SDK. Release signing
+needs your own RSA-4096 code-signing key and an ML-DSA-87 key pair; the paths are
+configurable through `KEEPVAULT_HYBRID_PFX` and `KEEPVAULT_MLDSA_PRIVATE_KEY`.
 
-Eine oeffentliche Weitergabe braucht ein echtes RSA-Code-Signing-Zertifikat und
-getrennt geschuetzte Produktionsschluessel fuer RSA und ML-DSA. Der aktuelle
-lokale ML-DSA-Signieradapter ist ein Entwicklungs-Key-Store, kein HSM-Adapter.
-Der externe Verifier und seine sechs Pins muessen ausserhalb des zu pruefenden
-Pakets ueber einen authentisierten Kanal bezogen werden.
-
-Die nativen Release-Artefakte werden mit statischer CRT, `/GS`, CFG
-(`/guard:cf`), ASLR/NX und CET-Kompatibilitaet gebaut. Zur Laufzeit werden
-Remote-/Low-Integrity-Images blockiert, `System32` bevorzugt und der allgemeine
-DLL-Suchpfad auf `System32` begrenzt. Die aktuellen Importtabellen enthalten nur
-Windows-System-DLLs.
-
-Der verwaltete Build ist ueber `global.json` auf den geprueften
-.NET-SDK-Featurestand und ueber den einheitlichen Restore-Graph auf `win-x64`
-und Single-File-Publishing festgelegt. `packages.lock.json` bindet direkte und
-transitive NuGet-Inhalte; Restore laeuft standardmaessig im Locked Mode. Nach
-einer bewusst geprueften Paketaktualisierung muessen die Lockdateien explizit
-mit `dotnet restore -p:RestoreLockedMode=false --force-evaluate` erneuert und
-die vollstaendige Referenz- und Manipulationstestsuite wiederholt werden.
-
-### Entwicklungsbuild
-
-```powershell
-.\tools\Build-Native.cmd
-dotnet build .\KalynaArchiver\KalynaArchiver.csproj -c Release
-& .\tools\Sign-Binaries.ps1 -Configuration Release -CreateDevelopmentCertificate
-& .\tools\Generate-ReleaseManifests.ps1 -Configuration Release
-& .\tools\Sign-ManagedOutput.ps1 -Configuration Release `
-  -CertificateThumbprint '<Entwicklungs-Leaf-Thumbprint>'
+```sh
+./tools/Build-Native-macOS.sh          # reference ciphers, Argon2, ZPAQ
+./tools/Build-KeepVault-macOS.sh       # app bundle, signed and sealed
+./tools/Build-Portable-macOS.sh        # portable folder and ZIP
+./tools/Install-KeepVault-macOS.sh     # verify and install to /Applications
+./tools/Verify-KeepVault-macOS.sh      # check an installed or built bundle
 ```
 
-### Release mit eigenen Schluesseln
+The build compiles all six fingerprints in, signs the app and every native file,
+then produces SHA3-512 and Skein-1024 manifests plus a `.khsig` for each release
+artifact. Its final gate runs the shipped verifier against the ZIP, the app and
+the whole package folder, so a release cannot be published unless its own tool
+accepts it.
 
-```powershell
-$certificate = '<40-stelliger Leaf-Thumbprint als Signierauswahl>'
-$rsaSha256 = '<64-stelliger SHA-256-SPKI-Fingerprint>'
-$rsaSha3 = '<128-stelliger SHA3-512-SPKI-Fingerprint>'
-$rsaSkein = '<256-stelliger Skein-1024-SPKI-Fingerprint>'
-$mlSha256 = '<64-stelliger SHA-256-ML-DSA-Fingerprint>'
-$mlSha3 = '<128-stelliger SHA3-512-ML-DSA-Fingerprint>'
-$mlSkein = '<256-stelliger Skein-1024-ML-DSA-Fingerprint>'
-.\tools\Build-Native.cmd
-dotnet build .\KalynaArchiver\KalynaArchiver.csproj -c Release `
-  -p:KalynaExpectedSignerSha256=$rsaSha256 `
-  -p:KalynaExpectedSignerSha3_512=$rsaSha3 `
-  -p:KalynaExpectedSignerSkein1024=$rsaSkein `
-  -p:KalynaExpectedMldsa87Sha256=$mlSha256 `
-  -p:KalynaExpectedMldsa87Sha3_512=$mlSha3 `
-  -p:KalynaExpectedMldsa87Skein1024=$mlSkein
-& .\tools\Sign-Binaries.ps1 -Configuration Release `
-  -CertificateThumbprint $certificate `
-  -ExpectedSignerSha256 $rsaSha256 -ExpectedSignerSha3_512 $rsaSha3 `
-  -ExpectedSignerSkein1024 $rsaSkein -ExpectedMldsa87Sha256 $mlSha256 `
-  -ExpectedMldsa87Sha3_512 $mlSha3 -ExpectedMldsa87Skein1024 $mlSkein
-```
-
-## Portable Version
-
-```powershell
-& .\tools\Build-Portable.ps1 -CertificateThumbprint $certificate `
-  -ExpectedSignerSha256 $rsaSha256 -ExpectedSignerSha3_512 $rsaSha3 `
-  -ExpectedSignerSkein1024 $rsaSkein -ExpectedMldsa87Sha256 $mlSha256 `
-  -ExpectedMldsa87Sha3_512 $mlSha3 -ExpectedMldsa87Skein1024 $mlSkein
-```
-
-Ausgabe sind `dist\Keep Vault-portable-win-x64` und die gleichnamige ZIP.
-
-Desktop- und Startmenü-Verknüpfung für die lokale portable Ausgabe erstellen:
-
-```powershell
-pwsh -File ".\tools\Install-KeepVaultShortcuts.ps1"
-```
-Der Build kompiliert alle sechs Fingerprints ein, signiert App und native
-Dateien und erzeugt danach SHA3-512-/Skein-1024-Manifeste sowie `.khsig` fuer
-jedes Releaseartefakt. Auch ZIP, deren beide Hashmanifeste und der externe
-Verifier werden hybrid signiert. `Keep Vault Release Verifier-win-x64.exe` prueft
-wahlweise das entpackte Verzeichnis oder die ZIP vor dem Start.
-
-## Sicherheitsgrenzen
-
-- Sensible verwaltete Bytepuffer werden genullt und verpflichtend mit
-  `VirtualLock` gegen Auslagerung gesperrt. Ein Lock- oder Working-Set-Fehler
-  beendet die Operation. Das gilt ebenso fuer die gesamte native
-  1-GiB-Argon2-Matrix.
-- Prozesshaertung setzt best effort WER-, Fehler-, Handle- und Extension-Point-
-  Mitigations sowie Image-Load- und DLL-Suchpfadregeln.
-- `WDA_EXCLUDEFROMCAPTURE` wird angefordert, kann aber nicht jede Capture-
-  Software, RDP-Konfiguration oder Hardwarekamera blockieren.
-- WPF-Passwoerter existieren zeitweise als verwaltete Strings. Pagefile,
-  Hibernation, Debugger, Malware mit Prozessrechten und Hardware-/Timing-Angriffe
-  koennen von einer .NET-Desktop-App nicht vollstaendig ausgeschlossen werden.
-- `VirtualLock` deckt nur die explizit gesperrten Puffer ab. CPU-Register,
-  native Worker-Stacks und interner Zustand von Betriebssystem- oder
-  Framework-Kryptografieprovidern koennen auf Anwendungsebene nicht verlaesslich
-  gesperrt oder vollstaendig genullt werden.
-- Threefish verwendet ARX-Operationen ohne geheime Tabellen. Die verwendete
-  Kalyna-Referenz ist tabellenbasiert und bietet keinen beweisbaren Schutz gegen
-  Cache-Seitenkanaele auf einem kompromittierten gemeinsam genutzten System.
-- Ein 1024-Bit-Threefish-Schluessel und ein 1024-Bit-Skein-Tag bedeuten nicht,
-  dass die Gesamtkonstruktion 1024 Bit Sicherheitsstaerke besitzt. KDF,
-  Passwortmaterial, Chiffre, beide MACs und Implementierung begrenzen gemeinsam
-  die reale Staerke; Sicherheitsbits werden nicht addiert.
-- Duale unkeyed Hashes sind keine digitale Signatur. Die Release-Manifeste
-  gewinnen aktive Faelschungsresistenz erst durch ihre verpflichtenden
-  RSA-PSS-/ML-DSA-`.khsig`-Signaturen und den Schutz beider privaten Schluessel.
-- Die hybride Codesignatur bleibt gegen einen kryptografisch relevanten
-  Quantenangreifer nur dann faelschungsresistent, wenn ML-DSA-87, seine
-  Implementierung und der ausserhalb des Pakets verankerte ML-DSA-Pin standhalten.
-  RSA-4096 allein ist nicht post-quantenfest. Der AND-Verbund erlaubt jedoch
-  keinen Rueckfall auf RSA, wenn nur RSA durch Shor gebrochen wird.
-- SHA-256, SHA3-512 und Skein-1024 als parallele Pins addieren ihre
-  Sicherheitsstaerken nicht. ML-DSA-87 besitzt NIST-Sicherheitskategorie 5;
-  weder die App noch Bouncy Castle oder der lokale Referenzadapter sind dadurch
-  automatisch FIPS-validierte Kryptomodule.
-- `.khsig` besitzt keinen eigenen RFC-3161-Zeitstempel oder Sperrlistenstatus.
-  Der Authenticode-Zeitstempel deckt nur die PE-Signatur ab. Langfristige
-  Release-Archivierung muss daher Schluesselkompromittierungen und Pin-Rotation
-  organisatorisch behandeln.
-- Die lokalen Entwicklungs-Schluessel sind fuer Malware mit denselben
-  Benutzerrechten verwendbar. Ein produktiver Build braucht zwei getrennt
-  geschuetzte Signierschluessel und einen unabhaengig verteilten Verifier.
-- Eine Selbstpruefung kann nicht erzwingen, dass ein vollstaendig ersetzter
-  App-Bootstrap seinen eigenen Pruefcode ausfuehrt. Schutz vor diesem lokalen
-  Startangriff erfordert zusaetzlich Windows Application Control/AppLocker und
-  zwei fuer den Angreifer nicht nutzbare Release-Signierschluessel. Der externe
-  Verifier hilft nur, wenn er selbst und seine Pins aus einer unabhaengig
-  vertrauenswuerdigen Quelle stammen. Die Portable-Single-File-Ausgabe
-  verkleinert lediglich die vorgelagerte Managed-DLL-Ladeflaeche.
-- KPAR2 bietet Angreifer-Authentizitaet nur fuer verschluesselte Archive und nur
-  nach erfolgreicher Pruefung beider domaenenseparierter Recovery-MACs. Das
-  unverschluesselte Profil und der explizite Notfallmodus bieten lediglich
-  Fehlerkorrektur; bei verschluesselten Notfallausgaben bleibt die nachgelagerte
-  Container-Dual-MAC-Pruefung zwingend.
-- `KPAR2` ist ein app-eigenes Format und nicht mit standardisierten PAR2-Werkzeugen
-  kompatibel. Bei einem 1-TB-Archiv benoetigt 15 Prozent Redundanz ungefaehr
-  150 GiB Sidecar-Speicher und mehrere vollstaendige Lese-/Schreibpasses.
-- Per-Datei-Ueberschreiben garantiert auf SSDs keine physische Loeschung. Echte
-  ATA/NVMe Secure Erase/Crypto Erase sind laufwerksweite Firmware-Aktionen.
-- OneDrive/Cloud-Versionierung, Backups, Volume Shadow Copies und bereits
-  vorhandene PDF-/Druckspoolerdateien koennen geloeschte Archive oder
-  Schluesselzettel weiterhin enthalten.
-- ZPAQ ist ein grosser nativer C++-Parser und laeuft derzeit nicht in einem
-  AppContainer. Pfadtests, ein deterministischer Mutationskorpus, CFG/CET und
-  Prozessbegrenzungen reduzieren das Risiko, ersetzen aber weder dauerhaftes
-  Fuzzing noch ein unabhaengiges Audit des Parsers.
-- Das Projekt zielt derzeit auf .NET 9. Diese STS-Version endet laut Microsoft am
-  10. November 2026; vor diesem Datum ist eine getestete Migration auf .NET 10 LTS
-  erforderlich.
-- Ein physischer 1-TB-End-to-End-Test, eine formale Sicherheitsbeweisfuehrung und
-  ein unabhaengiges externes Kryptografieaudit wurden nicht durchgefuehrt.
+---
 
 ## Tests
 
-```powershell
-dotnet run --project .\KalynaArchiver.Tests\KalynaArchiver.Tests.csproj -c Release
+```sh
+./tools/Stage-TestNatives-macOS.sh
+cd KeepVaultMac.Tests
+dotnet run -c Release -- --full
 ```
 
-Die Suite prueft GUI/Drag-and-drop, Spracherhaltung, Passwortregeln,
-Entropiepools, getrennte Schluesselzettel, SHA3-512- und Skein-1024-KATs,
-offizielle Skein-MAC-KATs, ML-DSA-87-Referenzinteroperabilitaet und
-Manipulationen beider Hybrid-Signaturanteile, PHC- und Bouncy-Argon2id-
-Vergleiche, Kalyna- und Threefish-Referenzvektoren, parallele CTR-
-Aequivalenz, beide verschluesselten PDF-Roundtrips, falsche Faktoren,
-Manipulation jedes einzelnen MAC-Tags, Klartext-Dualmanifeste, kurze Reads,
-atomare Zielkonflikte, KPAR2-v2-Lokatorkonsens, dreifachen Ausfall von
-Metadaten-/Zertifikatsbloecken, Vier-Block-Grenze, falsche Recovery-Faktoren,
-Sidecar-Transplantation, Originalschutz im Notfallmodus, grosse Streamingdaten,
-sechsfache RSA-/ML-DSA-Schluesselbindung, TOCTOU-Sperren,
-Mehrfachsignatur-Sperre, NTFS-ADS-Konsistenz,
-Argon2-Profil-Downgrades, KDF-Policy-Umgehungen, Archiv-Symlink-Aliase,
-Eingabe-/Zielkonflikte, mutierte ZPAQ-Pipe-Eingaben und cryptographic erase.
-Falls vorhanden wird
-`C:\Users\Michael\OneDrive - tu-dortmund.de\Desktop\Aushang_Studienassistenz_2.pdf`
-mit Poppler validiert. Ist nur die Datei mit dem Zusatz ` - Kopie.pdf` vorhanden,
-wird diese stattdessen verwendet.
+Twenty-four comprehensive groups, on top of twelve smoke tests. `--only <text>`
+narrows a run to one group while fixing it.
 
-Quellen: [Kalyna reference](https://github.com/Roman-Oliynykov/Kalyna-reference),
+The suite covers macOS process hardening; signed native trust and tamper
+rejection; hybrid-signature coverage of every Mach-O in the built bundle; the
+companion scanner check including corrupted, modified and missing signatures;
+SHA3, Skein, Kalyna and Threefish reference vectors; ML-DSA-87 interoperability
+against the compiled reference adapter in both directions; randomised
+differential testing against every reference library; the fixed Argon2id profile
+against PHC and Bouncy Castle; ZPAQ levels, streaming, traversal and a malformed
+corpus; v9 round-trips and manipulation rejection; that the outer cascade layer
+alone reveals nothing; two-round derivation from one pool consumption; per-chunk
+nonces across a multi-chunk archive; salt and nonce for every single-round suite;
+MARS and SHACAL-2 published vectors; KPAR2 repair, authentication,
+transplantation rejection and coverage of every catalogued suite; cryptographic
+erase ordering and hard-link refusal; verified original deletion; and the GUI
+driven through Avalonia's headless backend.
+
+---
+
+## Security boundaries
+
+- Sensitive managed buffers are zeroed and locked against paging. A lock failure
+  aborts the operation. The same applies to the entire native 1 GiB Argon2
+  matrix.
+- The app runs with the hardened runtime and no entitlements, so library
+  validation is active. It is signed with a local Apple Development identity and
+  is **not notarized**; Gatekeeper will refuse it on another Mac until it is
+  signed with a Developer ID certificate and notarized.
+- Capture protection is best effort. It cannot block every screen-recording
+  tool, remote-desktop configuration or hardware camera.
+- Passwords exist temporarily as managed strings. Pagefile, hibernation,
+  debuggers, malware holding the user's own privileges, and hardware or timing
+  attacks cannot be fully excluded by a .NET desktop application.
+- Memory locking covers only the buffers explicitly locked. CPU registers,
+  native worker stacks and the internal state of operating-system crypto
+  providers cannot be reliably locked or zeroed from application level.
+- Threefish and ChaCha20 use ARX operations without secret tables. The Kalyna,
+  AES, MARS and SHACAL-2 references are table-based and offer no provable
+  protection against cache side channels on a compromised shared system.
+- A 1024-bit Threefish key and a 1024-bit Skein tag do not mean the whole
+  construction has 1024 bits of security. KDF, password material, ciphers, both
+  MACs and the implementation jointly bound the real strength; security bits do
+  not add up. Neither does layering six ciphers make the cascade six times
+  stronger — it means an attacker must break every layer, not that the strengths
+  sum.
+- Dual unkeyed hashes are not a digital signature. The release manifests gain
+  active forgery resistance only from their mandatory RSA-PSS / ML-DSA `.khsig`
+  signatures and from both private keys being protected.
+- The hybrid code signature stays forgery-resistant against a cryptographically
+  relevant quantum attacker only if ML-DSA-87, its implementation and the pin
+  anchored outside the package hold. RSA-4096 alone is not post-quantum secure.
+  The AND construction does, however, permit no fallback to RSA when only RSA is
+  broken by Shor.
+- `.khsig` has no RFC-3161 timestamp or revocation status of its own. Long-term
+  release archiving must handle key compromise and pin rotation organisationally.
+- The current signing keys live in a local key store, not an HSM. A public
+  release needs two separately protected signing keys and an independently
+  distributed verifier.
+- A self-check cannot force a completely replaced application bootstrap to run
+  its own checking code. The launcher, its cdhash pins and the rollback anchor
+  raise the bar; they do not remove this class of local startup attack.
+- KPAR2 offers authenticity against an attacker only for encrypted archives and
+  only after both domain-separated recovery MACs verify. The unencrypted profile
+  and emergency mode offer error correction only.
+- `KPAR2` is an app-specific format and is not compatible with standard PAR2
+  tooling. At 1 TB, 15 percent redundancy needs roughly 150 GiB of sidecar
+  storage and several full read/write passes.
+- Per-file overwriting guarantees no physical erasure on SSDs. Real ATA/NVMe
+  Secure Erase and Crypto Erase are whole-drive firmware actions.
+- Cloud versioning, backups, snapshots and existing PDF or print-spooler files
+  can still contain deleted archives or key sheets.
+- ZPAQ is a large native C++ parser and does not currently run in a separate
+  sandbox. Path tests, a deterministic mutation corpus and process limits reduce
+  the risk but replace neither continuous fuzzing nor an independent audit of the
+  parser.
+- A physical 1 TB end-to-end test, a formal security proof and an independent
+  external cryptographic audit have not been carried out.
+
+---
+
+Sources: [Kalyna reference](https://github.com/Roman-Oliynykov/Kalyna-reference),
 [PHC Argon2](https://github.com/P-H-C/phc-winner-argon2),
 [ZPAQ](https://github.com/zpaq/zpaq),
+[Crypto++](https://github.com/weidai11/cryptopp),
 [FIPS 202 / SHA-3](https://csrc.nist.gov/pubs/fips/202/final),
 [FIPS 204 / ML-DSA](https://csrc.nist.gov/pubs/fips/204/final),
 [pq-crystals/dilithium](https://github.com/pq-crystals/dilithium),
 [Threefish / Skein authors](https://www.schneier.com/academic/skein/threefish/),
 [Skein 1.3 paper](https://www.schneier.com/wp-content/uploads/2015/01/skein.pdf),
-[.NET support policy](https://dotnet.microsoft.com/en-us/platform/support/policy),
-[Windows process mitigations](https://learn.microsoft.com/windows/win32/api/processthreadsapi/nf-processthreadsapi-setprocessmitigationpolicy).
+[RFC 8439 / ChaCha20-Poly1305](https://www.rfc-editor.org/rfc/rfc8439).
