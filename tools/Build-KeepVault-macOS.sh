@@ -21,12 +21,15 @@ notary_profile=${KEEPVAULT_NOTARY_PROFILE:-}
 pfx_path=${KEEPVAULT_HYBRID_PFX:-${HOME}/Library/Application Support/Keep Vault/ReleaseKeys/hybrid-rsa4096.pfx}
 mldsa_private_key=${KEEPVAULT_MLDSA_PRIVATE_KEY:-${HOME}/Library/Application Support/Keep Vault/ReleaseKeys/mldsa87-private.key}
 mldsa_private_key_encrypted=${KEEPVAULT_MLDSA_PRIVATE_KEY_ENCRYPTED:-${mldsa_private_key}.enc}
-mldsa_keychain_service=${KEEPVAULT_MLDSA_KEYCHAIN_SERVICE:-de.michael-feinermann.keep-vault.mldsa-key}
+mldsa_keychain_service=${KEEPVAULT_MLDSA_KEYCHAIN_SERVICE:-de.michael-feinermann.keep-vault.hybrid-wrapping-key}
+pfx_password_encrypted=${KEEPVAULT_PFX_PASSWORD_ENCRYPTED:-${pfx_path}.password.enc}
 mldsa_keychain_account=${KEEPVAULT_MLDSA_KEYCHAIN_ACCOUNT:-${USER:-}}
 
-# The ML-DSA-87 signing key is used encrypted when it has been wrapped, with the
-# wrapping key held in the Keychain behind a per-read prompt. The plaintext path
-# stays as a fallback so a tree that has not been migrated still builds.
+# Both halves of the hybrid certificate are released by one Keychain
+# confirmation once they have been wrapped: a signature counts only when
+# RSA-PSS and ML-DSA-87 both verify, so gating them separately would mean two
+# prompts for one indivisible decision. The unwrapped paths stay as a fallback
+# so a tree that has not been migrated still builds.
 mldsa_key_arguments=(--mldsa-private-key ${mldsa_private_key})
 if [[ -f ${mldsa_private_key_encrypted} && ! -L ${mldsa_private_key_encrypted} ]]; then
   mldsa_key_arguments=(
@@ -34,6 +37,10 @@ if [[ -f ${mldsa_private_key_encrypted} && ! -L ${mldsa_private_key_encrypted} ]
     --mldsa-key-keychain-service ${mldsa_keychain_service}
     --mldsa-key-keychain-account ${mldsa_keychain_account}
   )
+fi
+pfx_password_arguments=()
+if [[ -f ${pfx_password_encrypted} && ! -L ${pfx_password_encrypted} ]]; then
+  pfx_password_arguments=(--pfx-password-encrypted ${pfx_password_encrypted})
 fi
 
 mldsa_public_key=${KEEPVAULT_MLDSA_PUBLIC_KEY:-${packaging_dir}/Keys/mldsa87-public.key}
@@ -519,6 +526,7 @@ signer_arguments=(
   sign
   --pfx ${pfx_path}
   ${mldsa_key_arguments[@]}
+  ${pfx_password_arguments[@]}
   --mldsa-public-key ${mldsa_public_key}
   --reference-library ${repo_root}/KeepVaultMac/Native/$([[ ${architecture} == universal ]] && print osx-universal || print osx-arm64)/libmldsa87_ref.dylib
   --policy ${mac_project}/Directory.Build.props
@@ -623,6 +631,7 @@ supervisor_signature_arguments=(
   sign
   --pfx ${pfx_path}
   ${mldsa_key_arguments[@]}
+  ${pfx_password_arguments[@]}
   --mldsa-public-key ${mldsa_public_key}
   --reference-library ${repo_root}/KeepVaultMac/Native/$([[ ${architecture} == universal ]] && print osx-universal || print osx-arm64)/libmldsa87_ref.dylib
   --policy ${mac_project}/Directory.Build.props
@@ -785,6 +794,7 @@ launcher_signature_common=(
   sign
   --pfx ${pfx_path}
   ${mldsa_key_arguments[@]}
+  ${pfx_password_arguments[@]}
   --mldsa-public-key ${mldsa_public_key}
   --reference-library ${repo_root}/KeepVaultMac/Native/$([[ ${architecture} == universal ]] && print osx-universal || print osx-arm64)/libmldsa87_ref.dylib
   --policy ${mac_project}/Directory.Build.props
@@ -834,6 +844,7 @@ archive_common=(
   sign
   --pfx ${pfx_path}
   ${mldsa_key_arguments[@]}
+  ${pfx_password_arguments[@]}
   --mldsa-public-key ${mldsa_public_key}
   --reference-library ${repo_root}/KeepVaultMac/Native/$([[ ${architecture} == universal ]] && print osx-universal || print osx-arm64)/libmldsa87_ref.dylib
   --policy ${mac_project}/Directory.Build.props

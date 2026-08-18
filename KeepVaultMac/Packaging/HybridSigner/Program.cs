@@ -19,8 +19,13 @@ static async Task<int> RunAsync(string[] args)
         (Dictionary<string, string> options, List<string> targets) = ParseOptions(args[1..]);
         if (string.Equals(args[0], "wrap-mldsa-key", StringComparison.OrdinalIgnoreCase))
         {
-            // No --target: this command consumes a key, not artifacts.
+            // No --target: these commands consume a secret, not artifacts.
             return WrapMldsaKey(options);
+        }
+
+        if (string.Equals(args[0], "wrap-pfx-password", StringComparison.OrdinalIgnoreCase))
+        {
+            return WrapPfxPassword(options);
         }
 
         if (targets.Count == 0)
@@ -52,9 +57,27 @@ static async Task<int> SignAsync(Dictionary<string, string> options, IReadOnlyLi
     string launcherPinsPath = Require(options, "launcher-pins");
 
     RequirePrivateFileProtection(pfxPath, "RSA PFX");
-    byte[] privateKey = ReadMldsaPrivateKey(options);
+
+    // One confirmation releases the whole hybrid certificate. Both halves are
+    // useless alone -- a signature counts only when RSA-PSS and ML-DSA-87 both
+    // verify -- so gating them separately would mean two prompts for one
+    // indivisible decision.
+    byte[]? wrappingKey = ReadWrappingKeyWhenNeeded(options);
+    byte[] privateKey;
+    string password;
+    try
+    {
+        privateKey = ReadMldsaPrivateKey(options, wrappingKey);
+        password = ReadPfxPassword(options, wrappingKey);
+    }
+    finally
+    {
+        if (wrappingKey is not null)
+        {
+            CryptographicOperations.ZeroMemory(wrappingKey);
+        }
+    }
     byte[] publicKey = ReadExactFile(publicKeyPath, Mldsa87.PublicKeyBytes, "ML-DSA-87 public key");
-    string password = ReadPfxPassword(options);
     string? macTemporaryKeychainDirectory = OperatingSystem.IsMacOS()
         ? PrepareMacTemporaryKeychainDirectory()
         : null;
@@ -379,65 +402,16 @@ static int WrapMldsaKey(Dictionary<string, string> options)
 {
     string privateKeyPath = Require(options, "mldsa-private-key");
     string envelopePath = Require(options, "mldsa-private-key-encrypted");
-    string service = Require(options, "mldsa-key-keychain-service");
-    string account = options.GetValueOrDefault("mldsa-key-keychain-account") ?? Environment.UserName;
-
     RequirePrivateFileProtection(privateKeyPath, "ML-DSA-87 private key");
-    if (File.Exists(envelopePath))
-    {
-        throw new IOException($"An envelope already exists and will not be overwritten: {envelopePath}");
-    }
+    RefuseExistingEnvelope(envelopePath);
 
     byte[] privateKey = ReadExactFile(privateKeyPath, Mldsa87.PrivateKeyBytes, "ML-DSA-87 private key");
-    byte[] wrappingKey = ReadKeychainSecret(service, account, "ML-DSA-87 wrapping key");
-    byte[]? envelope = null;
+    byte[] wrappingKey = ReadWrappingKeyForWrapping(options);
     try
     {
-        if (wrappingKey.Length != 32)
-        {
-            throw new CryptographicException(
-                $"The ML-DSA-87 wrapping key must be 32 bytes, not {wrappingKey.Length}.");
-        }
-
-        byte[] magic = MldsaEnvelopeMagic();
-        const int nonceBytes = 12;
-        const int tagBytes = 16;
-        envelope = new byte[magic.Length + nonceBytes + privateKey.Length + tagBytes];
-        magic.CopyTo(envelope, 0);
-        RandomNumberGenerator.Fill(envelope.AsSpan(magic.Length, nonceBytes));
-        using (var aes = new AesGcm(wrappingKey, tagBytes))
-        {
-            aes.Encrypt(
-                envelope.AsSpan(magic.Length, nonceBytes),
-                privateKey,
-                envelope.AsSpan(magic.Length + nonceBytes, privateKey.Length),
-                envelope.AsSpan(envelope.Length - tagBytes, tagBytes),
-                magic);
-        }
-
-        string temporary = envelopePath + ".partial";
-        File.WriteAllBytes(temporary, envelope);
-        File.SetUnixFileMode(temporary, UnixFileMode.UserRead | UnixFileMode.UserWrite);
-
-        // Open it again through the very path sign uses, and compare. An
-        // envelope that only this method can read is worth nothing.
-        byte[] recovered = DecryptMldsaEnvelope(temporary, wrappingKey);
-        try
-        {
-            if (!CryptographicOperations.FixedTimeEquals(recovered, privateKey))
-            {
-                File.Delete(temporary);
-                throw new CryptographicException("The wrapped key did not decrypt back to the original.");
-            }
-        }
-        finally
-        {
-            CryptographicOperations.ZeroMemory(recovered);
-        }
-
-        File.Move(temporary, envelopePath);
+        WriteEnvelope(envelopePath, privateKey, wrappingKey, "ML-DSA-87 private key");
         Console.WriteLine($"envelope={envelopePath}");
-        Console.WriteLine($"roundtrip_verified=yes");
+        Console.WriteLine("roundtrip_verified=yes");
         Console.WriteLine($"plaintext_key_left_in_place={privateKeyPath}");
         return 0;
     }
@@ -445,11 +419,67 @@ static int WrapMldsaKey(Dictionary<string, string> options)
     {
         CryptographicOperations.ZeroMemory(privateKey);
         CryptographicOperations.ZeroMemory(wrappingKey);
-        if (envelope is not null)
-        {
-            CryptographicOperations.ZeroMemory(envelope);
-        }
     }
+}
+
+/// <summary>
+/// Moves the RSA PFX password out of its own unprotected Keychain item and into
+/// an envelope under the same wrapping key as the ML-DSA half.
+/// </summary>
+/// <remarks>
+/// A hybrid signature is one decision: it counts only when RSA-PSS and ML-DSA-87
+/// both verify, so releasing one half without the other buys nothing. Putting
+/// both behind the same secret means one confirmation covers the certificate as
+/// a whole rather than two covering halves of it.
+///
+/// The password is read here, inside this process, straight from the existing
+/// Keychain item and written encrypted. It is never passed on a command line,
+/// where any process could read it out of the process list, and never printed.
+/// </remarks>
+static int WrapPfxPassword(Dictionary<string, string> options)
+{
+    string envelopePath = Require(options, "pfx-password-encrypted");
+    string sourceService = Require(options, "pfx-password-keychain-service");
+    string sourceAccount = options.GetValueOrDefault("pfx-keychain-account") ?? Environment.UserName;
+    RefuseExistingEnvelope(envelopePath);
+
+    string password = ReadKeychainPassword(sourceService, sourceAccount);
+    byte[] encoded = Encoding.UTF8.GetBytes(password);
+    byte[] wrappingKey = ReadWrappingKeyForWrapping(options);
+    try
+    {
+        if (encoded.Length == 0)
+        {
+            throw new CryptographicException("The PFX password in the Keychain is empty.");
+        }
+
+        WriteEnvelope(envelopePath, encoded, wrappingKey, "RSA PFX password");
+        Console.WriteLine($"envelope={envelopePath}");
+        Console.WriteLine("roundtrip_verified=yes");
+        Console.WriteLine($"old_keychain_item_left_in_place={sourceService}");
+        return 0;
+    }
+    finally
+    {
+        CryptographicOperations.ZeroMemory(encoded);
+        CryptographicOperations.ZeroMemory(wrappingKey);
+    }
+}
+
+static void RefuseExistingEnvelope(string path)
+{
+    if (File.Exists(path))
+    {
+        throw new IOException($"An envelope already exists and will not be overwritten: {path}");
+    }
+}
+
+static byte[] ReadWrappingKeyForWrapping(Dictionary<string, string> options)
+{
+    return ReadKeychainSecret(
+        Require(options, "mldsa-key-keychain-service"),
+        options.GetValueOrDefault("mldsa-key-keychain-account") ?? Environment.UserName,
+        "hybrid signing wrapping key");
 }
 
 /// <summary>
@@ -469,26 +499,41 @@ static int WrapMldsaKey(Dictionary<string, string> options)
 /// own access control: created with no trusted application, it prompts on every
 /// read, so a use nobody triggered is visible rather than silent.
 /// </remarks>
-static byte[] ReadMldsaPrivateKey(Dictionary<string, string> options)
+static byte[]? ReadWrappingKeyWhenNeeded(Dictionary<string, string> options)
+{
+    bool needed = options.ContainsKey("mldsa-private-key-encrypted")
+        || options.ContainsKey("pfx-password-encrypted");
+    if (!needed)
+    {
+        return null;
+    }
+
+    string service = options.GetValueOrDefault("mldsa-key-keychain-service")
+        ?? throw new CryptographicException(
+            "An encrypted key or password requires --mldsa-key-keychain-service.");
+    return ReadKeychainSecret(
+        service,
+        options.GetValueOrDefault("mldsa-key-keychain-account") ?? Environment.UserName,
+        "hybrid signing wrapping key");
+}
+
+static byte[] ReadMldsaPrivateKey(Dictionary<string, string> options, byte[]? wrappingKey)
 {
     if (options.TryGetValue("mldsa-private-key-encrypted", out string? envelopePath))
     {
-        string service = options.GetValueOrDefault("mldsa-key-keychain-service")
-            ?? throw new CryptographicException(
-                "--mldsa-private-key-encrypted requires --mldsa-key-keychain-service.");
         RequirePrivateFileProtection(envelopePath, "ML-DSA-87 key envelope");
-        byte[] wrappingKey = ReadKeychainSecret(
-            service,
-            options.GetValueOrDefault("mldsa-key-keychain-account") ?? Environment.UserName,
-            "ML-DSA-87 wrapping key");
-        try
+        byte[] key = DecryptEnvelope(
+            envelopePath,
+            wrappingKey ?? throw new CryptographicException("The wrapping key was not read."),
+            "ML-DSA-87 private key");
+        if (key.Length != Mldsa87.PrivateKeyBytes)
         {
-            return DecryptMldsaEnvelope(envelopePath, wrappingKey);
+            CryptographicOperations.ZeroMemory(key);
+            throw new CryptographicException(
+                $"The envelope holds {key.Length} bytes, not an ML-DSA-87 private key.");
         }
-        finally
-        {
-            CryptographicOperations.ZeroMemory(wrappingKey);
-        }
+
+        return key;
     }
 
     string privateKeyPath = Require(options, "mldsa-private-key");
@@ -504,49 +549,49 @@ static byte[] ReadMldsaPrivateKey(Dictionary<string, string> options)
 /// key. No password-based derivation is involved because nothing here is a
 /// human-chosen password -- a KDF would add cost without adding entropy.
 /// </remarks>
-static byte[] MldsaEnvelopeMagic() => "KVMLDSA1"u8.ToArray();
+static byte[] EnvelopeMagic() => "KVSECRT1"u8.ToArray();
 
-static byte[] DecryptMldsaEnvelope(string path, byte[] wrappingKey)
+static byte[] DecryptEnvelope(string path, byte[] wrappingKey, string description)
 {
     const int nonceBytes = 12;
     const int tagBytes = 16;
-    byte[] magic = MldsaEnvelopeMagic();
-    int expected = magic.Length + nonceBytes + Mldsa87.PrivateKeyBytes + tagBytes;
+    byte[] magic = EnvelopeMagic();
     byte[] envelope = File.ReadAllBytes(path);
     try
     {
-        if (envelope.Length != expected)
+        int minimum = magic.Length + nonceBytes + tagBytes;
+        if (envelope.Length <= minimum)
         {
-            throw new CryptographicException(
-                $"The ML-DSA-87 key envelope must be {expected} bytes, not {envelope.Length}.");
+            throw new CryptographicException($"The {description} envelope is too short to hold anything.");
         }
 
         if (!CryptographicOperations.FixedTimeEquals(envelope.AsSpan(0, magic.Length), magic))
         {
-            throw new CryptographicException("The ML-DSA-87 key envelope has an unknown format.");
+            throw new CryptographicException($"The {description} envelope has an unknown format.");
         }
 
         if (wrappingKey.Length != 32)
         {
             throw new CryptographicException(
-                $"The ML-DSA-87 wrapping key must be 32 bytes, not {wrappingKey.Length}.");
+                $"The wrapping key must be 32 bytes, not {wrappingKey.Length}.");
         }
 
-        byte[] privateKey = new byte[Mldsa87.PrivateKeyBytes];
+        int payloadLength = envelope.Length - minimum;
+        byte[] payload = new byte[payloadLength];
         try
         {
             using var aes = new AesGcm(wrappingKey, tagBytes);
             aes.Decrypt(
                 envelope.AsSpan(magic.Length, nonceBytes),
-                envelope.AsSpan(magic.Length + nonceBytes, Mldsa87.PrivateKeyBytes),
-                envelope.AsSpan(expected - tagBytes, tagBytes),
-                privateKey,
+                envelope.AsSpan(magic.Length + nonceBytes, payloadLength),
+                envelope.AsSpan(envelope.Length - tagBytes, tagBytes),
+                payload,
                 magic);
-            return privateKey;
+            return payload;
         }
         catch
         {
-            CryptographicOperations.ZeroMemory(privateKey);
+            CryptographicOperations.ZeroMemory(payload);
             throw;
         }
     }
@@ -554,6 +599,95 @@ static byte[] DecryptMldsaEnvelope(string path, byte[] wrappingKey)
     {
         CryptographicOperations.ZeroMemory(envelope);
     }
+}
+
+static void WriteEnvelope(string path, byte[] payload, byte[] wrappingKey, string description)
+{
+    const int nonceBytes = 12;
+    const int tagBytes = 16;
+    if (wrappingKey.Length != 32)
+    {
+        throw new CryptographicException($"The wrapping key must be 32 bytes, not {wrappingKey.Length}.");
+    }
+
+    byte[] magic = EnvelopeMagic();
+    byte[] envelope = new byte[magic.Length + nonceBytes + payload.Length + tagBytes];
+    try
+    {
+        magic.CopyTo(envelope, 0);
+        RandomNumberGenerator.Fill(envelope.AsSpan(magic.Length, nonceBytes));
+        using (var aes = new AesGcm(wrappingKey, tagBytes))
+        {
+            aes.Encrypt(
+                envelope.AsSpan(magic.Length, nonceBytes),
+                payload,
+                envelope.AsSpan(magic.Length + nonceBytes, payload.Length),
+                envelope.AsSpan(envelope.Length - tagBytes, tagBytes),
+                magic);
+        }
+
+        string temporary = path + ".partial";
+        File.WriteAllBytes(temporary, envelope);
+        File.SetUnixFileMode(temporary, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+
+        // Read it back through the very path sign uses. An envelope only the
+        // writer can open is worth nothing, and the way that shows up is after
+        // the original has been deleted.
+        byte[] recovered = DecryptEnvelope(temporary, wrappingKey, description);
+        try
+        {
+            if (!CryptographicOperations.FixedTimeEquals(recovered, payload))
+            {
+                File.Delete(temporary);
+                throw new CryptographicException($"The wrapped {description} did not decrypt back to the original.");
+            }
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(recovered);
+        }
+
+        File.Move(temporary, path);
+    }
+    finally
+    {
+        CryptographicOperations.ZeroMemory(envelope);
+    }
+}
+
+/// <summary>
+/// Reads a Keychain password as text, the form the RSA PFX password is stored in.
+/// </summary>
+static string ReadKeychainPassword(string service, string account)
+{
+    if (!OperatingSystem.IsMacOS())
+    {
+        throw new CryptographicException("Keychain passwords can only be read on macOS.");
+    }
+
+    var start = new ProcessStartInfo("/usr/bin/security")
+    {
+        RedirectStandardOutput = true,
+        RedirectStandardError = true,
+        UseShellExecute = false,
+    };
+    start.ArgumentList.Add("find-generic-password");
+    start.ArgumentList.Add("-s");
+    start.ArgumentList.Add(service);
+    start.ArgumentList.Add("-a");
+    start.ArgumentList.Add(account);
+    start.ArgumentList.Add("-w");
+    using Process process = Process.Start(start)
+        ?? throw new InvalidOperationException("Unable to start macOS Keychain lookup.");
+    string password = process.StandardOutput.ReadToEnd().TrimEnd('\r', '\n');
+    string error = process.StandardError.ReadToEnd();
+    process.WaitForExit();
+    if (process.ExitCode != 0 || password.Length == 0)
+    {
+        throw new CryptographicException($"macOS Keychain did not provide the password: {error.Trim()}");
+    }
+
+    return password;
 }
 
 /// <summary>
@@ -599,33 +733,30 @@ static byte[] ReadKeychainSecret(string service, string account, string descript
     }
 }
 
-static string ReadPfxPassword(Dictionary<string, string> options)
+static string ReadPfxPassword(Dictionary<string, string> options, byte[]? wrappingKey)
 {
+    if (options.TryGetValue("pfx-password-encrypted", out string? envelopePath))
+    {
+        RequirePrivateFileProtection(envelopePath, "RSA PFX password envelope");
+        byte[] encoded = DecryptEnvelope(
+            envelopePath,
+            wrappingKey ?? throw new CryptographicException("The wrapping key was not read."),
+            "RSA PFX password");
+        try
+        {
+            return Encoding.UTF8.GetString(encoded);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(encoded);
+        }
+    }
+
     if (options.TryGetValue("pfx-password-keychain-service", out string? service))
     {
-        string account = options.GetValueOrDefault("pfx-keychain-account") ?? Environment.UserName;
-        var start = new ProcessStartInfo("/usr/bin/security")
-        {
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-        };
-        start.ArgumentList.Add("find-generic-password");
-        start.ArgumentList.Add("-s");
-        start.ArgumentList.Add(service);
-        start.ArgumentList.Add("-a");
-        start.ArgumentList.Add(account);
-        start.ArgumentList.Add("-w");
-        using Process process = Process.Start(start)
-            ?? throw new InvalidOperationException("Unable to start macOS Keychain lookup.");
-        string password = process.StandardOutput.ReadToEnd().TrimEnd('\r', '\n');
-        string error = process.StandardError.ReadToEnd();
-        process.WaitForExit();
-        if (process.ExitCode != 0 || password.Length == 0)
-        {
-            throw new CryptographicException($"macOS Keychain did not provide the PFX password: {error.Trim()}");
-        }
-        return password;
+        return ReadKeychainPassword(
+            service,
+            options.GetValueOrDefault("pfx-keychain-account") ?? Environment.UserName);
     }
 
     string variable = options.GetValueOrDefault("pfx-password-env") ?? "KEEPVAULT_HYBRID_PFX_PASSWORD";

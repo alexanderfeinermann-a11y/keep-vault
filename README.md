@@ -447,6 +447,31 @@ The imported `pq-crystals/dilithium` reference sources are pinned to commit
 matching SHA-256, SHA3-512 and Skein-1024 source manifests for exactly the 21
 included reference files.
 
+### Protecting the signing keys
+
+A hybrid signature is one decision: it counts only when RSA-PSS and ML-DSA-87
+both verify. Both halves therefore sit under the same 32-byte wrapping key, and
+one confirmation covers the certificate as a whole rather than two covering
+halves of it.
+
+Both are AES-256-GCM envelopes; the wrapping key lives in the login Keychain in
+an item created with no trusted application, so **every read prompts**. Four
+prompts for an app build, two for the portable one — and a fifth or a third is a
+use nobody started. Answer *Allow*, never *Always Allow*: the latter writes the
+asking binary into the item's access list and the prompt stops, which is the
+whole property this provides.
+
+`tools/Protect-HybridKeys-macOS.sh` performs the migration. It wraps and unwraps
+through the signer's own code, so the two directions cannot drift apart, and it
+verifies the round trip before keeping anything — an envelope only the writer
+can open is worth nothing, and that failure surfaces after the original has been
+deleted. It deletes nothing itself.
+
+Encryption at rest stops the files from being useful once they leave the
+machine: a Time Machine backup, a cloned disk, a tar of the home directory. It
+does not stop malware running as the same user, which can ask the Keychain the
+way the signer does. What raises that bar is the prompt.
+
 A root-owned rollback anchor at
 `/Library/Application Support/Keep Vault/minimum-version` records the lowest
 acceptable build number, so a user-level attacker cannot reinstate an older,
@@ -466,6 +491,7 @@ configurable through `KEEPVAULT_HYBRID_PFX` and `KEEPVAULT_MLDSA_PRIVATE_KEY`.
 ./tools/Build-Portable-macOS.sh        # portable folder and ZIP
 ./tools/Install-KeepVault-macOS.sh     # verify and install to /Applications
 ./tools/Verify-KeepVault-macOS.sh      # check an installed or built bundle
+./tools/Protect-HybridKeys-macOS.sh    # put both signing keys behind one prompt
 ```
 
 The build compiles all six fingerprints in, signs the app and every native file,
