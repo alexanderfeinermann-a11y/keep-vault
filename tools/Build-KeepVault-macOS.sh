@@ -43,6 +43,27 @@ if [[ -f ${pfx_password_encrypted} && ! -L ${pfx_password_encrypted} ]]; then
   pfx_password_arguments=(--pfx-password-encrypted ${pfx_password_encrypted})
 fi
 
+# A wrapping key on removable media lets a build run unattended while that
+# volume is mounted; unplug it and signing falls back to the Keychain prompt.
+# Physical presence is a weaker gate than the prompt -- anything running as this
+# user can read a mounted volume -- but it is bounded by something the key
+# holder can see and pull out, and it keeps routine development from being four
+# confirmations long.
+wrapping_key_file=${KEEPVAULT_WRAPPING_KEY_FILE:-}
+if [[ -z ${wrapping_key_file} ]]; then
+  for candidate in /Volumes/*/Keep\ Vault\ ReleaseKeys*/wrapping-key.b64(N); do
+    [[ -f ${candidate} && ! -L ${candidate} ]] || continue
+    wrapping_key_file=${candidate}
+    break
+  done
+fi
+if [[ -n ${wrapping_key_file} && -f ${wrapping_key_file} && ! -L ${wrapping_key_file} ]]; then
+  mldsa_key_arguments+=(--wrapping-key-file ${wrapping_key_file})
+  print "wrapping_key=removable media (${wrapping_key_file:h:t})"
+else
+  print "wrapping_key=Keychain (confirmation required per signing pass)"
+fi
+
 mldsa_public_key=${KEEPVAULT_MLDSA_PUBLIC_KEY:-${packaging_dir}/Keys/mldsa87-public.key}
 pfx_password_service=${KEEPVAULT_PFX_KEYCHAIN_SERVICE:-de.michael-feinermann.keep-vault.hybrid-pfx}
 pfx_password_account=${KEEPVAULT_PFX_KEYCHAIN_ACCOUNT:-${USER:-}}

@@ -25,6 +25,51 @@ destination=${repo_root}/KeepVaultMac.Tests/bin/Release/net10.0/osx-arm64/Native
 identity=${KEEPVAULT_CODESIGN_IDENTITY:-}
 pfx_path=${KEEPVAULT_HYBRID_PFX:-${HOME}/Library/Application Support/Keep Vault/ReleaseKeys/hybrid-rsa4096.pfx}
 mldsa_private_key=${KEEPVAULT_MLDSA_PRIVATE_KEY:-${HOME}/Library/Application Support/Keep Vault/ReleaseKeys/mldsa87-private.key}
+mldsa_private_key_encrypted=${KEEPVAULT_MLDSA_PRIVATE_KEY_ENCRYPTED:-${mldsa_private_key}.enc}
+mldsa_keychain_service=${KEEPVAULT_MLDSA_KEYCHAIN_SERVICE:-de.michael-feinermann.keep-vault.hybrid-wrapping-key}
+mldsa_keychain_account=${KEEPVAULT_MLDSA_KEYCHAIN_ACCOUNT:-${USER:-}}
+pfx_password_encrypted=${KEEPVAULT_PFX_PASSWORD_ENCRYPTED:-${pfx_path}.password.enc}
+
+# Same key handling as the release builds: once both halves are wrapped they are
+# released by one Keychain confirmation, and the unwrapped paths remain only as
+# a fallback for a tree that has not been migrated. Staging signs the two helper
+# executables after re-signing them with codesign, so it needs the keys exactly
+# as a release build does -- leaving it on the deleted plaintext path made it
+# skip that step and hand the test suite natives whose manifests no longer
+# matched.
+mldsa_key_arguments=(--mldsa-private-key ${mldsa_private_key})
+if [[ -f ${mldsa_private_key_encrypted} && ! -L ${mldsa_private_key_encrypted} ]]; then
+  mldsa_key_arguments=(
+    --mldsa-private-key-encrypted ${mldsa_private_key_encrypted}
+    --mldsa-key-keychain-service ${mldsa_keychain_service}
+    --mldsa-key-keychain-account ${mldsa_keychain_account}
+  )
+fi
+pfx_password_arguments=()
+if [[ -f ${pfx_password_encrypted} && ! -L ${pfx_password_encrypted} ]]; then
+  pfx_password_arguments=(--pfx-password-encrypted ${pfx_password_encrypted})
+fi
+
+# A wrapping key on removable media lets a build run unattended while that
+# volume is mounted; unplug it and signing falls back to the Keychain prompt.
+# Physical presence is a weaker gate than the prompt -- anything running as this
+# user can read a mounted volume -- but it is bounded by something the key
+# holder can see and pull out, and it keeps routine development from being four
+# confirmations long.
+wrapping_key_file=${KEEPVAULT_WRAPPING_KEY_FILE:-}
+if [[ -z ${wrapping_key_file} ]]; then
+  for candidate in /Volumes/*/Keep\ Vault\ ReleaseKeys*/wrapping-key.b64(N); do
+    [[ -f ${candidate} && ! -L ${candidate} ]] || continue
+    wrapping_key_file=${candidate}
+    break
+  done
+fi
+if [[ -n ${wrapping_key_file} && -f ${wrapping_key_file} && ! -L ${wrapping_key_file} ]]; then
+  mldsa_key_arguments+=(--wrapping-key-file ${wrapping_key_file})
+  print "wrapping_key=removable media (${wrapping_key_file:h:t})"
+else
+  print "wrapping_key=Keychain (confirmation required per signing pass)"
+fi
 mldsa_public_key=${KEEPVAULT_MLDSA_PUBLIC_KEY:-${packaging_dir}/Keys/mldsa87-public.key}
 pfx_password_service=${KEEPVAULT_PFX_KEYCHAIN_SERVICE:-de.michael-feinermann.keep-vault.hybrid-pfx}
 pfx_password_account=${KEEPVAULT_PFX_KEYCHAIN_ACCOUNT:-${USER:-}}
@@ -112,7 +157,8 @@ signer_arguments=(
   ${signer_dll}
   sign
   --pfx ${pfx_path}
-  --mldsa-private-key ${mldsa_private_key}
+  ${mldsa_key_arguments[@]}
+  ${pfx_password_arguments[@]}
   --mldsa-public-key ${mldsa_public_key}
   --reference-library ${mac_project}/Native/osx-arm64/libmldsa87_ref.dylib
   --policy ${mac_project}/Directory.Build.props

@@ -345,7 +345,7 @@ public sealed class KeySheetService
     /// later needs to know what it belongs to and where to get the program that
     /// reads it, so the address is on the paper rather than only in the app.
     /// </remarks>
-    private const string ProjectUrl = "https://github.com/alexanderfeinermann-a11y/keep-vault";
+    private const string ProjectUrl = "https://github.com/michael-feinermann/keep-vault";
 
     /// <summary>
     /// No text on a key sheet is ever smaller than this.

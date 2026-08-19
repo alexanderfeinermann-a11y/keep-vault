@@ -28,6 +28,11 @@ static async Task<int> RunAsync(string[] args)
             return WrapPfxPassword(options);
         }
 
+        if (string.Equals(args[0], "export-wrapping-key", StringComparison.OrdinalIgnoreCase))
+        {
+            return ExportWrappingKey(options);
+        }
+
         if (targets.Count == 0)
         {
             return Usage("At least one --target is required.");
@@ -466,6 +471,55 @@ static int WrapPfxPassword(Dictionary<string, string> options)
     }
 }
 
+/// <summary>
+/// Copies the wrapping key out of the Keychain onto a chosen path, so a build
+/// can run without a prompt while that path is present.
+/// </summary>
+/// <remarks>
+/// Meant for removable media the key holder can unplug. It is a deliberate
+/// downgrade from the Keychain prompt and is written where they put it, not
+/// somewhere this tool picks.
+/// </remarks>
+static int ExportWrappingKey(Dictionary<string, string> options)
+{
+    string target = Require(options, "wrapping-key-file");
+    if (File.Exists(target))
+    {
+        throw new IOException($"A wrapping key file already exists and will not be overwritten: {target}");
+    }
+
+    byte[] key = ReadWrappingKeyForWrapping(options);
+    try
+    {
+        string encoded = Convert.ToBase64String(key);
+        File.WriteAllText(target, encoded + Environment.NewLine);
+        File.SetUnixFileMode(target, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+
+        // Read it back the way a build will, so a file that cannot be used is
+        // discovered now rather than when the Keychain is no longer reachable.
+        byte[] recovered = Convert.FromBase64String(File.ReadAllText(target).Trim());
+        try
+        {
+            if (!CryptographicOperations.FixedTimeEquals(recovered, key))
+            {
+                File.Delete(target);
+                throw new CryptographicException("The exported wrapping key did not read back identically.");
+            }
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(recovered);
+        }
+
+        Console.WriteLine($"wrapping_key_file={target}");
+        return 0;
+    }
+    finally
+    {
+        CryptographicOperations.ZeroMemory(key);
+    }
+}
+
 static void RefuseExistingEnvelope(string path)
 {
     if (File.Exists(path))
@@ -508,9 +562,39 @@ static byte[]? ReadWrappingKeyWhenNeeded(Dictionary<string, string> options)
         return null;
     }
 
+    // A wrapping key kept on removable media turns physical presence into the
+    // gate: the volume is there and the build runs unattended, it is unplugged
+    // and nothing can be signed at all. That is a weaker check than the
+    // Keychain prompt -- anything running as this user can read a mounted
+    // volume -- but it is bounded by something the key holder can see and pull
+    // out, which an always-available secret is not.
+    if (options.TryGetValue("wrapping-key-file", out string? keyFile))
+    {
+        RequirePrivateFileProtection(keyFile, "hybrid signing wrapping key file");
+        string encoded = File.ReadAllText(keyFile).Trim();
+        byte[] key;
+        try
+        {
+            key = Convert.FromBase64String(encoded);
+        }
+        catch (FormatException)
+        {
+            throw new CryptographicException($"The wrapping key file is not valid base64: {keyFile}");
+        }
+
+        if (key.Length != 32)
+        {
+            CryptographicOperations.ZeroMemory(key);
+            throw new CryptographicException(
+                $"The wrapping key file holds {key.Length} bytes, not 32.");
+        }
+
+        return key;
+    }
+
     string service = options.GetValueOrDefault("mldsa-key-keychain-service")
         ?? throw new CryptographicException(
-            "An encrypted key or password requires --mldsa-key-keychain-service.");
+            "An encrypted key or password requires --mldsa-key-keychain-service or --wrapping-key-file.");
     return ReadKeychainSecret(
         service,
         options.GetValueOrDefault("mldsa-key-keychain-account") ?? Environment.UserName,
