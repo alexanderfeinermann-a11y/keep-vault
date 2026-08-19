@@ -1,4 +1,4 @@
-using System.Buffers.Binary;
+﻿using System.Buffers.Binary;
 using System.IO;
 using System.Diagnostics;
 using System.Reflection;
@@ -58,6 +58,37 @@ if (args is ["--argon2-working-set-stress", var repetitionsText])
 
 const string TestUserPassword = "N!r7$Vq2#Lm8%Tx3&Jd9*Wp4+Kg5=Zu6?Ce";
 
+if (args is ["--gui-only"])
+{
+    Exception? guiFailure = null;
+    var guiThread = new Thread(() =>
+    {
+        try
+        {
+            RunSettingsPersistenceTests();
+            RunDropTests();
+            RunKeySheetTests();
+            RunGuiParityTests();
+        }
+        catch (Exception ex)
+        {
+            guiFailure = ex;
+        }
+    });
+
+    guiThread.SetApartmentState(ApartmentState.STA);
+    guiThread.Start();
+    guiThread.Join();
+    if (guiFailure is not null)
+    {
+        Console.Error.WriteLine(guiFailure);
+        Environment.Exit(1);
+    }
+
+    Console.WriteLine("Settings persistence, drag-and-drop, key sheet, and GUI parity tests passed.");
+    return;
+}
+
 if (args is ["--recovery-only"])
 {
     RunProcessHardeningTests();
@@ -75,6 +106,7 @@ var thread = new Thread(() =>
         RunSettingsPersistenceTests();
         RunDropTests();
         RunKeySheetTests();
+        RunGuiParityTests();
     }
     catch (Exception ex)
     {
@@ -92,7 +124,7 @@ if (failure is not null)
     Environment.Exit(1);
 }
 
-Console.WriteLine("Settings persistence, drag-and-drop, and key sheet tests passed.");
+Console.WriteLine("Settings persistence, drag-and-drop, key sheet, and GUI parity tests passed.");
 await RunEntropyGeneratorTestsAsync();
 Console.WriteLine("Two generated 512-bit password factors and entropy mixer tests passed.");
 RunNativeIntegrityTests();
@@ -153,7 +185,12 @@ static void RunSettingsPersistenceTests()
     var firstWindow = new MainWindow(settings);
     try
     {
-        Assert(firstWindow.CipherSuiteBox.SelectedIndex == 0, "missing suite preference defaults to Threefish");
+        Assert(
+            firstWindow.CipherSuiteBox.Items.Count == EncryptionSuiteCatalog.DisplayOrder.Count,
+            $"the picker offers every catalogue suite: {firstWindow.CipherSuiteBox.Items.Count}");
+        Assert(
+            SelectedSuiteOf(firstWindow) == EncryptionSuiteCatalog.Default,
+            "missing suite preference falls back to the catalogue default");
         Assert(firstWindow.CompressionBox.SelectedIndex == 1, "missing compression preference defaults to level 1");
         Assert(firstWindow.LanguageBox.SelectedIndex == 1, "missing language preference defaults to English");
         Assert(firstWindow.Title == "Keep Vault" && firstWindow.TitleText.Text == "Keep Vault", "GUI uses the Keep Vault product name");
@@ -210,10 +247,10 @@ static void RunSettingsPersistenceTests()
             EntropyMixer.SaltSampleCount,
             EntropyMixer.NonceFirstSampleCount,
             EntropyMixer.NonceSecondSampleCount,
-        EntropyMixer.NonceThirdSampleCount,
             EntropyMixer.NonceThirdSampleCount,
         ];
-        for (int index = 0; index < 10; index++)
+        int tabMoves = 2 * purposeCountsBeforeTabMoves.Length;
+        for (int index = 0; index < tabMoves; index++)
         {
             firstWindow.MainTabs.SelectedIndex = index % firstWindow.MainTabs.Items.Count;
             var selectedTab = (System.Windows.Controls.TabItem)firstWindow.MainTabs.SelectedItem;
@@ -226,7 +263,7 @@ static void RunSettingsPersistenceTests()
             });
         }
 
-        Assert(EntropyMixer.SampleCount == samplesBeforeTabMoves + 10, "handled mouse moves remain visible to the window across all tabs");
+        Assert(EntropyMixer.SampleCount == samplesBeforeTabMoves + tabMoves, "handled mouse moves remain visible to the window across all tabs");
         long[] purposeCountsAfterTabMoves =
         [
             EntropyMixer.FirstGeneratedPasswordSampleCount,
@@ -234,15 +271,14 @@ static void RunSettingsPersistenceTests()
             EntropyMixer.SaltSampleCount,
             EntropyMixer.NonceFirstSampleCount,
             EntropyMixer.NonceSecondSampleCount,
-        EntropyMixer.NonceThirdSampleCount,
             EntropyMixer.NonceThirdSampleCount,
         ];
         Assert(
             purposeCountsAfterTabMoves.Zip(purposeCountsBeforeTabMoves, (after, before) => after - before).All(delta => delta == 2),
-            "tab-spanning mouse moves are distributed evenly across all five entropy pools");
+            "tab-spanning mouse moves are distributed evenly across all six entropy pools");
         integrityField.SetValue(firstWindow, false);
         updateGate.Invoke(firstWindow, null);
-        firstWindow.CipherSuiteBox.SelectedIndex = 1;
+        firstWindow.CipherSuiteBox.SelectedIndex = SuiteIndexOf(firstWindow, EncryptionSuite.Kalyna512_512);
         firstWindow.CompressionBox.SelectedIndex = 5;
         firstWindow.LanguageBox.SelectedIndex = 0;
     }
@@ -258,7 +294,7 @@ static void RunSettingsPersistenceTests()
     var restartedWindow = new MainWindow(settings);
     try
     {
-        Assert(restartedWindow.CipherSuiteBox.SelectedIndex == 1, "restarted GUI restores Kalyna");
+        Assert(SelectedSuiteOf(restartedWindow) == EncryptionSuite.Kalyna512_512, "restarted GUI restores Kalyna");
         Assert(restartedWindow.CompressionBox.SelectedIndex == 5, "restarted GUI restores compression level 5");
         Assert(restartedWindow.LanguageBox.SelectedIndex == 0, "restarted GUI restores German");
         Assert(restartedWindow.Title == "Keep Vault" && restartedWindow.TitleText.Text == "Keep Vault", "German GUI keeps the language-independent product name");
@@ -266,7 +302,8 @@ static void RunSettingsPersistenceTests()
             restartedWindow.SubtitleText.Text == "Verschlüsselte ZPAQ-Archive erstellen, entpacken und kryptografisch löschen.",
             "German GUI keeps its existing localized subtitle");
         Assert(restartedWindow.Argon2ProfileText.Text.Contains("Parallelität 4", StringComparison.Ordinal), "German GUI localizes the fixed Argon2 profile");
-        restartedWindow.CipherSuiteBox.SelectedIndex = 0;
+        restartedWindow.CipherSuiteBox.SelectedIndex =
+            SuiteIndexOf(restartedWindow, EncryptionSuite.Threefish1024);
     }
 
     finally
@@ -283,7 +320,9 @@ static void RunSettingsPersistenceTests()
     var fallbackWindow = new MainWindow(corruptedSettings);
     try
     {
-        Assert(fallbackWindow.CipherSuiteBox.SelectedIndex == 0, "unknown persisted suite falls back to Threefish");
+        Assert(
+            SelectedSuiteOf(fallbackWindow) == EncryptionSuiteCatalog.Default,
+            "unknown persisted suite falls back to the catalogue default");
         Assert(fallbackWindow.CompressionBox.SelectedIndex == 1, "invalid persisted compression falls back to level 1");
         Assert(fallbackWindow.LanguageBox.SelectedIndex == 1, "invalid persisted language falls back to English");
     }
@@ -328,11 +367,10 @@ static void RunDropTests()
             Assert(!EntropyMixer.HasRequiredSamples(EntropyPurpose.GeneratedPasswordSecond), "second generated-password entropy threshold is not met on startup");
             Assert(!window.GeneratePasswordButton.IsEnabled, "generated password button is disabled until all entropy pools are ready");
             Assert(
-                window.CipherSuiteBox.Items.Count == 2
+                window.CipherSuiteBox.Items.Count == EncryptionSuiteCatalog.DisplayOrder.Count
                 && window.CipherSuiteBox.SelectedIndex == 0
-                && ((System.Windows.Controls.ComboBoxItem)window.CipherSuiteBox.Items[0]).Tag?.ToString() == "Threefish1024"
-                && ((System.Windows.Controls.ComboBoxItem)window.CipherSuiteBox.Items[1]).Tag?.ToString() == "Kalyna512_512",
-                "GUI offers Threefish first as the factory default and Kalyna second");
+                && SelectedSuiteOf(window) == EncryptionSuiteCatalog.Default,
+                "GUI offers every catalogue suite and starts on the catalogue default");
             window.SetExtractArchivePath(hintedArchive);
             WaitForDispatcherTask(window.ExtractHintLoadTaskForTests);
             Assert(window.ExtractHintLabel.Text == "Optional hint from archive", "extract GUI labels the optional archive hint");
@@ -344,8 +382,9 @@ static void RunDropTests()
             Assert(window.GeneratePasswordButton.IsEnabled, "generated password button is enabled after all entropy pools are ready");
             Assert(
                 window.EntropyStatusText.Text.Contains("nonce 1", StringComparison.OrdinalIgnoreCase)
-                && window.EntropyStatusText.Text.Contains("nonce 2", StringComparison.OrdinalIgnoreCase),
-                "GUI displays both independent nonce-pool counters");
+                && window.EntropyStatusText.Text.Contains("nonce 2", StringComparison.OrdinalIgnoreCase)
+                && window.EntropyStatusText.Text.Contains("nonce 3", StringComparison.OrdinalIgnoreCase),
+                "GUI displays all three independent nonce-pool counters");
             window.EncryptBox.IsChecked = false;
             Assert(window.ApplyDroppedPaths([file], DropTarget.Inputs) == DropResult.InputsAdded, "file input drop");
             Assert(window.InputList.Items.Contains(file), "input list contains file");
@@ -364,7 +403,9 @@ static void RunDropTests()
             Assert(window.OutputFolderBox.Text == output, "output folder box");
 
             Assert(window.ApplyDroppedPaths([output], DropTarget.TargetArchive) == DropResult.TargetArchiveSet, "target archive folder drop");
-            Assert(window.ArchivePathBox.Text == Path.Combine(output, "archive(1).zpaq"), "target archive generated path");
+            Assert(
+                window.ArchivePathBox.Text == Path.Combine(root, "output(1).zpaq"),
+                $"a folder target is archived beside itself, named after itself: {window.ArchivePathBox.Text}");
 
             Assert(window.ApplyDroppedPaths([file], DropTarget.TargetArchive) == DropResult.TargetArchiveSet, "target archive file drop");
             Assert(window.ArchivePathBox.Text == Path.Combine(root, "input(1).zpaq"), "target archive file drop adds numbered suffix");
@@ -464,7 +505,9 @@ static void RunDropTests()
             window.InputList.Items.Clear();
             RaiseFileDragOver(window.ArchivePathBox, output);
             RaiseFileDrop(window.ArchivePathBox, output);
-            Assert(window.ArchivePathBox.Text == Path.Combine(output, "archive(1).zpaq"), "preview drop on target archive box");
+            Assert(
+                window.ArchivePathBox.Text == Path.Combine(root, "output(1).zpaq"),
+                $"preview drop on target archive box: {window.ArchivePathBox.Text}");
             Assert(!window.InputList.Items.Contains(output), "target archive folder drop does not add folder input");
 
             window.ExtractArchiveBox.Clear();
@@ -556,6 +599,288 @@ static async Task RunProcessContainmentTestsAsync()
     }
 }
 
+static int SuiteIndexOf(MainWindow window, EncryptionSuite suite)
+{
+    for (int index = 0; index < window.CipherSuiteBox.Items.Count; index++)
+    {
+        if (window.CipherSuiteBox.Items[index] is System.Windows.Controls.ComboBoxItem { Tag: string tag }
+            && string.Equals(tag, suite.ToString(), StringComparison.Ordinal))
+        {
+            return index;
+        }
+    }
+
+    throw new InvalidOperationException($"The cipher picker does not offer {suite}.");
+}
+
+static EncryptionSuite SelectedSuiteOf(MainWindow window)
+{
+    return window.CipherSuiteBox.SelectedItem is System.Windows.Controls.ComboBoxItem { Tag: string tag }
+        && Enum.TryParse(tag, ignoreCase: false, out EncryptionSuite suite)
+        ? suite
+        : throw new InvalidOperationException("The cipher picker has no suite selected.");
+}
+
+static void MoveMouseOver(MainWindow window, int moves)
+{
+    for (int index = 0; index < moves; index++)
+    {
+        window.RaiseEvent(new System.Windows.Input.MouseEventArgs(
+            System.Windows.Input.Mouse.PrimaryDevice,
+            Environment.TickCount + index)
+        {
+            RoutedEvent = System.Windows.Input.Mouse.PreviewMouseMoveEvent,
+        });
+    }
+}
+
+/// <summary>
+/// Drives the real window the signed app ships, through the same events a user
+/// would raise.
+/// </summary>
+/// <remarks>
+/// The checks are the macOS suite's, applied to the Windows window, so a
+/// capability that exists on one platform and not the other fails a build
+/// rather than being discovered by whoever needed it.
+/// </remarks>
+static void RunGuiParityTests()
+{
+    var settings = new MemoryAppSettingsStore();
+    var window = new MainWindow(settings);
+    try
+    {
+        RunSuitePickerTests(window);
+        RunEncryptionToggleTests(window);
+        RunEntropyReadoutTests(window);
+        RunPasswordPolicyReadoutTests(window);
+        RunReferenceControlTests(window);
+    }
+    finally
+    {
+        window.Close();
+    }
+
+    RunTargetSuggestionTests();
+}
+
+static void RunSuitePickerTests(MainWindow window)
+{
+    Assert(
+        window.CipherSuiteBox.Items.Count == EncryptionSuiteCatalog.DisplayOrder.Count,
+        "the picker offers exactly the catalogue's suites");
+
+    for (int index = 0; index < EncryptionSuiteCatalog.DisplayOrder.Count; index++)
+    {
+        var item = (System.Windows.Controls.ComboBoxItem)window.CipherSuiteBox.Items[index]!;
+        EncryptionSuite expected = EncryptionSuiteCatalog.DisplayOrder[index];
+        Assert(
+            string.Equals((string?)item.Tag, expected.ToString(), StringComparison.Ordinal),
+            $"the picker follows the catalogue's display order at position {index}");
+        Assert(
+            string.Equals(
+                (string?)item.Content,
+                EncryptionSuiteCatalog.DisplayName(expected, english: true),
+                StringComparison.Ordinal),
+            $"the picker names {expected} the way the key sheets will");
+    }
+
+    // The cascades come first so the elaborate one is chosen deliberately.
+    Assert(
+        EncryptionSuiteCatalog.DisplayOrder[0] == EncryptionSuite.ThreefishOverKalyna
+        && EncryptionSuiteCatalog.DisplayOrder[3] == EncryptionSuite.ParanoiaCascade,
+        "the everyday cascade leads the list and the six-pass one closes the cascades");
+
+    // Switching language renames every entry and keeps the selection, because
+    // a language switch is not a change of cipher.
+    window.CipherSuiteBox.SelectedIndex = SuiteIndexOf(window, EncryptionSuite.MixedCascade);
+    window.LanguageBox.SelectedIndex = 0;
+    Assert(
+        SelectedSuiteOf(window) == EncryptionSuite.MixedCascade,
+        "switching language keeps the selected suite");
+    var germanItem = (System.Windows.Controls.ComboBoxItem)window.CipherSuiteBox.SelectedItem!;
+    Assert(
+        string.Equals(
+            (string?)germanItem.Content,
+            EncryptionSuiteCatalog.DisplayName(EncryptionSuite.MixedCascade, english: false),
+            StringComparison.Ordinal),
+        "switching language renames the offered suites");
+    window.LanguageBox.SelectedIndex = 1;
+    window.CipherSuiteBox.SelectedIndex = SuiteIndexOf(window, EncryptionSuiteCatalog.Default);
+}
+
+static void RunEncryptionToggleTests(MainWindow window)
+{
+    Assert(window.EncryptBox.IsChecked == true, "encryption is the default");
+    string root = Path.Combine(Path.GetTempPath(), $"kalyna-toggle-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(root);
+    try
+    {
+        string encrypted = Path.Combine(root, "archive.kzpaq");
+        string plain = Path.Combine(root, "archive.zpaq");
+        window.ArchivePathBox.Text = encrypted;
+
+        window.EncryptBox.IsChecked = false;
+        Assert(!window.CipherSuiteBox.IsEnabled, "the cipher suite stayed selectable without encryption");
+        Assert(
+            string.Equals(window.ArchivePathBox.Text, plain, StringComparison.Ordinal),
+            $"the target archive extension was not normalized for a plain archive: {window.ArchivePathBox.Text}");
+
+        window.EncryptBox.IsChecked = true;
+        Assert(window.CipherSuiteBox.IsEnabled, "the cipher suite stayed locked after re-enabling encryption");
+        Assert(
+            string.Equals(window.ArchivePathBox.Text, encrypted, StringComparison.Ordinal),
+            $"the target archive extension was not restored for an encrypted archive: {window.ArchivePathBox.Text}");
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+        window.ArchivePathBox.Text = string.Empty;
+    }
+}
+
+/// <summary>
+/// The sample threshold unlocks generation; it is not a ceiling.
+/// </summary>
+/// <remarks>
+/// An earlier build clamped the value the throttle compared against, which
+/// froze the whole status line at the threshold and made the minimum look like
+/// a maximum. The readout has to keep moving while the pointer does.
+/// </remarks>
+static void RunEntropyReadoutTests(MainWindow window)
+{
+    long required = EntropyMixer.RequiredMouseSamplesPerPurpose;
+    long guard = 0;
+    while (EntropyMixer.GetPoolStatus().Minimum < required)
+    {
+        MoveMouseOver(window, 512);
+        if (++guard > 200)
+        {
+            throw new InvalidOperationException("The entropy pools never reached the required minimum.");
+        }
+    }
+
+    window.RefreshEntropyStatusForTests();
+    EntropyPoolStatus atThreshold = EntropyMixer.GetPoolStatus();
+    string textAtThreshold = window.EntropyStatusText.Text;
+    Assert(window.GeneratePasswordButton.IsEnabled, "generation stayed locked after every pool reached the minimum");
+    Assert(
+        Math.Abs(window.EntropyProgress.Maximum - required) < 0.5,
+        "the entropy bar measures progress towards the required minimum");
+    Assert(
+        Math.Abs(window.EntropyProgress.Value - required) < 0.5,
+        "the entropy bar is full once every pool has reached the minimum");
+
+    MoveMouseOver(window, 2560);
+    window.RefreshEntropyStatusForTests();
+    EntropyPoolStatus beyond = EntropyMixer.GetPoolStatus();
+    Assert(
+        beyond.Minimum > atThreshold.Minimum,
+        $"sampling stopped at the {required}-sample minimum instead of continuing: {beyond.Minimum}");
+    Assert(beyond.Total > atThreshold.Total, "the total sample count stopped growing past the minimum");
+    Assert(
+        !string.Equals(window.EntropyStatusText.Text, textAtThreshold, StringComparison.Ordinal),
+        "the entropy status line froze at the minimum instead of reporting the additional samples");
+    Assert(
+        window.EntropyStatusText.Text.Contains(
+            beyond.Total.ToString(System.Globalization.CultureInfo.CurrentCulture),
+            StringComparison.Ordinal),
+        "the entropy status line never caught up with the current total sample count");
+    Assert(
+        Math.Abs(window.EntropyProgress.Value - required) < 0.5,
+        "the entropy bar stays full while the counters keep climbing");
+}
+
+static void RunPasswordPolicyReadoutTests(MainWindow window)
+{
+    window.CreatePasswordBox.Password = "kurz";
+    string weakText = window.PasswordEntropyStatusText.Text;
+    Assert(weakText.Length > 0, "the password policy readout stayed empty for a weak password");
+    Assert(
+        !PasswordKeyService.AnalyzeUserPassword("kurz", string.Empty, string.Empty).IsAccepted,
+        "a four-character password was treated as acceptable");
+
+    window.CreatePasswordBox.Password = TestUserPassword;
+    Assert(
+        !string.Equals(window.PasswordEntropyStatusText.Text, weakText, StringComparison.Ordinal),
+        "the password policy readout did not react to a changed password");
+    Assert(
+        PasswordKeyService.AnalyzeUserPassword(TestUserPassword, string.Empty, string.Empty).IsAccepted,
+        "the reference-strength password was rejected by the policy");
+    window.CreatePasswordBox.Clear();
+}
+
+static void RunReferenceControlTests(MainWindow window)
+{
+    string[] referenceControls =
+    [
+        "EncryptBox", "CipherSuiteBox", "CompressionBox", "ArchivePathBox", "InputList",
+        "CreatePasswordBox", "CreatePasswordConfirmBox", "GeneratedPasswordFirstBox",
+        "GeneratedPasswordSecondBox", "GeneratePasswordButton", "EntropyStatusText",
+        "EntropyProgress", "KeySheetStatusText", "PasswordEntropyStatusText",
+        "ExtractArchiveBox", "OutputFolderBox", "ExtractPasswordBox",
+        "ExtractGeneratedPasswordFirstBox", "ExtractGeneratedPasswordSecondBox",
+        "ErasePathBox", "LogBox", "ClearLogButton", "LanguageBox",
+    ];
+
+    foreach (string name in referenceControls)
+    {
+        Assert(
+            window.FindName(name) is not null,
+            $"the Windows window is missing the reference control: {name}");
+    }
+}
+
+/// <summary>
+/// A folder input must not suggest an archive inside that same folder.
+/// </summary>
+/// <remarks>
+/// Suggesting a target inside the input produced a path the safety check then
+/// refused, which reads to the user as the app objecting to a folder and a
+/// same-named archive coexisting. The suggestion has to be a path the app will
+/// actually accept.
+/// </remarks>
+static void RunTargetSuggestionTests()
+{
+    string root = Path.Combine(Path.GetTempPath(), $"kalyna-target-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(root);
+    try
+    {
+        string folder = Path.Combine(root, "Docs");
+        Directory.CreateDirectory(folder);
+        File.WriteAllText(Path.Combine(folder, "note.txt"), "content");
+        File.WriteAllText(Path.Combine(root, "Docs.zip"), "not really a zip");
+
+        string suggestion = MainWindow.SuggestTargetArchivePath(folder, encrypted: true);
+        Assert(
+            !suggestion.StartsWith(folder + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase),
+            $"the suggested archive target is inside its own input folder: {suggestion}");
+        Assert(
+            string.Equals(Path.GetDirectoryName(suggestion), root, StringComparison.OrdinalIgnoreCase),
+            $"the suggested archive target is not beside the input folder: {suggestion}");
+        Assert(
+            Path.GetFileName(suggestion).StartsWith("Docs(", StringComparison.Ordinal),
+            $"the suggested archive target is not named after the folder: {suggestion}");
+        Assert(
+            !File.Exists(suggestion) && !Directory.Exists(suggestion),
+            $"the suggested archive target already exists: {suggestion}");
+
+        string fromZip = MainWindow.SuggestTargetArchivePath(Path.Combine(root, "Docs.zip"), encrypted: true);
+        Assert(
+            !File.Exists(fromZip) && !Directory.Exists(fromZip),
+            $"the suggested target for the same-named archive already exists: {fromZip}");
+
+        File.WriteAllText(suggestion, "placeholder");
+        string afterTaken = MainWindow.SuggestTargetArchivePath(folder, encrypted: true);
+        Assert(
+            !string.Equals(afterTaken, suggestion, StringComparison.OrdinalIgnoreCase) && !File.Exists(afterTaken),
+            $"an occupied target name was suggested again: {afterTaken}");
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
 static void RunKeySheetTests()
 {
     string root = Path.Combine(Path.GetTempPath(), $"kalyna-keysheet-test-{Guid.NewGuid():N}");
@@ -564,35 +889,226 @@ static void RunKeySheetTests()
     try
     {
         string archive = Path.Combine(root, "sample.kzpaq");
-        string pdf = Path.Combine(root, "key-sheet.pdf");
+        string firstPdf = Path.Combine(root, "key-sheet-Faktor-A.pdf");
+        string secondPdf = Path.Combine(root, "key-sheet-Faktor-B.pdf");
         string firstGeneratedPassword = TestGeneratedPassword();
         string secondGeneratedPassword = TestGeneratedPassword('B');
         var service = new KeySheetService();
-        var data = new KeySheetData(archive, EncryptionSuite.Threefish1024, firstGeneratedPassword, secondGeneratedPassword, new DateTime(2026, 7, 8, 12, 0, 0, DateTimeKind.Local));
+        var data = new KeySheetData(
+            archive,
+            EncryptionSuite.Threefish1024,
+            firstGeneratedPassword,
+            secondGeneratedPassword,
+            new DateTime(2026, 7, 8, 12, 0, 0, DateTimeKind.Local));
 
-        service.SaveTestPdf(data, pdf);
-        Assert(File.Exists(pdf) && new FileInfo(pdf).Length > 1024, "key sheet PDF was written");
-        AssertPdfReadableAsync(pdf, "key sheet PDF", expectedPages: 3).GetAwaiter().GetResult();
-        using (FileStream stream = File.OpenRead(pdf))
+        service.SaveTestPdf(data, firstPdf, secondPdf);
+        Assert(File.Exists(firstPdf) && new FileInfo(firstPdf).Length > 1024, "factor A key sheet PDF was written");
+        Assert(File.Exists(secondPdf) && new FileInfo(secondPdf).Length > 1024, "factor B key sheet PDF was written");
+
+        // One file per factor is the whole point: a single export would put
+        // both halves of the key in one object, on one disk, in one backup.
+        AssertPdfReadableAsync(firstPdf, "factor A key sheet PDF", expectedPages: 2).GetAwaiter().GetResult();
+        AssertPdfReadableAsync(secondPdf, "factor B key sheet PDF", expectedPages: 2).GetAwaiter().GetResult();
+        foreach (string pdf in new[] { firstPdf, secondPdf })
         {
+            using FileStream stream = File.OpenRead(pdf);
             byte[] header = new byte[5];
             stream.ReadExactly(header);
-            Assert(header.AsSpan().SequenceEqual("%PDF-"u8), "key sheet PDF header");
+            Assert(header.AsSpan().SequenceEqual("%PDF-"u8), $"key sheet PDF header for {Path.GetFileName(pdf)}");
         }
+
+        AssertThrows<ArgumentException>(
+            () => service.SaveTestPdf(data, Path.Combine(root, "same.pdf"), Path.Combine(root, "same.pdf")),
+            "both factors are refused in a single export file");
+        AssertThrows<IOException>(
+            () => service.SaveTestPdf(data, firstPdf, Path.Combine(root, "fresh-B.pdf")),
+            "an existing export file is never silently overwritten");
+
+        // If factor B cannot be written, factor A must not be left behind on
+        // its own without the caller knowing the export failed halfway.
+        string abandonedFirst = Path.Combine(root, "abandoned-A.pdf");
+        string blockedSecond = Path.Combine(root, "no-such-folder", "B.pdf");
+        AssertThrows<DirectoryNotFoundException>(
+            () => service.SaveTestPdf(data, abandonedFirst, blockedSecond),
+            "a failed second sheet reports the failure");
+        Assert(!File.Exists(abandonedFirst), "a half-finished export does not leave factor A behind");
+
+        string sameFactors = TestGeneratedPassword();
+        AssertThrows<ArgumentException>(
+            () => service.SaveTestPdf(
+                data with { SecondGeneratedPassword = sameFactors },
+                Path.Combine(root, "x-A.pdf"),
+                Path.Combine(root, "x-B.pdf")),
+            "two identical factors are refused before anything is drawn");
 
         byte[] qrPng = KeySheetService.CreateQrPng(firstGeneratedPassword);
         Assert(qrPng.Length > 128, "QR code PNG has content");
         byte[] pngSignature = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
         Assert(qrPng.AsSpan(0, 8).SequenceEqual(pngSignature), "QR code PNG signature");
         Assert(KeySheetService.GroupGeneratedPassword(firstGeneratedPassword).Contains(' '), "generated password is grouped for print");
-        Assert(service.CreatePrintVisual(data, KeySheetFactor.First) is FrameworkElement, "first in-memory print visual can be created");
-        Assert(service.CreatePrintVisual(data, KeySheetFactor.Second) is FrameworkElement, "second in-memory print visual can be created");
-        Assert(service.CreatePrintDocument(data, new System.Windows.Size(793.7, 1122.5)).Pages.Count == 3, "print document has key sheet A, blank duplex page, and key sheet B");
+
+        RunKeySheetLayoutTests(data);
+        RunKeySheetBindingTests(root, data);
     }
     finally
     {
         Directory.Delete(root, recursive: true);
     }
+}
+
+static void RunKeySheetLayoutTests(KeySheetData data)
+{
+    ValidatedKeySheetData validated = KeySheetService.Validate(data);
+    string factorA = validated.FirstGeneratedPassword;
+    string factorB = validated.SecondGeneratedPassword;
+
+    var sheetA = new RecordingSheetCanvas();
+    KeySheetLayout.DrawSheet(sheetA, validated, KeySheetFactor.First, separatedByBlankPage: true);
+    string renderedA = string.Concat(sheetA.Texts).Replace(" ", string.Empty, StringComparison.Ordinal);
+
+    Assert(renderedA.Contains(factorA, StringComparison.Ordinal), "sheet A carries factor A");
+    Assert(!renderedA.Contains(factorB, StringComparison.Ordinal), "sheet A never carries factor B");
+    Assert(
+        sheetA.Texts.Any(text => text.Contains("Threefish 1024", StringComparison.Ordinal)),
+        "sheet A names the suite the archive will actually use");
+    Assert(
+        sheetA.Texts.Any(text => text.Contains("sample.kzpaq", StringComparison.Ordinal)),
+        "sheet A names the archive file it belongs to");
+    Assert(
+        sheetA.Texts.Any(text => text.Contains(validated.DeviceName, StringComparison.Ordinal)),
+        "sheet A names the device the archive was created on");
+    Assert(
+        sheetA.Texts.Any(text => text.Contains(KeySheetLayout.ProjectUrl, StringComparison.Ordinal)),
+        "sheet A tells its finder where to obtain the app");
+    Assert(sheetA.Lines >= 3, "sheet A reserves handwriting lines for the user password");
+
+    Assert(sheetA.Faults.Count == 0, $"sheet A lays out legibly: {string.Join(" ", sheetA.Faults)}");
+
+    var sheetB = new RecordingSheetCanvas();
+    KeySheetLayout.DrawSheet(sheetB, validated, KeySheetFactor.Second, separatedByBlankPage: true);
+    string renderedB = string.Concat(sheetB.Texts).Replace(" ", string.Empty, StringComparison.Ordinal);
+    Assert(renderedB.Contains(factorB, StringComparison.Ordinal), "sheet B carries factor B");
+    Assert(!renderedB.Contains(factorA, StringComparison.Ordinal), "sheet B never carries factor A");
+
+    Assert(sheetB.Faults.Count == 0, $"sheet B lays out legibly: {string.Join(" ", sheetB.Faults)}");
+
+    // Each factor is printed as two QR codes so a single smudged, creased or
+    // faded code does not force the whole factor to be typed by hand. Each code
+    // contributes its white quiet-zone rectangle plus one per dark module.
+    Assert(
+        sheetA.Rectangles > 2 * 100 && sheetB.Rectangles > 2 * 100,
+        "each sheet carries its factor's QR code twice");
+
+    // The separating page is what keeps A and B off one sheet of paper, so it
+    // must not depend on the key material at all.
+    var separator = new RecordingSheetCanvas();
+    KeySheetLayout.DrawInstallationPage(separator, en: true);
+    string separatorText = string.Concat(separator.Texts).Replace(" ", string.Empty, StringComparison.Ordinal);
+    Assert(!separatorText.Contains(factorA, StringComparison.Ordinal), "the separating page carries no factor A");
+    Assert(!separatorText.Contains(factorB, StringComparison.Ordinal), "the separating page carries no factor B");
+    Assert(
+        !separatorText.Contains("sample.kzpaq", StringComparison.OrdinalIgnoreCase),
+        "the separating page names no archive");
+    Assert(
+        separator.Texts.Any(text => text.Contains("Windows", StringComparison.Ordinal))
+        && separator.Texts.Any(text => text.Contains("macOS", StringComparison.Ordinal)),
+        "the separating page explains installation on both platforms");
+
+    Assert(
+        separator.Faults.Count == 0,
+        $"the separating page lays out legibly: {string.Join(" ", separator.Faults)}");
+
+    var separatorGerman = new RecordingSheetCanvas();
+    KeySheetLayout.DrawInstallationPage(separatorGerman, en: false);
+    Assert(
+        !string.Concat(separatorGerman.Texts).Equals(string.Concat(separator.Texts), StringComparison.Ordinal),
+        "the separating page follows the language chosen in the app");
+
+    var englishSheet = new RecordingSheetCanvas();
+    KeySheetLayout.DrawSheet(
+        englishSheet,
+        KeySheetService.Validate(data with { English = true }),
+        KeySheetFactor.First,
+        separatedByBlankPage: true);
+    Assert(
+        englishSheet.Texts.Any(text => text.Contains("DO NOT THROW AWAY", StringComparison.Ordinal)),
+        "the English sheet shouts what it is");
+    Assert(
+        sheetA.Texts.Any(text => text.Contains("NICHT WEGSCHMEISSEN", StringComparison.Ordinal)),
+        "the German sheet shouts what it is");
+}
+
+static void RunKeySheetBindingTests(string root, KeySheetData data)
+{
+    string baseline = KeySheetService.BuildBindingFingerprint(data);
+    Assert(baseline.Length == 128 + 1 + 256, "the binding fingerprint is a SHA3-512 and a Skein-1024 digest");
+    Assert(
+        string.Equals(baseline, KeySheetService.BuildBindingFingerprint(data), StringComparison.Ordinal),
+        "the binding fingerprint is stable for identical inputs");
+
+    Assert(
+        !string.Equals(
+            baseline,
+            KeySheetService.BuildBindingFingerprint(data with { Suite = EncryptionSuite.ParanoiaCascade }),
+            StringComparison.Ordinal),
+        "changing the suite invalidates a printed key sheet");
+    Assert(
+        !string.Equals(
+            baseline,
+            KeySheetService.BuildBindingFingerprint(data with { ArchivePath = Path.Combine(root, "other.kzpaq") }),
+            StringComparison.Ordinal),
+        "changing the archive path invalidates a printed key sheet");
+    Assert(
+        !string.Equals(
+            baseline,
+            KeySheetService.BuildBindingFingerprint(data with { FirstGeneratedPassword = TestGeneratedPassword('C') }),
+            StringComparison.Ordinal),
+        "regenerating factor A invalidates a printed key sheet");
+    Assert(
+        !string.Equals(
+            baseline,
+            KeySheetService.BuildBindingFingerprint(data with { SecondGeneratedPassword = TestGeneratedPassword('D') }),
+            StringComparison.Ordinal),
+        "regenerating factor B invalidates a printed key sheet");
+
+    // Swapping A and B is a different sheet pair, not the same one.
+    Assert(
+        !string.Equals(
+            baseline,
+            KeySheetService.BuildBindingFingerprint(data with
+            {
+                FirstGeneratedPassword = data.SecondGeneratedPassword,
+                SecondGeneratedPassword = data.FirstGeneratedPassword,
+            }),
+            StringComparison.Ordinal),
+        "the ordered factor pair is part of the binding");
+
+    // NTFS resolves names case-insensitively, so two spellings of one path are
+    // one archive and must not produce two fingerprints.
+    Assert(
+        string.Equals(
+            baseline,
+            KeySheetService.BuildBindingFingerprint(data with { ArchivePath = data.ArchivePath.ToUpperInvariant() }),
+            StringComparison.Ordinal),
+        "the binding folds path case the way the file system does");
+
+    // The device name is printed for the reader's benefit; it identifies no
+    // archive and must not be able to invalidate a sheet.
+    Assert(
+        string.Equals(
+            baseline,
+            KeySheetService.BuildBindingFingerprint(data with { DeviceName = "Some Other Machine" }),
+            StringComparison.Ordinal),
+        "the printed device name is not part of the binding");
+
+    // Virtual destinations are refused by name and by port, so a renamed
+    // "Microsoft Print to PDF" cannot become a place to send a 512-bit key.
+    Assert(!WindowsPrinters.IsValidDestinationName(string.Empty), "an empty printer name is refused");
+    Assert(
+        !WindowsPrinters.IsValidDestinationName("bad\u0001name"),
+        "a printer name with control characters is refused");
+    Assert(!WindowsPrinters.IsValidDestinationName(new string('p', 4096)), "an over-long printer name is refused");
+    Assert(WindowsPrinters.IsValidDestinationName("HP LaserJet 400"), "an ordinary printer name is accepted");
 }
 
 static void AddMouseSamplesUntilEntropyReady()
@@ -650,7 +1166,7 @@ static void AddMouseSamplesUntilEntropyReady()
     ];
     Assert(
         counts.All(count => count >= EntropyMixer.RequiredMouseSamplesPerPurpose),
-        "all mouse entropy pools meet the 512-sample minimum");
+        $"all mouse entropy pools meet the {EntropyMixer.RequiredMouseSamplesPerPurpose}-sample minimum");
     Assert(EntropyMixer.GetPoolStatus().IsBalanced, "all ready mouse entropy pools differ by at most one sample");
 }
 
@@ -672,38 +1188,37 @@ static void WaitForDispatcherTask(Task task)
     task.GetAwaiter().GetResult();
 }
 
-static void CreateSyntheticKalynaContainer(string path, string hint)
+/// <summary>
+/// Writes a container carrying a real v9 header and no usable ciphertext.
+/// </summary>
+/// <remarks>
+/// Enough for everything that reads the unauthenticated header - the suite
+/// readout and the public hint - without a 1 GiB Argon2id derivation. The
+/// header itself comes from the container service, so this cannot drift away
+/// from the format the app actually writes; the copy that used to live here
+/// was still producing v7 headers long after the reader had moved to v9.
+/// </remarks>
+static void CreateSyntheticKalynaContainer(
+    string path,
+    string hint,
+    EncryptionSuite suite = EncryptionSuiteCatalog.Default)
 {
-    byte[] salt = RandomNumberGenerator.GetBytes(64);
-    byte[] nonce = RandomNumberGenerator.GetBytes(64);
-    byte[] header = JsonSerializer.SerializeToUtf8Bytes(new
-    {
-        Version = 7,
-        Algorithm = EncryptionSuiteCatalog.KalynaAlgorithm,
-        BlockBits = 512,
-        CounterEndian = EncryptionSuiteCatalog.CounterEndian,
-        EncryptionKeyBits = 512,
-        Sha3MacKeyBits = 512,
-        Sha3TagBits = 512,
-        SkeinMacKeyBits = 1024,
-        SkeinTagBits = 1024,
-        SaltBits = 512,
-        Salt = Convert.ToBase64String(salt),
-        NonceBits = 512,
-        Nonce = Convert.ToBase64String(nonce),
-        TweakBits = 0,
-        TweakMode = "None",
-        Tweak = (string?)null,
-        Hint = hint,
-        Argon2MemoryKiB = 1024 * 1024,
-        Argon2Iterations = 4,
-        Argon2Parallelism = 4,
-        Argon2OutputBits = PasswordKeyService.KalynaDerivedKeySize * 8,
-        PasswordMode = "UserPassword+GeneratedHex512x2",
-        KdfInputMode = EncryptionSuiteCatalog.KdfInputMode,
-        GeneratedPasswordBits = 1024,
-        GeneratedPasswordFactorCount = 2,
-    });
+    EncryptionSuiteParameters parameters = EncryptionSuiteCatalog.Get(suite);
+    byte[] salt = RandomNumberGenerator.GetBytes(PasswordKeyService.SaltSize);
+    byte[] nonce = RandomNumberGenerator.GetBytes(parameters.NonceBytes);
+    byte[] secondSalt = parameters.UsesTwoKdfRounds
+        ? RandomNumberGenerator.GetBytes(PasswordKeyService.SaltSize)
+        : [];
+    byte[] secondNonce = parameters.UsesTwoKdfRounds
+        ? RandomNumberGenerator.GetBytes(parameters.NonceBytes)
+        : [];
+    byte[] header = KalynaContainerService.BuildCanonicalHeaderForTests(
+        suite,
+        salt,
+        nonce,
+        secondSalt,
+        secondNonce,
+        hint);
     try
     {
         using FileStream output = File.Create(path);
@@ -712,12 +1227,17 @@ static void CreateSyntheticKalynaContainer(string path, string hint)
         BinaryPrimitives.WriteInt32LittleEndian(headerLength, header.Length);
         output.Write(headerLength);
         output.Write(header);
-        output.Write(new byte[193]);
+
+        // Both MAC tags plus one byte, so the reader gets past its
+        // truncated-before-the-payload check and reaches the header itself.
+        output.Write(new byte[64 + 128 + 1]);
     }
     finally
     {
         CryptographicOperations.ZeroMemory(salt);
         CryptographicOperations.ZeroMemory(nonce);
+        CryptographicOperations.ZeroMemory(secondSalt);
+        CryptographicOperations.ZeroMemory(secondNonce);
         CryptographicOperations.ZeroMemory(header);
     }
 }
@@ -3794,7 +4314,17 @@ static async Task AssertPdfReadableAsync(string pdfPath, string message, int? ex
 
     Assert(header.AsSpan().SequenceEqual("%PDF-"u8), $"{message}: PDF header");
 
-    string pdfInfo = ResolveToolOnPath("pdfinfo.cmd", "pdfinfo.exe", "pdfinfo");
+    // Poppler is the preferred oracle precisely because it is not the library
+    // that wrote the file. Where it is not installed the structure is checked
+    // directly instead, which is weaker but still independent of PDFsharp - and
+    // far better than a suite that refuses to run at all off one machine.
+    string? pdfInfo = TryResolveToolOnPath("pdfinfo.cmd", "pdfinfo.exe", "pdfinfo");
+    if (pdfInfo is null)
+    {
+        AssertPdfStructure(pdfPath, message, expectedPages);
+        return;
+    }
+
     ProcessResult info = await RunToolAsync(pdfInfo, [pdfPath]);
     Assert(info.Succeeded && info.StandardOutput.Contains("Pages:", StringComparison.OrdinalIgnoreCase), $"{message}: pdfinfo");
     if (expectedPages is not null)
@@ -3816,6 +4346,47 @@ static async Task AssertPdfReadableAsync(string pdfPath, string message, int? ex
     finally
     {
         Directory.Delete(renderRoot, recursive: true);
+    }
+}
+
+/// <summary>
+/// Checks a PDF's outer structure without a PDF library.
+/// </summary>
+/// <remarks>
+/// Reads the file as bytes and counts page objects. It cannot prove the file
+/// renders, so it says which check it performed rather than claiming the
+/// stronger one.
+/// </remarks>
+static void AssertPdfStructure(string pdfPath, string message, int? expectedPages)
+{
+    byte[] bytes = File.ReadAllBytes(pdfPath);
+    string text = System.Text.Encoding.Latin1.GetString(bytes);
+    Assert(text.StartsWith("%PDF-", StringComparison.Ordinal), $"{message}: PDF header (structural check)");
+    Assert(text.Contains("%%EOF", StringComparison.Ordinal), $"{message}: PDF trailer (structural check)");
+    Assert(text.Contains("/Root", StringComparison.Ordinal), $"{message}: PDF catalogue (structural check)");
+
+    if (expectedPages is not null)
+    {
+        int pages = System.Text.RegularExpressions.Regex
+            .Matches(text, @"/Type\s*/Page(?![s])")
+            .Count;
+        Assert(
+            pages == expectedPages.Value,
+            $"{message}: expected {expectedPages.Value} pages, structural check counted {pages}");
+    }
+
+    Console.WriteLine($"  note: poppler is not installed; {message} was checked structurally, not rendered.");
+}
+
+static string? TryResolveToolOnPath(params string[] names)
+{
+    try
+    {
+        return ResolveToolOnPath(names);
+    }
+    catch (FileNotFoundException)
+    {
+        return null;
     }
 }
 
@@ -4206,6 +4777,59 @@ sealed class ShortReadStream : Stream
     public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
     public override void SetLength(long value) => throw new NotSupportedException();
     public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+}
+
+/// <summary>
+/// Records every draw call so a finished key sheet can be inspected as text
+/// rather than as compressed PDF bytes.
+/// </summary>
+/// <remarks>
+/// The property under test is a negative one - factor B must never appear on
+/// sheet A, and neither factor may appear on the separating page. Searching the
+/// saved PDF cannot establish that: its content streams are deflated, so a
+/// leaked factor would simply not be found as literal text and the test would
+/// pass for the wrong reason.
+///
+/// Faults are collected rather than thrown, so one run reports every offending
+/// string at once instead of the first one.
+/// </remarks>
+sealed class RecordingSheetCanvas : ISheetCanvas
+{
+    internal List<string> Texts { get; } = [];
+
+    internal List<string> Faults { get; } = [];
+
+    internal int Rectangles { get; private set; }
+
+    internal int Lines { get; private set; }
+
+    public double WidthPoints => KeySheetLayout.A4WidthPoints;
+
+    public double HeightPoints => KeySheetLayout.A4HeightPoints;
+
+    public void DrawText(string text, SheetFont font, SheetInk ink, double x, double baselineY)
+    {
+        if (font.Size < KeySheetLayout.MinimumFontSize)
+        {
+            Faults.Add($"'{text}' is set at {font.Size}pt, below the legibility minimum.");
+        }
+
+        if (baselineY <= 0 || baselineY >= HeightPoints || x < 0 || x >= WidthPoints)
+        {
+            Faults.Add($"'{text}' is drawn off the page at ({x}, {baselineY}).");
+        }
+
+        Texts.Add(text);
+    }
+
+    public void DrawLine(SheetInk ink, double x1, double y1, double x2, double y2) => Lines++;
+
+    public void FillRectangle(SheetInk ink, double x, double y, double width, double height) => Rectangles++;
+
+    // Roughly Arial's average advance width. The layout only needs a monotone
+    // measure to decide where to wrap, and a fixed one keeps this test
+    // independent of which fonts the machine happens to have installed.
+    public double MeasureWidth(string text, SheetFont font) => text.Length * font.Size * 0.55;
 }
 
 sealed class MemoryAppSettingsStore : IAppSettingsStore

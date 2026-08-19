@@ -418,17 +418,26 @@ public sealed partial class MainWindow
             ? current
             : EncryptionSuiteCatalog.Default;
 
-        CipherSuiteBox.Items.Clear();
-        foreach (EncryptionSuite suite in EncryptionSuiteCatalog.DisplayOrder)
+        bool suppressed = _suppressCipherSuiteSelectionChanged;
+        _suppressCipherSuiteSelectionChanged = true;
+        try
         {
-            CipherSuiteBox.Items.Add(new ComboBoxItem
+            CipherSuiteBox.Items.Clear();
+            foreach (EncryptionSuite suite in EncryptionSuiteCatalog.DisplayOrder)
             {
-                Content = EncryptionSuiteCatalog.DisplayName(suite, IsEnglish),
-                Tag = suite.ToString(),
-            });
-        }
+                CipherSuiteBox.Items.Add(new ComboBoxItem
+                {
+                    Content = EncryptionSuiteCatalog.DisplayName(suite, IsEnglish),
+                    Tag = suite.ToString(),
+                });
+            }
 
-        SelectSuite(selected);
+            SelectSuite(selected);
+        }
+        finally
+        {
+            _suppressCipherSuiteSelectionChanged = suppressed;
+        }
     }
 
     private void SelectSuite(EncryptionSuite suite)

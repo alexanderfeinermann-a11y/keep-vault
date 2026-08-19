@@ -20,6 +20,10 @@
     <None Include="..\tools\kalyna_ref.dll" Link="kalyna_ref.dll" CopyToOutputDirectory="Always" CopyToPublishDirectory="Always" ExcludeFromSingleFile="true" />
     <None Include="..\tools\threefish_ref.dll" Link="threefish_ref.dll" CopyToOutputDirectory="Always" CopyToPublishDirectory="Always" ExcludeFromSingleFile="true" />
     <None Include="..\tools\argon2_ref.dll" Link="argon2_ref.dll" CopyToOutputDirectory="Always" CopyToPublishDirectory="Always" ExcludeFromSingleFile="true" />
+    <None Include="..\tools\mars_ref.dll" Condition="Exists('..\tools\mars_ref.dll')" Link="mars_ref.dll" CopyToOutputDirectory="Always" CopyToPublishDirectory="Always" ExcludeFromSingleFile="true" />
+    <None Include="..\tools\shacal2_ref.dll" Condition="Exists('..\tools\shacal2_ref.dll')" Link="shacal2_ref.dll" CopyToOutputDirectory="Always" CopyToPublishDirectory="Always" ExcludeFromSingleFile="true" />
+    <None Include="..\tools\aes_ref.dll" Condition="Exists('..\tools\aes_ref.dll')" Link="aes_ref.dll" CopyToOutputDirectory="Always" CopyToPublishDirectory="Always" ExcludeFromSingleFile="true" />
+    <None Include="..\tools\chachapoly_ref.dll" Condition="Exists('..\tools\chachapoly_ref.dll')" Link="chachapoly_ref.dll" CopyToOutputDirectory="Always" CopyToPublishDirectory="Always" ExcludeFromSingleFile="true" />
     <None Include="..\tools\*.sha3"
           Exclude="..\tools\mldsa87_ref.dll.sha3"
           Link="%(Filename)%(Extension)"

@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string] $Configuration = "Release",
     [string] $CertificateThumbprint,
     [string] $PfxPath,
@@ -25,14 +25,20 @@ if (-not $CertificateThumbprint -and -not $PfxPath) {
     $CertificateThumbprint = $buildProperties.Project.PropertyGroup.SelectSingleNode("KalynaSigningCertificateThumbprint").InnerText
 }
 
-$targets = [System.Collections.Generic.List[string]]@(
-    (Join-Path $root "tools\zpaq.exe"),
-    (Join-Path $root "tools\argon2.exe"),
-    (Join-Path $root "tools\kalyna_ref.dll"),
-    (Join-Path $root "tools\threefish_ref.dll"),
-    (Join-Path $root "tools\argon2_ref.dll"),
-    (Join-Path $root "tools\mldsa87_ref.dll")
-)
+# Every executable in tools\, not a list of names. A cipher adapter added to
+# the build and forgotten here would ship without a manifest, and the app
+# refuses to start a component it has no manifest for - so the failure would be
+# a released package that cannot run, discovered by whoever downloaded it.
+$targets = [System.Collections.Generic.List[string]]@()
+$toolsDirectory = Join-Path $root "tools"
+Get-ChildItem -LiteralPath $toolsDirectory -File |
+    Where-Object { $_.Extension -in @(".exe", ".dll") } |
+    Sort-Object -Property Name |
+    ForEach-Object { $targets.Add($_.FullName) }
+
+if ($targets.Count -eq 0) {
+    throw "No native tools were found in $toolsDirectory. Run tools\Build-Native.cmd first."
+}
 
 $applicationDirectory = Join-Path $root "KalynaArchiver\bin\$Configuration\net9.0-windows"
 if (Test-Path -LiteralPath $applicationDirectory) {

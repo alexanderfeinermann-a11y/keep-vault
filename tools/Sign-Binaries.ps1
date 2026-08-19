@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string[]] $Path,
     [string] $Configuration = "Release",
     [string] $PfxPath,
@@ -175,14 +175,15 @@ function Assert-DevelopmentRootNotTrusted {
 }
 
 function Get-DefaultTargets {
-    $candidates = [System.Collections.Generic.List[string]]@(
-        (Join-Path $root "tools\zpaq.exe"),
-        (Join-Path $root "tools\argon2.exe"),
-        (Join-Path $root "tools\kalyna_ref.dll"),
-        (Join-Path $root "tools\threefish_ref.dll"),
-        (Join-Path $root "tools\argon2_ref.dll"),
-        (Join-Path $root "tools\mldsa87_ref.dll")
-    )
+    # Every executable in tools\, not a list of names: a native component that
+    # is built but not signed is one the app will refuse to load, and the list
+    # is exactly the thing nobody remembers to extend.
+    $candidates = [System.Collections.Generic.List[string]]@()
+    $toolsDirectory = Join-Path $root "tools"
+    Get-ChildItem -LiteralPath $toolsDirectory -File |
+        Where-Object { $_.Extension -in @(".exe", ".dll") } |
+        Sort-Object -Property Name |
+        ForEach-Object { $candidates.Add($_.FullName) }
 
     $applicationDirectory = Join-Path $root "KalynaArchiver\bin\$Configuration\net9.0-windows"
     if (Test-Path -LiteralPath $applicationDirectory) {

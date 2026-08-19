@@ -1,4 +1,4 @@
-using System.Buffers.Binary;
+﻿using System.Buffers.Binary;
 using System.Globalization;
 using System.IO;
 using System.Security.Cryptography;
@@ -47,6 +47,7 @@ public sealed partial class MainWindow : Window, IDisposable
     private bool _disposed;
     private bool _integrityTrusted;
     private bool _suppressExtractArchiveTextChanged;
+    private bool _suppressCipherSuiteSelectionChanged;
     private int _extractHintLoadVersion;
     private int _protectedOperationActive;
     private string? _extractHint;
@@ -84,8 +85,13 @@ public sealed partial class MainWindow : Window, IDisposable
     {
         _settingsStore = settingsStore ?? throw new ArgumentNullException(nameof(settingsStore));
         InitializeComponent();
+        // Set from the constant rather than in the markup: a raised sample
+        // requirement with a stale maximum leaves the bar full from the start
+        // and tells the user nothing.
+        EntropyProgress.Maximum = EntropyMixer.RequiredMouseSamplesPerPurpose;
         _language = LoadSavedLanguage();
         SelectLanguageItem(_language);
+        PopulateSuites();
         SelectCipherSuiteItem(LoadSavedCipherSuite());
         CompressionBox.SelectedIndex = LoadSavedCompressionLevel();
         _componentsReady = true;
@@ -370,7 +376,12 @@ public sealed partial class MainWindow : Window, IDisposable
 
     private void CipherSuiteBox_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
     {
-        if (!_componentsReady)
+        // Rebuilding the list for a language switch empties and refills it,
+        // which raises this event twice without the user having chosen
+        // anything. Acting on that would revoke a key-sheet acknowledgement
+        // and log a selection nobody made, so a rebuild is announced and
+        // ignored here.
+        if (!_componentsReady || _suppressCipherSuiteSelectionChanged)
         {
             return;
         }
@@ -993,12 +1004,33 @@ public sealed partial class MainWindow : Window, IDisposable
                 FileName = $"{archiveStem}-key-sheets-test-export.pdf",
             };
 
-            if (dialog.ShowDialog(this) == true)
+            if (dialog.ShowDialog(this) != true)
             {
-                _keySheets.SaveTestPdf(data, dialog.FileName);
-                MarkKeySheetHandled(data);
-                Log(string.Format(T("keySheetTestPdfSavedLog"), dialog.FileName));
+                return;
             }
+
+            if (MessageBox.Show(
+                    this,
+                    T("testPdfWarning"),
+                    T("confirmationTitle"),
+                    MessageBoxButton.OKCancel,
+                    MessageBoxImage.Warning,
+                    MessageBoxResult.Cancel) != MessageBoxResult.OK)
+            {
+                return;
+            }
+
+            // Two files, one per factor: exporting both into a single document
+            // would put the whole key in one object, which is exactly what the
+            // separated sheets exist to prevent.
+            string exportDirectory = Path.GetDirectoryName(dialog.FileName) ?? Environment.CurrentDirectory;
+            string exportStem = Path.GetFileNameWithoutExtension(dialog.FileName);
+            string firstPath = Path.Combine(exportDirectory, $"{exportStem}-Faktor-A.pdf");
+            string secondPath = Path.Combine(exportDirectory, $"{exportStem}-Faktor-B.pdf");
+            _keySheets.SaveTestPdf(data, firstPath, secondPath);
+            MarkKeySheetHandled(data);
+            Log(string.Format(T("keySheetTestPdfSavedLog"), firstPath));
+            Log(string.Format(T("keySheetTestPdfSavedLog"), secondPath));
         }
         catch (Exception ex)
         {
@@ -1013,36 +1045,28 @@ public sealed partial class MainWindow : Window, IDisposable
         {
             KeySheetData data = BuildCurrentKeySheetData();
 
-            // Use the classic GDI print dialog + GDI printing instead of WPF's
-            // System.Printing pipeline. Some printer drivers (e.g. the Microsoft IPP Class
-            // Driver) fail every PrintTicket<->DEVMODE conversion with 0x80004005, which makes
-            // the WPF PrintDialog unusable even for selecting a different, working printer.
-            using var printDocument = new System.Drawing.Printing.PrintDocument();
-            if (!printDocument.PrinterSettings.IsValid)
+            // Only queues the spooler gave physical-device evidence for are
+            // offered. The system print dialog is not used here: it would list
+            // every virtual destination first and refuse it afterwards, which
+            // is an invitation to send a 512-bit key to a file.
+            IReadOnlyList<PhysicalPrinterDescriptor> printers = _keySheets.GetVerifiedPhysicalPrinters();
+            if (printers.Count == 0)
             {
-                string? firstValid = KeySheetService.FirstValidPhysicalPrinter();
-                if (firstValid is not null)
-                {
-                    printDocument.PrinterSettings.PrinterName = firstValid;
-                }
+                throw new InvalidOperationException(T("noPhysicalPrinter"));
             }
 
-            using var dialog = new Forms.PrintDialog
+            string[] names = printers.Select(printer => printer.Name).ToArray();
+            string? selected = names.Length == 1
+                ? names[0]
+                : Gui.PrinterSelectionDialog.Show(this, T("selectPrinter"), names, T("print"), T("cancel"));
+            if (selected is null)
             {
-                Document = printDocument,
-                UseEXDialog = false,
-                AllowPrintToFile = false,
-                AllowSelection = false,
-                AllowSomePages = false,
-            };
-
-            if (dialog.ShowDialog() == Forms.DialogResult.OK)
-            {
-                KeySheetService.EnsurePhysicalPrinter(dialog.PrinterSettings.PrinterName);
-                _keySheets.PrintKeySheets(dialog.PrinterSettings, data);
-                MarkKeySheetHandled(data);
-                Log(T("keySheetPrintedLog"));
+                return;
             }
+
+            KeySheetPrintResult result = _keySheets.PrintKeySheets(selected, data);
+            MarkKeySheetHandled(data);
+            Log(string.Format(T("keySheetPrintedLog"), result.Printer.Name));
         }
         catch (Exception ex)
         {
@@ -1299,7 +1323,7 @@ public sealed partial class MainWindow : Window, IDisposable
 
     private void EnsureKeySheetHandled(string archivePath)
     {
-        string expected = BuildKeySheetFingerprint(
+        string expected = KeySheetService.BuildKeySheetFingerprint(
             archivePath,
             SelectedEncryptionSuite,
             GeneratedPasswordFirstBox.Text,
@@ -1327,7 +1351,8 @@ public sealed partial class MainWindow : Window, IDisposable
             SelectedEncryptionSuite,
             PasswordKeyService.NormalizeGeneratedPassword(GeneratedPasswordFirstBox.Text),
             PasswordKeyService.NormalizeGeneratedPassword(GeneratedPasswordSecondBox.Text),
-            DateTime.Now);
+            DateTime.Now,
+            IsEnglish);
     }
 
     private void GenerateGeneratedPassword(bool log)
@@ -1373,62 +1398,13 @@ public sealed partial class MainWindow : Window, IDisposable
 
     private void MarkKeySheetHandled(KeySheetData data)
     {
-        _keySheetFingerprint = BuildKeySheetFingerprint(
+        _keySheetFingerprint = KeySheetService.BuildKeySheetFingerprint(
             data.ArchivePath,
             data.Suite,
             data.FirstGeneratedPassword,
             data.SecondGeneratedPassword);
         KeySheetStatusText.Text = T("keySheetHandled");
         KeySheetStatusText.Foreground = System.Windows.Media.Brushes.LightGreen;
-    }
-
-    private static string BuildKeySheetFingerprint(
-        string archivePath,
-        EncryptionSuite suite,
-        string firstGeneratedPassword,
-        string secondGeneratedPassword)
-    {
-        using LockedSensitiveBuffer pathBytes = LockedSensitiveBuffer.Encode(
-            Path.GetFullPath(archivePath).ToUpperInvariant(),
-            Encoding.UTF8);
-        using LockedSensitiveBuffer suiteBytes = LockedSensitiveBuffer.Encode(suite.ToString(), Encoding.ASCII);
-        using LockedSensitiveBuffer firstBytes = LockedSensitiveBuffer.Encode(
-            PasswordKeyService.NormalizeGeneratedPassword(firstGeneratedPassword),
-            Encoding.ASCII);
-        using LockedSensitiveBuffer secondBytes = LockedSensitiveBuffer.Encode(
-            PasswordKeyService.NormalizeGeneratedPassword(secondGeneratedPassword),
-            Encoding.ASCII);
-        using LockedSensitiveBuffer sha3Fingerprint = LockedSensitiveBuffer.Create(SHA3_512.HashSizeInBytes);
-        using LockedSensitiveBuffer skeinFingerprint = LockedSensitiveBuffer.Create(Skein1024Digest.DigestSize);
-        using IncrementalHash hasher = IncrementalHash.CreateHash(HashAlgorithmName.SHA3_512);
-        using var skein = new Skein1024Digest();
-        AppendFingerprintPart(hasher, skein, "Kalyna-ZPAQ/v9/key-sheet-fingerprint"u8);
-        AppendFingerprintPart(hasher, skein, pathBytes.Bytes);
-        AppendFingerprintPart(hasher, skein, suiteBytes.Bytes);
-        AppendFingerprintPart(hasher, skein, firstBytes.Bytes);
-        AppendFingerprintPart(hasher, skein, secondBytes.Bytes);
-        if (!hasher.TryGetHashAndReset(sha3Fingerprint.Bytes, out int sha3Written)
-            || sha3Written != SHA3_512.HashSizeInBytes)
-        {
-            throw new CryptographicException("SHA3-512 returned an invalid key-sheet fingerprint length.");
-        }
-
-        skein.GetHashAndReset(skeinFingerprint.Bytes);
-        return $"{Convert.ToHexString(sha3Fingerprint.Bytes)}:{Convert.ToHexString(skeinFingerprint.Bytes)}";
-    }
-
-    private static void AppendFingerprintPart(
-        IncrementalHash hasher,
-        Skein1024Digest skein,
-        ReadOnlySpan<byte> value)
-    {
-        Span<byte> length = stackalloc byte[sizeof(int)];
-        BinaryPrimitives.WriteInt32LittleEndian(length, value.Length);
-        hasher.AppendData(length);
-        hasher.AppendData(value);
-        skein.AppendData(length);
-        skein.AppendData(value);
-        CryptographicOperations.ZeroMemory(length);
     }
 
     private void SetErasePath(string path)
@@ -1543,6 +1519,11 @@ public sealed partial class MainWindow : Window, IDisposable
         EntropyPoolStatus status = EntropyMixer.GetPoolStatus();
         bool entropyReady = status.Minimum >= EntropyMixer.RequiredMouseSamplesPerPurpose;
 
+        // The bar measures the emptiest pool against the threshold, so it fills
+        // at the rate of whichever pool is furthest behind rather than at the
+        // rate of the total. Once every pool is there it stays full while the
+        // counters keep climbing.
+        EntropyProgress.Value = Math.Min(status.Minimum, EntropyMixer.RequiredMouseSamplesPerPurpose);
         GeneratePasswordButton.IsEnabled = entropyReady;
         GeneratePasswordButton.Content = T(_generatedPasswordPairReady ? "regeneratePassword" : "generatePassword");
         string statusKey = !_generatedPasswordPairReady
@@ -2301,6 +2282,8 @@ public sealed partial class MainWindow : Window, IDisposable
         ClearLogButton.Content = T("clear");
     }
 
+    internal bool IsEnglish => _language == "en";
+
     private string T(string key)
     {
         return (_language, key) switch
@@ -2318,7 +2301,7 @@ public sealed partial class MainWindow : Window, IDisposable
             ("en", "createPasswordSetupTitle") => "Three-part password for encrypted archives",
             ("en", "createPasswordSetupHelp") => "Extraction requires the user password plus two independently generated 512-bit hexadecimal passwords.",
             ("en", "passwordGeneratorTitle") => "Two independent generated 512-bit passwords",
-            ("en", "passwordGeneratorHelp") => "Factor A, factor B, salt, nonce 1, and nonce 2 each require at least 512 different samples from evenly filled independent mouse pools. Generate creates all five outputs atomically and then securely consumes every pool; zero counters afterward mean used, not insufficient. Key = Argon2id(SHA3-512(UserPassword, A) || SHA3-512(UserPassword, B), Salt). Inputs are length-prefixed and domain-separated.",
+            ("en", "passwordGeneratorHelp") => $"Factor A, factor B, salt, nonce 1, nonce 2, and nonce 3 each require at least {EntropyMixer.RequiredMouseSamplesPerPurpose} different samples from evenly filled independent mouse pools. Generate creates all six outputs atomically and then securely consumes every pool; zero counters afterward mean used, not insufficient. Key = Argon2id(SHA3-512(UserPassword, A) || SHA3-512(UserPassword, B), Salt). Inputs are length-prefixed and domain-separated.",
             ("en", "entropyStatusCollecting") => "Collecting archive entropy: total {0}; factor A {1}/{7}; factor B {2}/{7}; salt {3}/{7}; nonce 1 {4}/{7}; nonce 2 {5}/{7}; nonce 3 {6}/{7}",
             ("en", "entropyStatusPrepared") => "Archive entropy ready: factors A/B, salt, and nonces were generated; their source samples were securely consumed. Fresh pools: total {0}; factor A {1}/{7}; factor B {2}/{7}; salt {3}/{7}; nonce 1 {4}/{7}; nonce 2 {5}/{7}; nonce 3 {6}/{7}",
             ("en", "entropyStatusRetry") => "Factors A/B remain valid because their source entropy was already consumed. Fresh salt/nonces are required only for a retry: total {0}; factor A {1}/{7}; factor B {2}/{7}; salt {3}/{7}; nonce 1 {4}/{7}; nonce 2 {5}/{7}; nonce 3 {6}/{7}",
@@ -2357,7 +2340,13 @@ public sealed partial class MainWindow : Window, IDisposable
             ("en", "keySheetHandled") => "Separate key sheets were printed or explicitly exported for testing for the current archive and factors.",
             ("en", "keySheetRequired") => "Print the separate key sheets (recommended), or explicitly save a test PDF, before creating the encrypted archive.",
             ("en", "keySheetTestPdfSavedLog") => "Test key-sheet PDF saved to persistent storage: {0}",
-            ("en", "keySheetPrintedLog") => "Key sheets sent to a physical printer without an app-created PDF. The Windows print spooler and driver remain outside the app's storage control.",
+            ("en", "keySheetPrintedLog") => "Key sheets sent to the physical printer '{0}' without an app-created PDF. The Windows print spooler and driver remain outside the app's storage control.",
+            ("en", "confirmationTitle") => "Confirmation",
+            ("en", "testPdfWarning") => "This explicit test export permanently writes both secret factors to a PDF. Continue only in a controlled test environment.",
+            ("en", "selectPrinter") => "Select a physical printer",
+            ("en", "print") => "Print",
+            ("en", "cancel") => "Cancel",
+            ("en", "noPhysicalPrinter") => "No printer with physical-device evidence is available. Virtual PDF, XPS, OneNote, fax and file destinations are blocked for key sheets.",
             ("en", "saveTestKeySheetDialog") => "Save test key-sheet PDF (writes secrets to disk)",
             ("en", "pdfFilter") => "PDF files (*.pdf)|*.pdf|All files (*.*)|*.*",
             ("en", "generatedPasswordLength") => "The generated password must contain exactly 128 hexadecimal characters.",
@@ -2484,7 +2473,7 @@ public sealed partial class MainWindow : Window, IDisposable
             (_, "createPasswordSetupTitle") => "Dreiteiliges Passwort für verschlüsselte Archive",
             (_, "createPasswordSetupHelp") => "Zum Entpacken werden das Userpasswort sowie zwei unabhängig generierte 512-Bit-Hex-Passwörter benötigt.",
             (_, "passwordGeneratorTitle") => "Zwei unabhängige generierte 512-Bit-Passwörter",
-            (_, "passwordGeneratorHelp") => "Faktor A, Faktor B, Salt, Nonce 1 und Nonce 2 benötigen jeweils mindestens 512 verschiedene Samples aus gleichmäßig gefüllten, getrennten Mauspools. Generieren erzeugt alle fünf Ausgaben atomar und verbraucht danach jeden Pool sicher; Zähler null bedeutet anschließend verbraucht, nicht unzureichend. Schlüssel = Argon2id(SHA3-512(Userpasswort, A) || SHA3-512(Userpasswort, B), Salt). Die Eingaben werden längencodiert und domänengetrennt.",
+            (_, "passwordGeneratorHelp") => $"Faktor A, Faktor B, Salt, Nonce 1, Nonce 2 und Nonce 3 benötigen jeweils mindestens {EntropyMixer.RequiredMouseSamplesPerPurpose} verschiedene Samples aus gleichmäßig gefüllten, getrennten Mauspools. Generieren erzeugt alle sechs Ausgaben atomar und verbraucht danach jeden Pool sicher; Zähler null bedeutet anschließend verbraucht, nicht unzureichend. Schlüssel = Argon2id(SHA3-512(Userpasswort, A) || SHA3-512(Userpasswort, B), Salt). Die Eingaben werden längencodiert und domänengetrennt.",
             (_, "entropyStatusCollecting") => "Archiv-Entropie wird gesammelt: gesamt {0}; Faktor A {1}/{7}; Faktor B {2}/{7}; Salt {3}/{7}; Nonce 1 {4}/{7}; Nonce 2 {5}/{7}; Nonce 3 {6}/{7}",
             (_, "entropyStatusPrepared") => "Archiv-Entropie bereit: Faktoren A/B, Salt und Nonces wurden erzeugt; ihre Quell-Samples sind sicher verbraucht. Frische Pools: gesamt {0}; Faktor A {1}/{7}; Faktor B {2}/{7}; Salt {3}/{7}; Nonce 1 {4}/{7}; Nonce 2 {5}/{7}; Nonce 3 {6}/{7}",
             (_, "entropyStatusRetry") => "Faktoren A/B bleiben gültig, da ihre Quell-Entropie bereits verbraucht wurde. Nur für einen Wiederholungsversuch werden frischer Salt und frische Nonces benötigt: gesamt {0}; Faktor A {1}/{7}; Faktor B {2}/{7}; Salt {3}/{7}; Nonce 1 {4}/{7}; Nonce 2 {5}/{7}; Nonce 3 {6}/{7}",
@@ -2523,7 +2512,13 @@ public sealed partial class MainWindow : Window, IDisposable
             (_, "keySheetHandled") => "Getrennte Schlüsselzettel wurden für das aktuelle Archiv und die Faktoren gedruckt oder ausdrücklich als Test exportiert.",
             (_, "keySheetRequired") => "Die getrennten Schlüsselzettel vor dem Erstellen drucken (empfohlen) oder ausdrücklich eine Test-PDF speichern.",
             (_, "keySheetTestPdfSavedLog") => "Test-Schlüsselzettel-PDF im permanenten Speicher abgelegt: {0}",
-            (_, "keySheetPrintedLog") => "Schlüsselzettel ohne von der App erzeugte PDF an einen physischen Drucker gesendet. Windows-Druckspooler und Treiber liegen außerhalb der Speicherkontrolle der App.",
+            (_, "keySheetPrintedLog") => "Schlüsselzettel ohne von der App erzeugte PDF an den physischen Drucker '{0}' gesendet. Windows-Druckspooler und Treiber liegen außerhalb der Speicherkontrolle der App.",
+            (_, "confirmationTitle") => "Bestätigung",
+            (_, "testPdfWarning") => "Dieser ausdrückliche Testexport schreibt beide geheimen Faktoren dauerhaft in eine PDF. Nur in einer kontrollierten Testumgebung fortfahren.",
+            (_, "selectPrinter") => "Physischen Drucker auswählen",
+            (_, "print") => "Drucken",
+            (_, "cancel") => "Abbrechen",
+            (_, "noPhysicalPrinter") => "Es ist kein Drucker mit Nachweis eines physischen Geräts verfügbar. Virtuelle PDF-, XPS-, OneNote-, Fax- und Dateiziele sind für Schlüsselzettel gesperrt.",
             (_, "saveTestKeySheetDialog") => "Test-Schlüsselzettel-PDF speichern (schreibt Geheimnisse auf die Festplatte)",
             (_, "pdfFilter") => "PDF-Dateien (*.pdf)|*.pdf|Alle Dateien (*.*)|*.*",
             (_, "generatedPasswordLength") => "Das generierte Passwort muss exakt 128 Hexadezimalzeichen enthalten.",
@@ -2705,6 +2700,45 @@ public sealed partial class MainWindow : Window, IDisposable
         }
 
         _settingsStore.Write(CompressionSettingsFile, level.ToString(System.Globalization.CultureInfo.InvariantCulture));
+    }
+
+    /// <summary>
+    /// Rebuilds the cipher picker in the current language.
+    /// </summary>
+    /// <remarks>
+    /// Built from the catalogue rather than written into the window, so a suite
+    /// cannot be offered that the catalogue does not know, and one it does know
+    /// cannot be left out. The selection is preserved across the rebuild, which
+    /// matters because this also runs when the user switches language.
+    /// </remarks>
+    private void PopulateSuites()
+    {
+        EncryptionSuite selected = CipherSuiteBox.SelectedItem
+                is System.Windows.Controls.ComboBoxItem { Tag: string tag }
+            && Enum.TryParse(tag, ignoreCase: false, out EncryptionSuite current)
+            ? current
+            : EncryptionSuiteCatalog.Default;
+
+        bool suppressed = _suppressCipherSuiteSelectionChanged;
+        _suppressCipherSuiteSelectionChanged = true;
+        try
+        {
+            CipherSuiteBox.Items.Clear();
+            foreach (EncryptionSuite suite in EncryptionSuiteCatalog.DisplayOrder)
+            {
+                CipherSuiteBox.Items.Add(new System.Windows.Controls.ComboBoxItem
+                {
+                    Content = EncryptionSuiteCatalog.DisplayName(suite, IsEnglish),
+                    Tag = suite.ToString(),
+                });
+            }
+
+            SelectCipherSuiteItem(selected);
+        }
+        finally
+        {
+            _suppressCipherSuiteSelectionChanged = suppressed;
+        }
     }
 
     private void SelectCipherSuiteItem(EncryptionSuite suite)

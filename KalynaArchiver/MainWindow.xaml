@@ -1,4 +1,4 @@
-<Window x:Class="KalynaArchiver.MainWindow"
+﻿<Window x:Class="KalynaArchiver.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Keep Vault"
@@ -214,10 +214,11 @@
                                         <StackPanel>
                                             <TextBlock x:Name="PasswordGeneratorTitle" Text="Two independent generated 512-bit passwords" FontWeight="SemiBold" />
                                             <TextBlock x:Name="PasswordGeneratorHelpText"
-                                                       Text="Move the mouse over the window. Five independent pools are filled evenly; 512 samples per pool is the minimum. Generate creates A, B, salt, and both nonce parts atomically, then marks their reset pools as consumed. Key = Argon2id(SHA3-512(UserPassword, A) || SHA3-512(UserPassword, B), Salt). Inputs are length-prefixed and domain-separated."
+                                                       Text="Move the mouse over the window. Six independent pools are filled evenly; 1024 samples per pool is the minimum. Generate creates A, B, salt, and all three nonce parts atomically, then marks their reset pools as consumed. Key = Argon2id(SHA3-512(UserPassword, A) || SHA3-512(UserPassword, B), Salt). Inputs are length-prefixed and domain-separated."
                                                        Foreground="#94A3B8"
                                                        TextWrapping="Wrap"
                                                        Margin="0,6,0,6" />
+                                            <ProgressBar x:Name="EntropyProgress" Minimum="0" Height="7" Margin="0,0,0,6" Foreground="#5DE4EC" Background="#1E293B" BorderThickness="0" />
                                             <TextBlock x:Name="EntropyStatusText" Text="Collecting archive entropy: 0 current mouse samples" Foreground="#67E8F9" TextWrapping="Wrap" />
                                             <WrapPanel Margin="0,10,0,8">
                                                 <Button x:Name="GeneratePasswordButton" Content="Regenerate" Click="GeneratePassword_Click" />

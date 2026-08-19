@@ -292,15 +292,21 @@ public sealed class KeySheetService
     {
         string normalized = PasswordKeyService.NormalizeGeneratedPassword(generatedPassword);
         using var generator = new QRCodeGenerator();
-        using QRCodeData qrData = generator.CreateQrCode(normalized, QRCodeGenerator.ECCLevel.Q);
+        QRCodeData qrData = generator.CreateQrCode(normalized, QRCodeGenerator.ECCLevel.Q);
         try
         {
-            using var png = new PngByteQRCode(qrData);
+            // Not a using: PngByteQRCode.Dispose() disposes the QRCodeData it
+            // was handed and nulls its matrix. The matrix holds the factor, so
+            // it has to be overwritten while it is still there - and the
+            // earlier arrangement instead threw a NullReferenceException on the
+            // way out, leaving the key material to the allocator.
+            var png = new PngByteQRCode(qrData);
             return png.GetGraphic(6);
         }
         finally
         {
             ClearQrMatrix(qrData);
+            qrData.Dispose();
         }
     }
 
@@ -345,7 +351,7 @@ public sealed class KeySheetService
     /// later needs to know what it belongs to and where to get the program that
     /// reads it, so the address is on the paper rather than only in the app.
     /// </remarks>
-    private const string ProjectUrl = "https://github.com/alexanderfeinermann-a11y/keep-vault";
+    private const string ProjectUrl = "https://github.com/michael-feinermann/keep-vault";
 
     /// <summary>
     /// No text on a key sheet is ever smaller than this.

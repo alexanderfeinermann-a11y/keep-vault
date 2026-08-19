@@ -40,6 +40,46 @@ cl %HARDEN_COMPILE% /LD /D_CRT_SECURE_NO_WARNINGS ^
   %HARDEN_LINK%
 if errorlevel 1 exit /b 1
 
+rem Crypto++ supplies MARS, SHACAL-2, AES and ChaCha20-Poly1305, which this
+rem repository has no reference implementation of. It is compiled once into a
+rem static library rather than listed file by file next to each adapter: its
+rem algorithm sources cannot be cherry-picked, because rijndael.cpp and its
+rem siblings reach cryptlib, misc, secblock, algparam and from there the whole
+rem integer machinery. CRYPTOPP_DISABLE_ASM must be identical here and for
+rem every adapter compiled against the library, since the headers branch on it.
+set "CRYPTOPP_HARDEN=/O2 /MT /GS /guard:cf"
+set "CRYPTOPP_FLAGS=/std:c++17 /DCRYPTOPP_DISABLE_ASM /EHsc /Iexternal\cryptopp"
+set "CRYPTOPP_LIB=build-obj\cryptopp\cryptopp.lib"
+
+if not exist build-obj\cryptopp mkdir build-obj\cryptopp
+
+if not exist "%CRYPTOPP_LIB%" (
+  del /q build-obj\cryptopp\*.obj 2>nul
+  del /q build-obj\cryptopp\sources.txt 2>nul
+  rem The validation, benchmark and self-test drivers ship in the same
+  rem directory as the library and pull in a main(). The *_simd translation
+  rem units are compiled by Crypto++'s own makefile with per-file -arch flags;
+  rem this build uses one flag set, so the portable C++ paths are used instead.
+  for %%F in (external\cryptopp\*.cpp) do (
+    echo %%~nxF | findstr /i /r /c:"^test\.cpp$" /c:"^bench[123]\.cpp$" /c:"^datatest\.cpp$" /c:"^dlltest\.cpp$" /c:"^fipsalgt\.cpp$" /c:"^adhoc\.cpp$" /c:"^regtest.*\.cpp$" /c:"^validat.*\.cpp$" /c:"_simd\.cpp$" >nul || (
+      echo %%F>> build-obj\cryptopp\sources.txt
+    )
+  )
+  if not exist build-obj\cryptopp\sources.txt (
+    echo No Crypto++ sources were found; external\cryptopp is missing or empty.
+    exit /b 1
+  )
+  cl %CRYPTOPP_HARDEN% %CRYPTOPP_FLAGS% /MP /c /Fobuild-obj\cryptopp\ @build-obj\cryptopp\sources.txt
+  if errorlevel 1 exit /b 1
+  lib /nologo /OUT:%CRYPTOPP_LIB% build-obj\cryptopp\*.obj
+  if errorlevel 1 exit /b 1
+)
+
+for %%A in (mars shacal2 aes chachapoly) do (
+  cl %CRYPTOPP_HARDEN% %CRYPTOPP_FLAGS% /LD /Fetools\%%A_ref.dll native\%%A_ref_export.cpp %CRYPTOPP_LIB% %HARDEN_LINK%
+  if errorlevel 1 exit /b 1
+)
+
 cl %HARDEN_COMPILE% /LD /D_CRT_SECURE_NO_WARNINGS /DDILITHIUM_MODE=5 ^
   /Iexternal\ML-DSA-reference\ref ^
   /Fetools\mldsa87_ref.dll ^

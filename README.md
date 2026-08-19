@@ -19,7 +19,7 @@ cryptographic audit, an HSM, or operating-system hardening.
 ## Install
 
 Prebuilt packages are on the
-[Releases](https://github.com/alexanderfeinermann-a11y/keep-vault/releases) page.
+[Releases](https://github.com/michael-feinermann/keep-vault/releases) page.
 Requires macOS 14 or newer, Apple silicon or Intel (universal binary).
 
 The package contains **two applications**: `Keep Vault.app` and

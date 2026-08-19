@@ -1,4 +1,4 @@
-using System.Buffers.Binary;
+﻿using System.Buffers.Binary;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
@@ -1341,6 +1341,73 @@ public sealed partial class KalynaContainerService
     /// independent value keeps the header from carrying a parameter an attacker
     /// could vary on its own.
     /// </remarks>
+    /// <summary>
+    /// Builds a canonical v9 header for a suite, with random salt and nonce.
+    /// </summary>
+    /// <remarks>
+    /// Tests need a container the reader will accept without paying for a real
+    /// 1 GiB Argon2id derivation. Building that header in the test meant
+    /// restating the field order, the derived tweak and the second-round rules
+    /// there, and the copy went stale the moment the format moved: the suite
+    /// that wrote v9 containers was still being handed a v7 header to read.
+    ///
+    /// The header therefore stays owned by this class. Only the bytes are
+    /// handed out; nothing here derives a key or writes a file.
+    /// </remarks>
+    internal static byte[] BuildCanonicalHeaderForTests(
+        EncryptionSuite suite,
+        byte[] salt,
+        byte[] nonce,
+        byte[]? secondSalt,
+        byte[]? secondNonce,
+        string? hint)
+    {
+        ArgumentNullException.ThrowIfNull(salt);
+        ArgumentNullException.ThrowIfNull(nonce);
+        EncryptionSuiteParameters parameters = EncryptionSuiteCatalog.Get(suite);
+        byte[] tweak = CreateSuiteTweak(suite, nonce);
+        byte[] second = secondSalt ?? [];
+        byte[] secondNonceBytes = secondNonce ?? [];
+        try
+        {
+            var header = new ContainerHeader(
+                CurrentVersion,
+                parameters.Algorithm,
+                parameters.BlockBytes * 8,
+                EncryptionSuiteCatalog.CounterEndian,
+                parameters.EncryptionKeyBytes * 8,
+                parameters.Sha3MacKeyBytes * 8,
+                Sha3TagSize * 8,
+                parameters.SkeinMacKeyBytes * 8,
+                SkeinTagSize * 8,
+                PasswordKeyService.SaltSize * 8,
+                Convert.ToBase64String(salt),
+                parameters.NonceBytes * 8,
+                Convert.ToBase64String(nonce),
+                parameters.TweakBytes * 8,
+                parameters.TweakBytes > 0 ? EncryptionSuiteCatalog.ThreefishTweakMode : "None",
+                tweak.Length == 0 ? null : Convert.ToBase64String(tweak),
+                hint,
+                Argon2Profile.Default.MemoryKiB,
+                Argon2Profile.Default.Iterations,
+                Argon2Profile.Default.Parallelism,
+                parameters.DerivedKeyBytes * 8,
+                "UserPassword+GeneratedHex512x2",
+                EncryptionSuiteCatalog.KdfInputMode,
+                1024,
+                2,
+                second.Length == 0 ? 0 : PasswordKeyService.SaltSize * 8,
+                second.Length == 0 ? null : Convert.ToBase64String(second),
+                secondNonceBytes.Length == 0 ? 0 : parameters.NonceBytes * 8,
+                secondNonceBytes.Length == 0 ? null : Convert.ToBase64String(secondNonceBytes));
+            return JsonSerializer.SerializeToUtf8Bytes(header, ContainerJsonContext.Default.ContainerHeader);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(tweak);
+        }
+    }
+
     private static byte[] CreateSuiteTweak(EncryptionSuite suite, byte[] nonce)
     {
         // Driven by the catalogue rather than by a list of suite names. A suite

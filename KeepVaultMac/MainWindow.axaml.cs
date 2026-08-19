@@ -44,6 +44,7 @@ public sealed partial class MainWindow : Window, IDisposable
     private string? _integrityRawMessage;
     private IBrush _integrityBrush = Brush.Parse("#F2BD55");
     private bool _componentsReady;
+    private bool _suppressCipherSuiteSelectionChanged;
     private bool _generatedPairReady;
     private bool _extractHintLoaded;
     private bool _extractHintUnavailable;
@@ -461,7 +462,12 @@ public sealed partial class MainWindow : Window, IDisposable
 
     private void CipherSuiteBox_SelectionChanged(object? sender, SelectionChangedEventArgs e)
     {
-        if (!_componentsReady)
+        // Rebuilding the list for a language switch empties and refills it,
+        // which raises this event twice without the user having chosen
+        // anything. Acting on that would revoke a key-sheet acknowledgement
+        // and log a selection nobody made, so a rebuild is announced and
+        // ignored here.
+        if (!_componentsReady || _suppressCipherSuiteSelectionChanged)
         {
             return;
         }
