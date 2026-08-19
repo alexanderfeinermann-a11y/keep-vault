@@ -19,6 +19,7 @@
 #include <vector>
 
 #if defined(_WIN32)
+#include <windows.h>
 #define KEEPVAULT_EXPORT __declspec(dllexport)
 #else
 #define KEEPVAULT_EXPORT __attribute__((visibility("default")))
@@ -34,7 +35,76 @@ constexpr std::size_t kParallelThresholdBytes = 1024u * 1024u;
    claim is the same size in bytes whatever the cipher's block width is. */
 constexpr std::size_t kChunkBytes = 256u * 1024u;
 
-constexpr std::size_t kMaxThreads = 64;
+/*
+ * Only a sanity bound on the worker table, not a target.
+ *
+ * Set above any processor count Windows can report - 64 groups of 64 - so the
+ * hardware decides how wide the work runs. The previous value was exactly the
+ * size of one Windows processor group, which is the number a machine gets
+ * stuck at for an entirely different reason; see
+ * bind_worker_to_processor_group below.
+ */
+constexpr std::size_t kMaxThreads = 1024;
+
+/*
+ * Every logical processor on the machine, hyperthreads included.
+ *
+ * std::thread::hardware_concurrency is not enough on Windows: what it reports
+ * for a machine split into processor groups depends on the C++ runtime, and the
+ * answer that matters here is the one the operating system gives for all groups
+ * together.
+ */
+inline std::size_t logical_processor_count() noexcept
+{
+#if defined(_WIN32)
+    const DWORD active = GetActiveProcessorCount(ALL_PROCESSOR_GROUPS);
+    if (active > 0) {
+        return static_cast<std::size_t>(active);
+    }
+#endif
+    const unsigned hardware = std::thread::hardware_concurrency();
+    return hardware == 0 ? 1 : static_cast<std::size_t>(hardware);
+}
+
+#if defined(_WIN32)
+/*
+ * Puts this worker on one processor group.
+ *
+ * Windows divides a machine with more than 64 logical processors into groups of
+ * at most 64, and a thread inherits its creator's single group. A process that
+ * ignores this therefore runs on 64 processors no matter how many the machine
+ * has: on a dual-socket 128-thread server exactly half the hardware sits idle
+ * while the other half does all the work.
+ *
+ * Each worker claims a group by its own index, so the workers spread evenly
+ * across the groups and the scheduler stays free to move each one among the
+ * processors inside its group. The thread does this to itself rather than
+ * being placed by whoever created it, which keeps this independent of how the
+ * standard library implements std::thread.
+ *
+ * On a single-group machine there is nothing to do and nothing is called.
+ */
+inline void bind_worker_to_processor_group(std::size_t worker_index) noexcept
+{
+    const WORD group_count = GetActiveProcessorGroupCount();
+    if (group_count <= 1) {
+        return;
+    }
+
+    const WORD group = static_cast<WORD>(worker_index % static_cast<std::size_t>(group_count));
+    const DWORD processors = GetActiveProcessorCount(group);
+    if (processors == 0 || processors > 64) {
+        return;
+    }
+
+    GROUP_AFFINITY affinity{};
+    affinity.Group = group;
+    affinity.Mask = processors == 64
+        ? ~static_cast<KAFFINITY>(0)
+        : static_cast<KAFFINITY>((static_cast<KAFFINITY>(1) << processors) - 1);
+    (void)SetThreadGroupAffinity(GetCurrentThread(), &affinity, nullptr);
+}
+#endif
 
 inline void secure_zero(void* pointer, std::size_t length) noexcept
 {
@@ -149,8 +219,7 @@ inline int xcrypt_ctr(
 
     std::size_t thread_count = 1;
     if (length >= kParallelThresholdBytes) {
-        const unsigned hardware = std::thread::hardware_concurrency();
-        thread_count = hardware == 0 ? 1 : static_cast<std::size_t>(hardware);
+        thread_count = logical_processor_count();
         const std::size_t chunks = (total_blocks + chunk_blocks - 1) / chunk_blocks;
         if (thread_count > chunks) {
             thread_count = chunks;
@@ -171,7 +240,12 @@ inline int xcrypt_ctr(
     std::atomic<std::size_t> next_chunk{0};
     std::atomic<int> failure{0};
 
-    auto worker = [&]() noexcept {
+    auto worker = [&](std::size_t worker_index) noexcept {
+#if defined(_WIN32)
+        bind_worker_to_processor_group(worker_index);
+#else
+        (void)worker_index;
+#endif
         try {
             for (;;) {
                 const std::size_t chunk = next_chunk.fetch_add(1, std::memory_order_relaxed);
@@ -199,14 +273,15 @@ inline int xcrypt_ctr(
     threads.reserve(thread_count - 1);
     try {
         for (std::size_t i = 1; i < thread_count; ++i) {
-            threads.emplace_back(worker);
+            threads.emplace_back(worker, i);
         }
     } catch (...) {
         // Fewer threads than hoped is not an error; this one runs the rest.
         failure.store(0, std::memory_order_relaxed);
     }
 
-    worker();
+    // The calling thread keeps the group it already has and takes index 0.
+    worker(0);
 
     for (std::thread& thread : threads) {
         if (thread.joinable()) {

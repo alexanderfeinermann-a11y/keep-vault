@@ -1,0 +1,37 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net9.0-windows10.0.19041.0</TargetFramework>
+    <SupportedOSPlatformVersion>10.0.19041.0</SupportedOSPlatformVersion>
+    <UseWPF>true</UseWPF>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>QrScanner.Tests</AssemblyName>
+    <RootNamespace>QrScanner.Tests</RootNamespace>
+    <RuntimeIdentifiers>win-x64</RuntimeIdentifiers>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <!--
+      Both projects live in this directory, so they cannot share the default
+      lock file name: the second restore would overwrite the first and the
+      app would end up pinned to the test harness's package set.
+    -->
+    <NuGetLockFilePath>$(MSBuildProjectDirectory)\packages.tests.lock.json</NuGetLockFilePath>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Tests\ArbiterTests.cs" />
+    <Compile Include="Tests\QrImage.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="QrScanner.csproj" />
+    <!--
+      An encoder from a different implementation than the decoder under test.
+      Test-only: the shipped scanner has no QRCoder reference, because it never
+      produces a code, only reads one.
+    -->
+    <PackageReference Include="QRCoder" Version="1.8.0" />
+  </ItemGroup>
+
+</Project>

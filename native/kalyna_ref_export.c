@@ -21,9 +21,10 @@
 #define KALYNA_BLOCK_BYTES 64
 /* CTR mode splits into independent block ranges, so the ciphertext is
    identical no matter how many workers process it. The cap therefore only
-   bounds the stack-allocated job tables and lets the counter mode scale across
-   every logical processor, hyperthreads included. */
-#define KALYNA_MAX_THREADS 64
+   bounds the job tables; it is set well above any processor count Windows can
+   report (64 groups of 64) so that the hardware, not this number, decides how
+   wide the work runs - hyperthreads included. */
+#define KALYNA_MAX_THREADS 1024
 #define KALYNA_PARALLEL_THRESHOLD_BYTES (1024 * 1024)
 
 /* Work is claimed in chunks rather than split once up front. Apple silicon
@@ -225,8 +226,51 @@ typedef struct kalyna_ctr_shared {
 
 typedef struct kalyna_ctr_job {
     kalyna_ctr_shared* shared;
+    size_t worker_index;
     int result;
 } kalyna_ctr_job;
+
+#if defined(_WIN32)
+/*
+ * Puts this worker on one processor group.
+ *
+ * Windows divides a machine with more than 64 logical processors into groups of
+ * at most 64, and a thread inherits its creator's single group. A process that
+ * ignores this therefore runs on 64 processors no matter how many the machine
+ * has: on a dual-socket 128-thread server exactly half the hardware sits idle
+ * while the other half does all the work.
+ *
+ * Each worker claims a group by its own index, so the workers spread evenly
+ * across the groups and the scheduler stays free to move each one among the
+ * processors inside its group. The thread does this to itself rather than
+ * being created suspended and placed by the caller, which keeps the same code
+ * working whatever created the thread.
+ *
+ * On a single-group machine - every laptop and desktop, and most servers -
+ * there is nothing to do and nothing is called.
+ */
+static void bind_worker_to_processor_group(size_t worker_index)
+{
+    WORD group_count = GetActiveProcessorGroupCount();
+    if (group_count <= 1) {
+        return;
+    }
+
+    WORD group = (WORD)(worker_index % (size_t)group_count);
+    DWORD processors = GetActiveProcessorCount(group);
+    if (processors == 0 || processors > 64) {
+        return;
+    }
+
+    GROUP_AFFINITY affinity;
+    memset(&affinity, 0, sizeof(affinity));
+    affinity.Group = group;
+    affinity.Mask = processors == 64
+        ? ~(KAFFINITY)0
+        : (KAFFINITY)(((KAFFINITY)1 << processors) - 1);
+    (void)SetThreadGroupAffinity(GetCurrentThread(), &affinity, NULL);
+}
+#endif
 
 #if defined(_WIN32)
 static DWORD WINAPI kalyna_ctr_worker(LPVOID parameter)
@@ -236,6 +280,9 @@ static void* kalyna_ctr_worker(void* parameter)
 {
     kalyna_ctr_job* job = (kalyna_ctr_job*)parameter;
     kalyna_ctr_shared* shared = job->shared;
+#if defined(_WIN32)
+    bind_worker_to_processor_group(job->worker_index);
+#endif
     kalyna_t* ctx = create_kalyna_context(shared->key);
     if (ctx == NULL) {
         job->result = 2;
@@ -377,6 +424,7 @@ KALYNA_EXPORT int kalyna_512_512_ctr_xcrypt(
 
         for (size_t i = 0; i < thread_count; ++i) {
             jobs[i].shared = &shared;
+            jobs[i].worker_index = i;
 #if defined(_WIN32)
             handles[i] = CreateThread(NULL, 0, kalyna_ctr_worker, &jobs[i], 0, NULL);
             if (handles[i] == NULL) {

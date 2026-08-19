@@ -1,0 +1,23 @@
+<Project>
+  <!--
+    The scanner's own build settings, deliberately not the repository root's.
+
+    MSBuild stops at the nearest Directory.Build.props, so this file is what
+    makes the separation real rather than stated: the scanner does not inherit
+    Keep Vault's signing pins, its runtime identifiers or its publish settings,
+    and a change to those cannot reach a program that holds a scanned factor in
+    memory and owns a camera.
+
+    Two projects share this directory, so their intermediate and output paths
+    are separated by project name; a shared one would have them overwriting each
+    other's assets file.
+  -->
+  <PropertyGroup>
+    <BaseIntermediateOutputPath>$(MSBuildProjectDirectory)\build-obj\$(MSBuildProjectName)\</BaseIntermediateOutputPath>
+    <BaseOutputPath>$(MSBuildProjectDirectory)\bin\$(MSBuildProjectName)\</BaseOutputPath>
+    <DefaultItemExcludes>$(DefaultItemExcludes);$(MSBuildProjectDirectory)\build-obj\**;$(MSBuildProjectDirectory)\bin\**</DefaultItemExcludes>
+    <PublishSingleFile>false</PublishSingleFile>
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+    <RestoreLockedMode Condition="'$(RestoreLockedMode)' == ''">true</RestoreLockedMode>
+  </PropertyGroup>
+</Project>

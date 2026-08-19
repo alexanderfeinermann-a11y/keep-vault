@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "dependencies": {
+    "net9.0-windows10.0.19041": {
+      "ZXing.Net": {
+        "type": "Direct",
+        "requested": "[0.16.10, )",
+        "resolved": "0.16.10",
+        "contentHash": "9avtcn21T7Ndcl8PQ1LHR7/wEoCruX1QKKHvO6zBPTsDW9IdvR5vKOmd618AY+DtDWZz8NaFDTkpbZdgaF4l4w=="
+      }
+    },
+    "net9.0-windows10.0.19041/win-x64": {}
+  }
+}

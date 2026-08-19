@@ -28,9 +28,10 @@
 #define THREEFISH_TWEAK_BYTES 16
 /* CTR mode splits into independent block ranges, so the ciphertext is
    identical no matter how many workers process it. The cap therefore only
-   bounds the stack-allocated job tables and lets the counter mode scale across
-   every logical processor, hyperthreads included. */
-#define THREEFISH_MAX_THREADS 64
+   bounds the job tables; it is set well above any processor count Windows can
+   report (64 groups of 64) so that the hardware, not this number, decides how
+   wide the work runs - hyperthreads included. */
+#define THREEFISH_MAX_THREADS 1024
 #define THREEFISH_PARALLEL_THRESHOLD_BYTES (1024 * 1024)
 
 /* Work is handed out in chunks rather than split once up front. Apple silicon
@@ -404,8 +405,51 @@ typedef struct threefish_ctr_shared {
 
 typedef struct threefish_ctr_job {
     threefish_ctr_shared* shared;
+    size_t worker_index;
     int result;
 } threefish_ctr_job;
+
+#if defined(_WIN32)
+/*
+ * Puts this worker on one processor group.
+ *
+ * Windows divides a machine with more than 64 logical processors into groups of
+ * at most 64, and a thread inherits its creator's single group. A process that
+ * ignores this therefore runs on 64 processors no matter how many the machine
+ * has: on a dual-socket 128-thread server exactly half the hardware sits idle
+ * while the other half does all the work.
+ *
+ * Each worker claims a group by its own index, so the workers spread evenly
+ * across the groups and the scheduler stays free to move each one among the
+ * processors inside its group. The thread does this to itself rather than
+ * being created suspended and placed by the caller, which keeps the same code
+ * working whatever created the thread.
+ *
+ * On a single-group machine - every laptop and desktop, and most servers -
+ * there is nothing to do and nothing is called.
+ */
+static void bind_worker_to_processor_group(size_t worker_index)
+{
+    WORD group_count = GetActiveProcessorGroupCount();
+    if (group_count <= 1) {
+        return;
+    }
+
+    WORD group = (WORD)(worker_index % (size_t)group_count);
+    DWORD processors = GetActiveProcessorCount(group);
+    if (processors == 0 || processors > 64) {
+        return;
+    }
+
+    GROUP_AFFINITY affinity;
+    memset(&affinity, 0, sizeof(affinity));
+    affinity.Group = group;
+    affinity.Mask = processors == 64
+        ? ~(KAFFINITY)0
+        : (KAFFINITY)(((KAFFINITY)1 << processors) - 1);
+    (void)SetThreadGroupAffinity(GetCurrentThread(), &affinity, NULL);
+}
+#endif
 
 #if defined(_WIN32)
 static DWORD WINAPI threefish_ctr_worker(LPVOID parameter)
@@ -415,6 +459,9 @@ static void* threefish_ctr_worker(void* parameter)
 {
     threefish_ctr_job* job = (threefish_ctr_job*)parameter;
     threefish_ctr_shared* shared = job->shared;
+#if defined(_WIN32)
+    bind_worker_to_processor_group(job->worker_index);
+#endif
     for (;;) {
         size_t chunk = THREEFISH_CURSOR_NEXT(&shared->next_chunk);
         size_t start_block = chunk * shared->chunk_blocks;
@@ -564,6 +611,7 @@ THREEFISH_EXPORT int threefish_1024_ctr_xcrypt(
 
         for (size_t index = 0; index < thread_count; ++index) {
             jobs[index].shared = &shared;
+            jobs[index].worker_index = index;
 #if defined(_WIN32)
             handles[index] = CreateThread(NULL, 0, threefish_ctr_worker, &jobs[index], 0, NULL);
             if (handles[index] == NULL) {
