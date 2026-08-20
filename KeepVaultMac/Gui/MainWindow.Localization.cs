@@ -209,7 +209,7 @@ public sealed partial class MainWindow
             "entropyRetry" => en
                 ? "Factors remain valid; a retry needs fresh salts and nonces: total {0}; A {1}+{2}/{10}; B {3}+{4}/{10}; salt-SHA3 {5}/{10}; salt-Skein {6}/{10}; nonce 1 {7}/{10}; nonce 2 {8}/{10}; nonce 3 {9}/{10}"
                 : "Faktoren bleiben gültig; ein Wiederholungsversuch benötigt frische Salts und Nonces: gesamt {0}; A {1}+{2}/{10}; B {3}+{4}/{10}; Salt-SHA3 {5}/{10}; Salt-Skein {6}/{10}; Nonce 1 {7}/{10}; Nonce 2 {8}/{10}; Nonce 3 {9}/{10}",
-            "passwordEntropy" => en ? "Conservative entropy: {0:0.0} / {1:0} bits" : "Konservative Entropie: {0:0.0} / {1:0} Bit",
+            "passwordEntropy" => en ? "Password strength estimate: {0:0.0} / {1:0} bits" : "Passwortstärke-Schätzwert: {0:0.0} / {1:0} Bit",
             "passwordAccepted" => en ? "All user-password requirements are met." : "Alle Anforderungen an das Userpasswort sind erfüllt.",
             "passwordTooShort" => en ? "Use at least {0} characters." : "Mindestens {0} Zeichen verwenden.",
             "passwordTooLong" => en ? "Use no more than {0} characters." : "Höchstens {0} Zeichen verwenden.",
@@ -220,7 +220,7 @@ public sealed partial class MainWindow
             "passwordNonHex" => en ? "Use at least 12 non-hex characters." : "Mindestens 12 Nicht-Hex-Zeichen verwenden.",
             "passwordHexRun" => en ? "Break every hexadecimal run before 8 characters." : "Jede Hex-Folge vor 8 Zeichen unterbrechen.",
             "passwordMatchesFactor" => en ? "Do not reuse either generated factor." : "Keinen generierten Faktor als Userpasswort verwenden.",
-            "passwordLowEntropy" => en ? "Increase the conservative score to 128 bits." : "Konservative Bewertung auf 128 Bit erhöhen.",
+            "passwordLowEntropy" => en ? "Increase the password strength estimate to at least 128." : "Passwortstärke-Schätzwert auf mindestens 128 erhöhen.",
             "passwordInvalid" => en ? "The user password is not accepted." : "Das Userpasswort wird nicht akzeptiert.",
             "keySheetMissing" => en
                 ? "The two key sheets have not been physically printed or explicitly exported for testing."

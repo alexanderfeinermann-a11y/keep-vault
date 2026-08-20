@@ -75,13 +75,36 @@ public static partial class SecureFile
         ArgumentNullException.ThrowIfNull(stream);
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
         path = Path.GetFullPath(path);
+        string parentDir = Path.GetDirectoryName(path)
+            ?? throw new InvalidOperationException("Parent directory not found for secure deletion target.");
+
+        string quarantinePath = Path.Combine(parentDir, ".keepvault_erase_" + Guid.NewGuid().ToString("N"));
+
         MacSafeFileSystem.RequirePathStillNamesHandle(stream.SafeFileHandle, path);
-        MacSafeFileSystem.FullSync(stream.SafeFileHandle);
-        if (Unlink(path) != 0)
+        if (Rename(path, quarantinePath) != 0)
         {
-            throw new Win32Exception(Marshal.GetLastPInvokeError(), "macOS could not unlink the securely corrupted file.");
+            throw new Win32Exception(Marshal.GetLastPInvokeError(), "macOS could not atomically quarantine the file for secure deletion.");
+        }
+
+        try
+        {
+            MacSafeFileSystem.RequirePathStillNamesHandle(stream.SafeFileHandle, quarantinePath);
+            MacSafeFileSystem.FullSync(stream.SafeFileHandle);
+            if (Unlink(quarantinePath) != 0)
+            {
+                throw new Win32Exception(Marshal.GetLastPInvokeError(), "macOS could not unlink the securely quarantined file.");
+            }
+        }
+        catch
+        {
+            // If unlinking the quarantine path failed, attempt to clean up or leave in quarantine
+            _ = Unlink(quarantinePath);
+            throw;
         }
     }
+
+    [LibraryImport("libSystem.B.dylib", EntryPoint = "rename", SetLastError = true, StringMarshalling = StringMarshalling.Utf8)]
+    private static partial int Rename(string oldPath, string newPath);
 
     [LibraryImport("libSystem.B.dylib", EntryPoint = "unlink", SetLastError = true, StringMarshalling = StringMarshalling.Utf8)]
     private static partial int Unlink(string path);

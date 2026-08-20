@@ -69,10 +69,12 @@ if (( create_desktop_alias )); then
   fi
 fi
 
-${script_dir}/Verify-KeepVault-macOS.sh --app ${source_app} --allow-development
+${script_dir}/Verify-KeepVault-macOS.sh --app ${source_app} --allow-development --require-launcher-signature
 
 install_root=$(mktemp -d "${applications_dir}/.keep-vault-install.XXXXXXXX")
 staged_app=${install_root}/Keep\ Vault.app
+backup_dir=${install_root}/backup
+mkdir -p ${backup_dir}
 temporary_alias_path=''
 cleanup() {
   if [[ -n ${install_root:-} && -d ${install_root} && ${install_root} == ${applications_dir}/.keep-vault-install.* ]]; then
@@ -123,7 +125,7 @@ if (( install_scanner )); then
   done
 fi
 
-${script_dir}/Verify-KeepVault-macOS.sh --app ${staged_app} --allow-development
+${script_dir}/Verify-KeepVault-macOS.sh --app ${staged_app} --allow-development --require-launcher-signature
 
 destination=${applications_dir}/Keep\ Vault.app
 backup_name=.Keep\ Vault.previous.$(date -u +%Y%m%dT%H%M%SZ).app
@@ -157,6 +159,7 @@ if (!replaced) {
 JAVASCRIPT
 }
 
+has_existing_installation=0
 if [[ -e ${destination} || -L ${destination} ]]; then
   if [[ ! -d ${destination} || -L ${destination} ]]; then
     print -u2 "Refusing to replace a non-app object or symbolic link: ${destination}"
@@ -167,6 +170,16 @@ if [[ -e ${destination} || -L ${destination} ]]; then
     print -u2 'The existing application does not have the Keep Vault bundle identifier and will not be replaced.'
     exit 1
   fi
+  has_existing_installation=1
+
+  # Back up existing launcher sidecars
+  for launcher_sidecar_suffix in .sha3 .skein .khsig .sha3.khsig .skein.khsig; do
+    existing_sidecar=${applications_dir}/Keep\ Vault.app.launcher${launcher_sidecar_suffix}
+    if [[ -f ${existing_sidecar} && ! -L ${existing_sidecar} ]]; then
+      ditto ${existing_sidecar} ${backup_dir}/Keep\ Vault.app.launcher${launcher_sidecar_suffix}
+    fi
+  done
+
   atomic_replace ${destination} ${staged_app} ${backup_name}
 else
   mv ${staged_app} ${destination}
@@ -192,10 +205,18 @@ if (( install_scanner )); then
 fi
 
 if ! ${script_dir}/Verify-KeepVault-macOS.sh --app ${destination} --allow-development --require-launcher-signature; then
-  if [[ -d ${backup_path} && ! -L ${backup_path} ]]; then
+  if (( has_existing_installation )) && [[ -d ${backup_path} && ! -L ${backup_path} ]]; then
     failed_name=.Keep\ Vault.failed.$(date -u +%Y%m%dT%H%M%SZ).app
     if atomic_replace ${destination} ${backup_path} ${failed_name}; then
-      print -u2 'The new installation failed verification and the previous Keep Vault app was restored.'
+      # Restore backed-up launcher sidecars matching the restored app
+      for launcher_sidecar_suffix in .sha3 .skein .khsig .sha3.khsig .skein.khsig; do
+        if [[ -f ${backup_dir}/Keep\ Vault.app.launcher${launcher_sidecar_suffix} ]]; then
+          ditto ${backup_dir}/Keep\ Vault.app.launcher${launcher_sidecar_suffix} \
+            ${applications_dir}/Keep\ Vault.app.launcher${launcher_sidecar_suffix}
+        fi
+      done
+      ${script_dir}/Verify-KeepVault-macOS.sh --app ${destination} --allow-development --require-launcher-signature || true
+      print -u2 'The new installation failed verification; both the previous Keep Vault app and its launcher signatures were restored.'
     else
       print -u2 "CRITICAL: installation verification and automatic rollback both failed. Backup: ${backup_path}"
     fi
@@ -203,6 +224,9 @@ if ! ${script_dir}/Verify-KeepVault-macOS.sh --app ${destination} --allow-develo
     failed_destination=${HOME}/.Trash/Keep\ Vault\ failed\ $(date -u +%Y%m%dT%H%M%SZ).app
     mkdir -p ${HOME}/.Trash
     mv ${destination} ${failed_destination} || true
+    for launcher_sidecar_suffix in .sha3 .skein .khsig .sha3.khsig .skein.khsig; do
+      rm -f -- ${applications_dir}/Keep\ Vault.app.launcher${launcher_sidecar_suffix}
+    done
     print -u2 "The failed first installation was moved to: ${failed_destination}"
   fi
   exit 1

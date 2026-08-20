@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Text;
 using Microsoft.Win32.SafeHandles;
 
@@ -115,11 +116,20 @@ internal static partial class MacSafeFileSystem
                     destinationFileName,
                     CloneNoOwnerCopy | CloneNoFollowAny | CloneResolveBeneath) != 0)
             {
-                throw new IOException(
-                    "macOS could not create the required descriptor-bound atomic copy-on-write snapshot. "
-                    + "The source may be on a different file-system volume from the private app container; "
-                    + "Keep Vault refuses a non-atomic fallback.",
-                    new Win32Exception(Marshal.GetLastPInvokeError()));
+                int errorCode = Marshal.GetLastPInvokeError();
+                const int Exdev = 18;
+                const int Enotsup = 45;
+                const int Eopnotsupp = 102;
+                if (errorCode == Exdev || errorCode == Enotsup || errorCode == Eopnotsupp)
+                {
+                    StreamCopyDescriptorIntoPrivateDirectory(sourceDescriptor, canonicalDirectory, destinationFileName);
+                }
+                else
+                {
+                    throw new IOException(
+                        "macOS could not create the required descriptor-bound atomic copy-on-write snapshot.",
+                        new Win32Exception(errorCode));
+                }
             }
         }
         finally
@@ -135,6 +145,72 @@ internal static partial class MacSafeFileSystem
             }
         }
     }
+
+    private static void StreamCopyDescriptorIntoPrivateDirectory(
+        int sourceDescriptor,
+        string canonicalDirectory,
+        string destinationFileName)
+    {
+        if (FStat(sourceDescriptor, out DarwinStat beforeStat) != 0)
+        {
+            throw new Win32Exception(Marshal.GetLastPInvokeError(), "macOS could not stat source descriptor before copy.");
+        }
+
+        string destPath = Path.Combine(canonicalDirectory, destinationFileName);
+        using var destStream = new FileStream(
+            destPath,
+            FileMode.CreateNew,
+            FileAccess.Write,
+            FileShare.None,
+            bufferSize: 64 * 1024,
+            FileOptions.None);
+
+        byte[] buffer = new byte[64 * 1024];
+        long totalRead = 0;
+        long sourceOffset = 0;
+        try
+        {
+            while (sourceOffset < beforeStat.Size)
+            {
+                int toRead = checked((int)Math.Min(buffer.Length, beforeStat.Size - sourceOffset));
+                nint bytesRead = PRead(sourceDescriptor, buffer, (nuint)toRead, sourceOffset);
+                if (bytesRead < 0)
+                {
+                    throw new Win32Exception(Marshal.GetLastPInvokeError(), "macOS pread failed during cross-volume snapshot.");
+                }
+                if (bytesRead == 0)
+                {
+                    break;
+                }
+                destStream.Write(buffer, 0, (int)bytesRead);
+                sourceOffset += bytesRead;
+                totalRead += bytesRead;
+            }
+            destStream.Flush(flushToDisk: true);
+            MacSafeFileSystem.FullSync(destStream.SafeFileHandle);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(buffer);
+        }
+
+        if (FStat(sourceDescriptor, out DarwinStat afterStat) != 0)
+        {
+            throw new Win32Exception(Marshal.GetLastPInvokeError(), "macOS could not stat source descriptor after copy.");
+        }
+
+        if (beforeStat.Device != afterStat.Device || beforeStat.Inode != afterStat.Inode || beforeStat.Size != afterStat.Size)
+        {
+            throw new InvalidOperationException("Source file modified or mutated during cross-volume snapshot.");
+        }
+        if (totalRead != beforeStat.Size)
+        {
+            throw new InvalidDataException("Cross-volume snapshot size mismatch.");
+        }
+    }
+
+    [LibraryImport("libSystem.B.dylib", EntryPoint = "pread", SetLastError = true)]
+    private static partial nint PRead(int descriptor, byte[] buffer, nuint count, long offset);
 
     internal static MacFileIdentity GetIdentity(SafeFileHandle handle)
     {

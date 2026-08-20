@@ -245,7 +245,7 @@
                   <TextBlock x:Name="PasswordHelpText"
                              Text="24 bis 256 Zeichen und mindestens 128 Bit konservative Bewertung."
                              Classes="muted" FontSize="12" TextWrapping="Wrap" />
-                  <TextBlock x:Name="PasswordEntropyStatusText" Text="Konservative Entropie: 0 / 128 Bit" Foreground="#F2BD55" FontSize="12" TextWrapping="Wrap" />
+                  <TextBlock x:Name="PasswordEntropyStatusText" Text="Passwortstärke-Schätzwert: 0 / 128 Bit" Foreground="#F2BD55" FontSize="12" TextWrapping="Wrap" />
                   <TextBlock x:Name="PasswordPolicyStatusText" Text="Passwortanforderungen noch nicht erfüllt." Foreground="#F29AA6" FontSize="12" TextWrapping="Wrap" />
 
                   <Border Classes="card" Padding="13">

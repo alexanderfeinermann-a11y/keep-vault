@@ -797,27 +797,12 @@ mkdir -p ${dist_dir}
 # Keep build output out of Spotlight. Without this the release copy, the
 # portable copy and the installed app all answer to a search for "Keep Vault",
 # and the user is left guessing which of them they are about to open.
-touch ${repo_root}/dist/.metadata_never_index
-final_app=${dist_dir}/Keep\ Vault.app
-final_zip=${dist_dir}/Keep\ Vault-macOS-${architecture}.zip
-for final_path in \
-  ${final_app} \
-  ${final_zip} \
-  ${final_zip}.sha3 \
-  ${final_zip}.skein \
-  ${final_zip}.khsig \
-  ${final_zip}.sha3.khsig \
-  ${final_zip}.skein.khsig \
-  ${final_app}.launcher.sha3 \
-  ${final_app}.launcher.skein \
-  ${final_app}.launcher.khsig \
-  ${final_app}.launcher.sha3.khsig \
-  ${final_app}.launcher.skein.khsig; do
-  if [[ -e ${final_path} || -L ${final_path} ]]; then
-    print -u2 "Refusing to overwrite an existing release artifact: ${final_path}"
-    exit 1
-  fi
-done
+dist_stage=${build_root}/dist-stage
+mkdir -p ${dist_stage}
+
+final_app=${dist_stage}/Keep\ Vault.app
+final_zip=${dist_stage}/Keep\ Vault-macOS-${architecture}.zip
+
 ditto ${app_stage} ${final_app}
 
 # The launcher is the bundle's main executable, so codesign writes the bundle
@@ -860,9 +845,10 @@ for sidecar_suffix in .sha3 .skein .khsig .sha3.khsig .skein.khsig; do
   mv -- ${launcher_sidecar_source}${sidecar_suffix} ${final_app}.launcher${sidecar_suffix}
 done
 print "launcher_self_signature=${final_app}.launcher.khsig"
-final_symbols=${dist_dir}/Keep\ Vault-macOS-${architecture}.dSYMs
+final_symbols=${dist_stage}/Keep\ Vault-macOS-${architecture}.dSYMs
 rm -rf -- ${final_symbols}
 ditto ${symbols_dir} ${final_symbols}
+
 # The launcher will not start without its own dual signature, so the sidecars
 # have to be inside the distribution archive as well. Archiving the contents of
 # a staging directory (rather than --keepParent on the bundle) keeps the app at
@@ -918,6 +904,18 @@ ${script_dir}/Verify-KeepVault-macOS.sh \
   --require-launcher-signature \
   --mldsa-public-key ${mldsa_public_key}
 
+print 'RELEASE GATE: running native slice KATs across architectures...'
+native_kats_source=${packaging_dir}/NativeKats.c
+native_kats_arm64=${build_root}/native-kats-arm64
+xcrun clang -arch arm64 -O2 ${native_kats_source} -o ${native_kats_arm64}
+${native_kats_arm64} ${repo_root}/KeepVaultMac/Native/osx-arm64
+
+if [[ ${architecture} == universal ]]; then
+  native_kats_x64=${build_root}/native-kats-x64
+  xcrun clang -arch x86_64 -O2 ${native_kats_source} -o ${native_kats_x64}
+  arch -x86_64 ${native_kats_x64} ${repo_root}/KeepVaultMac/Native/osx-x64
+fi
+
 print 'RELEASE GATE: staging test natives and running comprehensive tests + key-sheet render verification...'
 ${script_dir}/Stage-TestNatives-macOS.sh \
   --app ${final_app} \
@@ -929,9 +927,6 @@ ${script_dir}/Stage-TestNatives-macOS.sh \
   ${dotnet_command} run --project KeepVaultMac.Tests/KeepVaultMac.Tests.csproj -c Release -- --dump-key-sheets "${test_sheet_dir}"
   rm -rf -- "${test_sheet_dir}"
 )
-
-print "app=${final_app}"
-print "archive=${final_zip}"
 
 # Notarization. Apple must see the build before Gatekeeper will accept it on
 # another Mac. Credentials are never passed on the command line or stored in
@@ -956,14 +951,41 @@ else
   xcrun stapler validate ${final_app}
 
   # The stapled ticket changes the bundle, so the distribution archive and its
-  # signed manifests have to be rebuilt from the stapled app.
+  # signed manifests have to be rebuilt from the stapled app including all 5 launcher sidecars.
   rm -f -- ${final_zip} ${final_zip}.sha3 ${final_zip}.skein \
     ${final_zip}.khsig ${final_zip}.sha3.khsig ${final_zip}.skein.khsig
-  ditto -c -k --sequesterRsrc --keepParent ${final_app} ${final_zip}
+  rm -rf -- ${zip_stage}
+  mkdir -p ${zip_stage}
+  ditto ${final_app} ${zip_stage}/Keep\ Vault.app
+  for sidecar_suffix in .sha3 .skein .khsig .sha3.khsig .skein.khsig; do
+    ditto ${final_app}.launcher${sidecar_suffix} ${zip_stage}/Keep\ Vault.app.launcher${sidecar_suffix}
+  done
+  ditto -c -k --sequesterRsrc ${zip_stage} ${final_zip}
   (
     cd ${mac_project}
     run_hybrid_signer ${archive_common[@]}
   )
+
+  # Re-verify the unzipped post-notarization bundle
+  rm -rf -- ${archive_check}
+  mkdir -p ${archive_check}
+  ditto -x -k ${final_zip} ${archive_check}
+  ${script_dir}/Verify-KeepVault-macOS.sh \
+    --app ${archive_check}/Keep\ Vault.app \
+    --require-launcher-signature \
+    --require-notarization \
+    --mldsa-public-key ${mldsa_public_key}
+
   spctl --assess --type execute -vv ${final_app}
   print "notarization=stapled (${notary_profile})"
 fi
+
+# ATOMIC PUBLISH: dist/ receives only fully verified, tested, and sealed release artifacts.
+dist_dir=${repo_root}/dist/Keep\ Vault-macOS
+mkdir -p ${dist_dir:h}
+rm -rf -- ${dist_dir}
+ditto ${dist_stage} ${dist_dir}
+touch ${repo_root}/dist/.metadata_never_index
+
+print "published_app=${dist_dir}/Keep Vault.app"
+print "published_archive=${dist_dir}/Keep Vault-macOS-${architecture}.zip"

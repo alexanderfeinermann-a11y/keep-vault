@@ -241,13 +241,22 @@ public sealed class KeySheetService
             pdfA.GetWrittenMemory(),
             cancellationToken).ConfigureAwait(false);
 
+        PhysicalPrinterDescriptor immediatePrinterB =
+            await EnsurePhysicalPrinterAsync(printerName, cancellationToken).ConfigureAwait(false);
+        if (printer.Evidence != immediatePrinterB.Evidence
+            || !string.Equals(printer.DeviceUri, immediatePrinterB.DeviceUri, StringComparison.Ordinal)
+            || !string.Equals(printer.MakeAndModel, immediatePrinterB.MakeAndModel, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException("Das physische CUPS-Druckziel wurde vor Übermittlung von Faktor B verändert.");
+        }
+
         pdfB.Position = 0;
         string receiptB = await MacCupsPrinter.SubmitPdfAsync(
-            immediatePrinter.Name,
+            immediatePrinterB.Name,
             pdfB.GetWrittenMemory(),
             cancellationToken).ConfigureAwait(false);
 
-        return new KeySheetPrintResult(immediatePrinter, $"{receiptA}; {receiptB}", DateTimeOffset.Now);
+        return new KeySheetPrintResult(immediatePrinterB, $"{receiptA}; {receiptB}", DateTimeOffset.Now);
     }
 
     public KeySheetPrintResult PrintKeySheets(string printerName, KeySheetData data)

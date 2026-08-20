@@ -58,9 +58,9 @@ internal static partial class MacComprehensiveTests
             ("ZPAQ levels, streaming, traversal and malformed corpus", TestZpaqAsync),
             ("v10 suite roundtrips and manipulation rejection", TestContainersAsync),
             ("cascade layering: the outer layer alone reveals nothing", TestCascadeLayeringAsync),
-            ("v9 two-round key derivation from one pool consumption", TestTwoRoundDerivationAsync),
+            ("v10 two-round key derivation from one pool consumption", TestTwoRoundDerivationAsync),
             ("salt and nonce for every single-round suite without prepared entropy", TestUnpreparedEncryptionParametersAsync),
-            ("v9 per-chunk nonces across a multi-chunk archive", TestPerChunkNoncesAsync),
+            ("v10 per-chunk nonces across a multi-chunk archive", TestPerChunkNoncesAsync),
             ("MARS and SHACAL-2 published vectors and CTR behaviour", TestCascadeCipherVectorsAsync),
             ("KPAR2-v3 repair, authentication and transplantation rejection", TestRecoveryAsync),
             ("KPAR2-v3 accepts every catalogued suite, not just the first two", TestRecoveryAcrossSuitesAsync),
@@ -758,6 +758,11 @@ internal static partial class MacComprehensiveTests
             ("111234", PinPolicyViolation.RepeatedDigitsTriple),
             ("112211", PinPolicyViolation.NotEnoughDistinctDigits),
             ("112212", PinPolicyViolation.NotEnoughDistinctDigits),
+            ("147258", PinPolicyViolation.Blocklisted),
+            ("258147", PinPolicyViolation.Blocklisted),
+            ("369258", PinPolicyViolation.Blocklisted),
+            ("159357", PinPolicyViolation.Blocklisted),
+            ("753951", PinPolicyViolation.Blocklisted),
         ];
 
         foreach (var (pin, expectedViolation) in weakPins)

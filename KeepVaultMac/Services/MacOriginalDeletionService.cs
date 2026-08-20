@@ -407,7 +407,7 @@ internal sealed class MacOriginalDeletionService
                 movedFiles.Add((path, quarantinePath));
             }
 
-            // Stage 2: Verification of quarantined files before unlinking
+            // Stage 2: Verification of quarantined files before committing to unlink
             foreach ((string origPath, string quarPath) in movedFiles)
             {
                 OriginalFileState expected = verified.Files[origPath];
@@ -428,15 +428,23 @@ internal sealed class MacOriginalDeletionService
                 }
             }
 
-            // Stage 3: Unlink verified files from quarantine
-            foreach ((_, string quarPath) in movedFiles)
+            // Stage 3: Unlink verified files from quarantine (irreversible commit)
+            foreach ((string origPath, string quarPath) in movedFiles)
             {
-                File.Delete(quarPath);
+                try
+                {
+                    File.Delete(quarPath);
+                }
+                catch (Exception ex)
+                {
+                    failures.Add($"Quarantänedatei konnte nicht gelöscht werden ({origPath}): {ex.Message}");
+                }
             }
         }
         catch (Exception ex)
         {
             // Rollback: Restore any files still in quarantine to their original locations
+            var rollbackErrors = new List<string>();
             foreach ((string origPath, string quarPath) in movedFiles)
             {
                 if (File.Exists(quarPath) && !File.Exists(origPath))
@@ -445,31 +453,37 @@ internal sealed class MacOriginalDeletionService
                     {
                         File.Move(quarPath, origPath);
                     }
-                    catch
+                    catch (Exception moveEx)
                     {
-                        // best effort rollback
+                        rollbackErrors.Add(
+                            $"Wiederherstellung aus Quarantäne fehlgeschlagen für {origPath}: {moveEx.Message}. " +
+                            $"Originaldatei verbleibt geschützt in: {quarPath}");
                     }
                 }
             }
 
-            failures.Add($"Löschung abgebrochen und zurückgerollt: {ex.Message}");
+            failures.Add($"Löschung abgebrochen: {ex.Message}");
+            if (rollbackErrors.Count > 0)
+            {
+                failures.AddRange(rollbackErrors);
+            }
             return failures;
         }
         finally
         {
-            // Clean up quarantine directories
+            // Clean up ONLY demonstrably empty quarantine directories — NEVER delete recursively.
             foreach (string qDir in quarantineDirs)
             {
                 try
                 {
-                    if (Directory.Exists(qDir))
+                    if (Directory.Exists(qDir) && !Directory.EnumerateFileSystemEntries(qDir).Any())
                     {
-                        Directory.Delete(qDir, recursive: true);
+                        Directory.Delete(qDir, recursive: false);
                     }
                 }
                 catch
                 {
-                    // best effort cleanup
+                    // best effort non-recursive cleanup
                 }
             }
         }

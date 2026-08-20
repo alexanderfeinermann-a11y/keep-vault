@@ -134,6 +134,11 @@ internal static class V10KeyDerivation
             violations.Add(PinPolicyViolation.SequentialDescending);
         }
 
+        if (HasKeypadGeometricPattern(raw))
+        {
+            violations.Add(PinPolicyViolation.Blocklisted);
+        }
+
         if (IsBlocklistedOrRepetitive(raw))
         {
             violations.Add(PinPolicyViolation.Blocklisted);
@@ -149,6 +154,42 @@ internal static class V10KeyDerivation
         {
             throw new PinPolicyException(analysis);
         }
+    }
+
+    private static bool HasKeypadGeometricPattern(string pin)
+    {
+        // 3x3 Keypad + 0 layout:
+        // 1 2 3
+        // 4 5 6
+        // 7 8 9
+        //   0
+        // Detects runs of 3+ keypad column steps (±3), diagonal steps (±4 or ±2), or knight jumps.
+        for (int i = 0; i <= pin.Length - 3; i++)
+        {
+            int d1 = pin[i + 1] - pin[i];
+            int d2 = pin[i + 2] - pin[i + 1];
+
+            // Vertical column run (e.g. 1-4-7, 7-4-1, 2-5-8, 8-5-2, 3-6-9, 9-6-3)
+            if ((d1 == 3 && d2 == 3) || (d1 == -3 && d2 == -3))
+            {
+                return true;
+            }
+
+            // Diagonal run (e.g. 1-5-9, 9-5-1)
+            if ((d1 == 4 && d2 == 4) || (d1 == -4 && d2 == -4))
+            {
+                return true;
+            }
+
+            // Diagonal run (e.g. 3-5-7, 7-5-3)
+            if ((d1 == 2 && d2 == 2 && pin[i] == '3' && pin[i + 1] == '5' && pin[i + 2] == '7') ||
+                (d1 == -2 && d2 == -2 && pin[i] == '7' && pin[i + 1] == '5' && pin[i + 2] == '3'))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static bool HasRepeatedTriple(string pin)
@@ -246,6 +287,8 @@ internal static class V10KeyDerivation
         "131313", "141414", "151515", "161616", "171717", "181818", "191919", "202020",
         "696969", "112233", "11223344", "123123", "12341234", "1234512345",
         "246810", "135791", "987654", "654321", "123456", "012345", "543210",
+        "147258", "258147", "369258", "159357", "753951", "159753", "357159",
+        "258025", "147014", "369036", "741852", "963852", "852963", "789456", "456123",
         "000000", "111111", "222222", "333333", "444444", "555555", "666666", "777777", "888888", "999999",
     };
 
