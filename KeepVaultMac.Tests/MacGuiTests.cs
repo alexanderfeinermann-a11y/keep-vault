@@ -41,6 +41,10 @@ internal static class MacGuiTests
         ("GUI password policy feedback", () => RunOnUiThread(TestPasswordPolicyFeedback)),
         ("GUI verified-original-deletion localization", () => RunOnUiThread(TestDeleteOriginalsLocalization)),
         ("GUI reference control inventory", () => RunOnUiThread(TestReferenceControlsPresent)),
+        ("GUI 256-character factor normalization and field handling", () => RunOnUiThread(TestFactorBoxesLengthAndNormalization)),
+        ("GUI secret clearing wipes password, PIN, and factors", () => RunOnUiThread(TestSecretClearing)),
+        ("GUI KDF and entropy profile description localization", () => RunOnUiThread(TestKdfAndEntropyLocalization)),
+        ("GUI full creation flow with mouse sampling and factor generation", () => RunOnUiThread(TestFullCreationFlowViaGui)),
     ];
 
     private static readonly BlockingCollection<(Action<MainWindow> Body, TaskCompletionSource Completion)> Work = new();
@@ -487,5 +491,179 @@ internal static class MacGuiTests
                 window.FindControl<Control>(name) is not null,
                 $"The macOS window is missing the reference control: {name}");
         }
+    }
+
+    /// <summary>
+    /// Extraction factor boxes must accept formatted 256-hex character factors
+    /// (with spaces or linebreaks as printed on key sheets) and normalize them.
+    /// </summary>
+    private static void TestFactorBoxesLengthAndNormalization(MainWindow window)
+    {
+        TextBox extractFactorA = Control<TextBox>(window, "ExtractGeneratedPasswordFirstBox");
+        TextBox extractFactorB = Control<TextBox>(window, "ExtractGeneratedPasswordSecondBox");
+
+        // 256-hex characters factor (128 bytes)
+        string rawHexA = new string('A', 256);
+        string formattedHexA = string.Join(" ", Enumerable.Range(0, 4).Select(i => rawHexA.Substring(i * 64, 64)));
+        string rawHexB = new string('B', 256);
+
+        extractFactorA.Text = formattedHexA;
+        extractFactorB.Text = rawHexB;
+        Dispatcher.UIThread.RunJobs();
+
+        string normalizedA = MainWindow.EnsureGeneratedPassword(extractFactorA.Text);
+        string normalizedB = MainWindow.EnsureGeneratedPassword(extractFactorB.Text);
+
+        MacComprehensiveTests.Require(
+            string.Equals(normalizedA, rawHexA, StringComparison.Ordinal),
+            "Whitespace-formatted 256-hex factor was not correctly normalized.");
+        MacComprehensiveTests.Require(
+            string.Equals(normalizedB, rawHexB, StringComparison.Ordinal),
+            "Factor B was not correctly normalized.");
+        MacComprehensiveTests.Require(
+            normalizedA.Length == 256 && normalizedB.Length == 256,
+            "Normalized factor length is not 256 characters.");
+
+        // Rejection of invalid factors
+        bool threwShort = false;
+        try { MainWindow.EnsureGeneratedPassword(new string('C', 255)); } catch (Exception) { threwShort = true; }
+        MacComprehensiveTests.Require(threwShort, "EnsureGeneratedPassword did not reject 255-character factor.");
+
+        bool threwInvalidChar = false;
+        try { MainWindow.EnsureGeneratedPassword(new string('A', 255) + "Z"); } catch (Exception) { threwInvalidChar = true; }
+        MacComprehensiveTests.Require(threwInvalidChar, "EnsureGeneratedPassword did not reject non-hex character.");
+
+        extractFactorA.Text = string.Empty;
+        extractFactorB.Text = string.Empty;
+        Dispatcher.UIThread.RunJobs();
+    }
+
+    /// <summary>
+    /// Secret clearing must wipe user password, PIN, confirm PIN, and generated factors.
+    /// </summary>
+    private static void TestSecretClearing(MainWindow window)
+    {
+        TextBox createPassword = Control<TextBox>(window, "CreatePasswordBox");
+        TextBox createConfirm = Control<TextBox>(window, "CreatePasswordConfirmBox");
+        TextBox createPin = Control<TextBox>(window, "CreatePinBox");
+        TextBox createPinConfirm = Control<TextBox>(window, "CreatePinConfirmBox");
+        TextBox factorA = Control<TextBox>(window, "GeneratedPasswordFirstBox");
+        TextBox factorB = Control<TextBox>(window, "GeneratedPasswordSecondBox");
+
+        createPassword.Text = "SecretPassword123!456";
+        createConfirm.Text = "SecretPassword123!456";
+        createPin.Text = "428317";
+        createPinConfirm.Text = "428317";
+        factorA.Text = new string('A', 256);
+        factorB.Text = new string('B', 256);
+        Dispatcher.UIThread.RunJobs();
+
+        window.ClearCreateSecrets();
+        Dispatcher.UIThread.RunJobs();
+
+        MacComprehensiveTests.Require(string.IsNullOrEmpty(createPassword.Text), "CreatePasswordBox was not cleared.");
+        MacComprehensiveTests.Require(string.IsNullOrEmpty(createConfirm.Text), "CreatePasswordConfirmBox was not cleared.");
+        MacComprehensiveTests.Require(string.IsNullOrEmpty(createPin.Text), "CreatePinBox was not cleared.");
+        MacComprehensiveTests.Require(string.IsNullOrEmpty(createPinConfirm.Text), "CreatePinConfirmBox was not cleared.");
+        MacComprehensiveTests.Require(string.IsNullOrEmpty(factorA.Text), "GeneratedPasswordFirstBox was not cleared.");
+        MacComprehensiveTests.Require(string.IsNullOrEmpty(factorB.Text), "GeneratedPasswordSecondBox was not cleared.");
+
+        TextBox extractPassword = Control<TextBox>(window, "ExtractPasswordBox");
+        TextBox extractPin = Control<TextBox>(window, "ExtractPinBox");
+        TextBox extractFactorA = Control<TextBox>(window, "ExtractGeneratedPasswordFirstBox");
+        TextBox extractFactorB = Control<TextBox>(window, "ExtractGeneratedPasswordSecondBox");
+
+        extractPassword.Text = "SecretPassword123!456";
+        extractPin.Text = "428317";
+        extractFactorA.Text = new string('A', 256);
+        extractFactorB.Text = new string('B', 256);
+        Dispatcher.UIThread.RunJobs();
+
+        window.ClearExtractSecrets();
+        Dispatcher.UIThread.RunJobs();
+
+        MacComprehensiveTests.Require(string.IsNullOrEmpty(extractPassword.Text), "ExtractPasswordBox was not cleared.");
+        MacComprehensiveTests.Require(string.IsNullOrEmpty(extractPin.Text), "ExtractPinBox was not cleared.");
+        MacComprehensiveTests.Require(string.IsNullOrEmpty(extractFactorA.Text), "ExtractGeneratedPasswordFirstBox was not cleared.");
+        MacComprehensiveTests.Require(string.IsNullOrEmpty(extractFactorB.Text), "ExtractGeneratedPasswordSecondBox was not cleared.");
+    }
+
+    /// <summary>
+    /// KDF description and entropy pool readout must correctly localize in German and English.
+    /// </summary>
+    private static void TestKdfAndEntropyLocalization(MainWindow window)
+    {
+        ComboBox language = Control<ComboBox>(window, "LanguageBox");
+        TextBlock kdfProfile = Control<TextBlock>(window, "Argon2ProfileText");
+
+        SelectLanguage(language, "de");
+        string deKdf = kdfProfile.Text ?? string.Empty;
+        MacComprehensiveTests.Require(
+            deKdf.Contains("1024-Bit-Master", StringComparison.Ordinal) || deKdf.Contains("KDF-Pfade", StringComparison.Ordinal),
+            $"German KDF description is missing v10 master details: {deKdf}");
+
+        SelectLanguage(language, "en");
+        string enKdf = kdfProfile.Text ?? string.Empty;
+        MacComprehensiveTests.Require(
+            enKdf.Contains("1024-bit master", StringComparison.Ordinal) || enKdf.Contains("KDF paths", StringComparison.Ordinal),
+            $"English KDF description is missing v10 master details: {enKdf}");
+    }
+
+    /// <summary>
+    /// Exercises the entire GUI creation flow: gathering 1024 mouse samples across the 9 pools
+    /// via genuine pointer movement, clicking the factor generator button, filling out PIN and password,
+    /// and validating the creation gate.
+    /// </summary>
+    private static void TestFullCreationFlowViaGui(MainWindow window)
+    {
+        // 1. Move mouse to feed all 9 entropy pools until minimum 1024 is reached
+        long required = EntropyMixer.RequiredMouseSamplesPerPurpose;
+        long guard = 0;
+        while (EntropyMixer.GetPoolStatus().Minimum < required)
+        {
+            MoveMouse(window, 512);
+            if (++guard > 200)
+            {
+                throw new InvalidOperationException("Entropy pools failed to reach required 1024 samples.");
+            }
+        }
+
+        Button generateBtn = Control<Button>(window, "GeneratePasswordButton");
+        MacComprehensiveTests.Require(generateBtn.IsEnabled, "GeneratePasswordButton stayed disabled after reaching 1024 samples.");
+
+        // 2. Click generate button
+        window.GeneratePassword_Click(generateBtn, new Avalonia.Interactivity.RoutedEventArgs());
+        Dispatcher.UIThread.RunJobs();
+
+        TextBox factorA = Control<TextBox>(window, "GeneratedPasswordFirstBox");
+        TextBox factorB = Control<TextBox>(window, "GeneratedPasswordSecondBox");
+        MacComprehensiveTests.Require(!string.IsNullOrEmpty(factorA.Text) && factorA.Text.Length == 256, "Factor A was not generated as 256 hex chars.");
+        MacComprehensiveTests.Require(!string.IsNullOrEmpty(factorB.Text) && factorB.Text.Length == 256, "Factor B was not generated as 256 hex chars.");
+        MacComprehensiveTests.Require(!string.Equals(factorA.Text, factorB.Text, StringComparison.Ordinal), "Factor A and Factor B must be distinct.");
+
+        // 3. Set password and PIN
+        TextBox password = Control<TextBox>(window, "CreatePasswordBox");
+        TextBox confirm = Control<TextBox>(window, "CreatePasswordConfirmBox");
+        TextBox pin = Control<TextBox>(window, "CreatePinBox");
+        TextBox pinConfirm = Control<TextBox>(window, "CreatePinConfirmBox");
+
+        const string validPass = "Valid#Master%Passphrase2026&v10!";
+        password.Text = validPass;
+        confirm.Text = validPass;
+        pin.Text = "84920153";
+        pinConfirm.Text = "84920153";
+        Dispatcher.UIThread.RunJobs();
+
+        TextBlock pinReadout = Control<TextBlock>(window, "PinPolicyStatusText");
+        MacComprehensiveTests.Require(
+            pinReadout.Text?.Contains("akzeptiert", StringComparison.OrdinalIgnoreCase) == true
+            || pinReadout.Text?.Contains("accepted", StringComparison.OrdinalIgnoreCase) == true,
+            $"Valid PIN was not reported as accepted by GUI readout: {pinReadout.Text}");
+
+        // 4. Clear secrets
+        window.ClearCreateSecrets();
+        Dispatcher.UIThread.RunJobs();
+        MacComprehensiveTests.Require(string.IsNullOrEmpty(password.Text), "Password was not cleared.");
+        MacComprehensiveTests.Require(string.IsNullOrEmpty(pin.Text), "PIN was not cleared.");
     }
 }

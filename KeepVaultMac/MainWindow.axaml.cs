@@ -923,7 +923,7 @@ public sealed partial class MainWindow : Window, IDisposable
         }
     }
 
-    private void GeneratePassword_Click(object? sender, RoutedEventArgs e)
+    internal void GeneratePassword_Click(object? sender, RoutedEventArgs e)
     {
         if (Volatile.Read(ref _operationActive) != 0)
         {
@@ -1345,7 +1345,7 @@ public sealed partial class MainWindow : Window, IDisposable
 
     private void ClearLog_Click(object? sender, RoutedEventArgs e) => LogBox.Text = string.Empty;
 
-    private void ClearCreateSecrets()
+    internal void ClearCreateSecrets()
     {
         GeneratedArchiveEntropy? entropy = _generatedEntropy;
         _generatedEntropy = null;
@@ -1362,7 +1362,7 @@ public sealed partial class MainWindow : Window, IDisposable
         UpdatePasswordPolicyStatus();
     }
 
-    private void ClearExtractSecrets()
+    internal void ClearExtractSecrets()
     {
         ExtractPasswordBox.Text = string.Empty;
         ExtractPinBox.Text = string.Empty;
@@ -1408,13 +1408,14 @@ public sealed partial class MainWindow : Window, IDisposable
         EnsureGeneratedPassword(second);
     }
 
-    private static void EnsureGeneratedPassword(string generatedPassword)
+    internal static string EnsureGeneratedPassword(string generatedPassword)
     {
         string normalized = PasswordKeyService.NormalizeGeneratedPassword(generatedPassword);
         if (normalized.Length != PasswordKeyService.GeneratedPasswordLength)
         {
             throw new InvalidOperationException("Both 1024-bit factors from the key sheet are required.");
         }
+        return normalized;
     }
 
     private void EnsureEntropyReady(EntropyPurpose purpose)
