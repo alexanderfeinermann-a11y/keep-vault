@@ -646,9 +646,23 @@ internal static partial class MacComprehensiveTests
             !narrow.SequenceEqual(wide[..32]),
             "A narrow role key is a prefix of a wider one from the same role.");
 
+        // --- canonical string mappings ------------------------------------
+        Require(string.Equals(SuiteKeySchedule.CanonicalPurposeString(KeyRolePurpose.Encryption), "Encryption", StringComparison.Ordinal), "Canonical purpose string mapping mismatch.");
+        Require(string.Equals(SuiteKeySchedule.CanonicalPurposeString(KeyRolePurpose.Sha3Mac), "Sha3Mac", StringComparison.Ordinal), "Canonical purpose string mapping mismatch.");
+        Require(string.Equals(SuiteKeySchedule.CanonicalPurposeString(KeyRolePurpose.SkeinMac), "SkeinMac", StringComparison.Ordinal), "Canonical purpose string mapping mismatch.");
+        Require(string.Equals(SuiteKeySchedule.CanonicalPurposeString(KeyRolePurpose.RecoverySha3Certification), "RecoverySha3Certification", StringComparison.Ordinal), "Canonical purpose string mapping mismatch.");
+        Require(string.Equals(SuiteKeySchedule.CanonicalPurposeString(KeyRolePurpose.RecoverySkeinCertification), "RecoverySkeinCertification", StringComparison.Ordinal), "Canonical purpose string mapping mismatch.");
+
+        Require(string.Equals(SuiteKeySchedule.CanonicalCipherString(CascadeCipher.Kalyna512_512), "Kalyna-512/512", StringComparison.Ordinal), "Canonical cipher string mapping mismatch.");
+        Require(string.Equals(SuiteKeySchedule.CanonicalCipherString(CascadeCipher.Threefish1024), "Threefish-1024", StringComparison.Ordinal), "Canonical cipher string mapping mismatch.");
+        Require(string.Equals(SuiteKeySchedule.CanonicalCipherString(CascadeCipher.Aes256), "AES-256", StringComparison.Ordinal), "Canonical cipher string mapping mismatch.");
+        Require(string.Equals(SuiteKeySchedule.CanonicalCipherString(CascadeCipher.Mars448), "MARS-448", StringComparison.Ordinal), "Canonical cipher string mapping mismatch.");
+        Require(string.Equals(SuiteKeySchedule.CanonicalCipherString(CascadeCipher.Shacal2_512), "SHACAL-2-512", StringComparison.Ordinal), "Canonical cipher string mapping mismatch.");
+        Require(string.Equals(SuiteKeySchedule.CanonicalCipherString(CascadeCipher.ChaCha20Poly1305), "ChaCha20-Poly1305", StringComparison.Ordinal), "Canonical cipher string mapping mismatch.");
+
         // --- byte-exact Known Answer Test (KAT) for C_j (RoleContext) ---------
         // Format: LP(D_ROLE) || LE32(10) || LP(Algorithm) || LE32(StageIndex) || LP(Cipher) || LP(Purpose) || LE32(KeyBits)
-        // Test vector: Algorithm="Kalyna-512", StageIndex=0, Cipher="Kalyna-512", Purpose=Encryption, KeyBits=512
+        // Test vector: Algorithm="Kalyna-512", StageIndex=0, Cipher="Kalyna-512/512", Purpose=Encryption, KeyBits=512
         byte[] expectedRoleContext =
         [
             // LP("Kalyna-ZPAQ/v10/RoleKey"): 4-byte LE length (23) + UTF-8 bytes
@@ -662,9 +676,9 @@ internal static partial class MacComprehensiveTests
             0x4B, 0x61, 0x6C, 0x79, 0x6E, 0x61, 0x2D, 0x35, 0x31, 0x32,
             // LE32(0)
             0x00, 0x00, 0x00, 0x00,
-            // LP("Kalyna-512"): 4-byte LE length (10) + UTF-8 bytes
-            0x0A, 0x00, 0x00, 0x00,
-            0x4B, 0x61, 0x6C, 0x79, 0x6E, 0x61, 0x2D, 0x35, 0x31, 0x32,
+            // LP("Kalyna-512/512"): 4-byte LE length (14) + UTF-8 bytes
+            0x0E, 0x00, 0x00, 0x00,
+            0x4B, 0x61, 0x6C, 0x79, 0x6E, 0x61, 0x2D, 0x35, 0x31, 0x32, 0x2F, 0x35, 0x31, 0x32,
             // LP("Encryption"): 4-byte LE length (10) + UTF-8 bytes
             0x0A, 0x00, 0x00, 0x00,
             0x45, 0x6E, 0x63, 0x72, 0x79, 0x70, 0x74, 0x69, 0x6F, 0x6E,
@@ -672,10 +686,31 @@ internal static partial class MacComprehensiveTests
             0x00, 0x02, 0x00, 0x00
         ];
 
-        byte[] actualRoleContext = SuiteKeySchedule.RoleContext("Kalyna-512", 0, "Kalyna-512", KeyRolePurpose.Encryption, 512);
+        byte[] actualRoleContext = SuiteKeySchedule.RoleContext("Kalyna-512", 0, "Kalyna-512/512", KeyRolePurpose.Encryption, 512);
         Require(FixedEqual(actualRoleContext, expectedRoleContext), "Byte-exact KAT for RoleContext failed.");
 
-        Zero(key, message, mac, otherKey, prk, info, left, right, master, master2, narrow, wide);
+        // --- byte-exact KAT for Global Skein-MAC-1024-1024 RoleContext and RoleKey ---
+        byte[] expectedSkeinMacCtx = Convert.FromHexString(
+            "170000004B616C796E612D5A5041512F7631302F526F6C654B65790A0000000F000000506172616E6F696143617363616465FFFFFFFF13000000536B65696E2D4D41432D313032342D3130323408000000536B65696E4D616300040000");
+        byte[] actualSkeinMacCtx = SuiteKeySchedule.GlobalRoleContext("ParanoiaCascade", "Skein-MAC-1024-1024", KeyRolePurpose.SkeinMac, 1024);
+        Require(FixedEqual(actualSkeinMacCtx, expectedSkeinMacCtx), "Byte-exact KAT for Global Skein-MAC-1024-1024 RoleContext failed.");
+
+        byte[] syntheticMaster = new byte[128];
+        for (int i = 0; i < 128; i++) syntheticMaster[i] = (byte)((i * 7 + 13) % 256);
+
+        byte[] expectedSkeinMacRoleKey = Convert.FromHexString(
+            "55C1AC98C824C3A7AFED6E92063AAEBE135A95E0AAF751022EB3857BAEF1F4E2270293FDDCA19CC13A6EE6EC83C6FDC1C8540BCCFD9825F3F22F6AFE26BD24DA48F64B8B03D154D02281F7AD61AB540B1E77B3A46AAC958F455306D3B9DAB4E800BE1214161F28DB7013BFE8FCC105654595EFF5F77BB5C49D5921AD28DCB968");
+        byte[] actualSkeinMacRoleKey = SuiteKeySchedule.DeriveRoleValue(syntheticMaster, actualSkeinMacCtx);
+        Require(FixedEqual(actualSkeinMacRoleKey, expectedSkeinMacRoleKey), "Byte-exact KAT for Skein-MAC-1024-1024 RoleKey derivation failed.");
+
+        // --- byte-exact KAT for Threefish-1024 CTR Tweak -----------------------
+        byte[] threefishNonce = new byte[128];
+        for (int i = 0; i < 128; i++) threefishNonce[i] = (byte)(i + 1);
+        byte[] expectedTweak = Convert.FromHexString("A88D58711CB2311E6F92A2463DB161B6");
+        byte[] actualTweak = KalynaContainerService.CreateSuiteTweak(EncryptionSuite.Threefish1024, threefishNonce);
+        Require(FixedEqual(actualTweak, expectedTweak), "Byte-exact KAT for Threefish-1024 CTR Tweak failed.");
+
+        Zero(key, message, mac, otherKey, prk, info, left, right, master, master2, narrow, wide, syntheticMaster, expectedSkeinMacCtx, actualSkeinMacCtx, expectedSkeinMacRoleKey, actualSkeinMacRoleKey, threefishNonce, expectedTweak, actualTweak);
         return Task.CompletedTask;
     }
 
@@ -1783,9 +1818,8 @@ internal static partial class MacComprehensiveTests
 
         try
         {
-            V10KeyDerivation.MasterResult master = V10KeyDerivation.DeriveMaster(
+            using V10KeyDerivation.MasterResult master = V10KeyDerivation.DeriveMaster(
                 parameters, UserPassword, UserPin, factorA, factorB, salts, null, CancellationToken.None);
-            CryptographicOperations.ZeroMemory(master.Master);
         }
         finally
         {

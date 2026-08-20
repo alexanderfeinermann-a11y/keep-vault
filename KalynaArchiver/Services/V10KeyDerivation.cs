@@ -24,11 +24,28 @@ internal static class V10KeyDerivation
     public const int FactorBytes = 128;
 
     /// <summary>
-    /// The final master for a suite, together with the memory costs each round
-    /// selected. The costs are returned for the peak-memory and progress code
-    /// only; they are never written to the container.
+    /// The final master for a suite, held in locked sensitive memory, together
+    /// with the memory costs each round selected. The costs are returned for the
+    /// peak-memory and progress code only; they are never written to the container.
     /// </summary>
-    public sealed record MasterResult(byte[] Master, uint Round1MemoryKiB, uint? Round2MemoryKiB);
+    public sealed class MasterResult : IDisposable
+    {
+        public MasterResult(LockedSensitiveBuffer master, uint round1MemoryKiB, uint? round2MemoryKiB)
+        {
+            Master = master;
+            Round1MemoryKiB = round1MemoryKiB;
+            Round2MemoryKiB = round2MemoryKiB;
+        }
+
+        public LockedSensitiveBuffer Master { get; }
+        public uint Round1MemoryKiB { get; }
+        public uint? Round2MemoryKiB { get; }
+
+        public void Dispose()
+        {
+            Master.Dispose();
+        }
+    }
 
     public const int MinDistinctPinDigits = 4;
 
@@ -318,7 +335,7 @@ internal static class V10KeyDerivation
             ReadOnlySpan<byte>.Empty, salts.Sha3Round1, salts.SkeinRound1);
         progress?.Report(paranoia ? "Key derivation, round 1 of 2" : "Key derivation");
 
-        LockedSensitiveBuffer round1Master = LockedSensitiveBuffer.Create(V10MasterKdf.MasterBytes);
+        LockedSensitiveBuffer? round1Master = LockedSensitiveBuffer.Create(V10MasterKdf.MasterBytes);
         try
         {
             V10MasterKdf.DeriveRoundMaster(
@@ -327,8 +344,9 @@ internal static class V10KeyDerivation
 
             if (!paranoia)
             {
-                byte[] onlyMaster = (byte[])round1Master.Bytes.Clone();
-                return new MasterResult(onlyMaster, memory1, null);
+                var result = new MasterResult(round1Master, memory1, null);
+                round1Master = null; // ownership transferred to result
+                return result;
             }
 
             cancellationToken.ThrowIfCancellationRequested();
@@ -339,16 +357,24 @@ internal static class V10KeyDerivation
             // The first master is the Argon2id secret here, not the password:
             // it makes round two unreachable without round one, and it keeps
             // the credentials themselves in the same position in both rounds.
-            using LockedSensitiveBuffer round2Master = LockedSensitiveBuffer.Create(V10MasterKdf.MasterBytes);
-            V10MasterKdf.DeriveRoundMaster(
-                algorithm, 2, sha3Credential.Bytes, skeinCredential.Bytes,
-                salts.Sha3Round2!, salts.SkeinRound2!, round1Master.Bytes, memory2, round2Master.Bytes);
-            byte[] master = (byte[])round2Master.Bytes.Clone();
-            return new MasterResult(master, memory1, memory2);
+            LockedSensitiveBuffer? round2Master = LockedSensitiveBuffer.Create(V10MasterKdf.MasterBytes);
+            try
+            {
+                V10MasterKdf.DeriveRoundMaster(
+                    algorithm, 2, sha3Credential.Bytes, skeinCredential.Bytes,
+                    salts.Sha3Round2!, salts.SkeinRound2!, round1Master.Bytes, memory2, round2Master.Bytes);
+                var result = new MasterResult(round2Master, memory1, memory2);
+                round2Master = null; // ownership transferred to result
+                return result;
+            }
+            finally
+            {
+                round2Master?.Dispose();
+            }
         }
         finally
         {
-            round1Master.Dispose();
+            round1Master?.Dispose();
         }
     }
 
@@ -365,16 +391,9 @@ internal static class V10KeyDerivation
         IProgress<string>? progress,
         CancellationToken cancellationToken)
     {
-        MasterResult result = DeriveMaster(
+        using MasterResult result = DeriveMaster(
             parameters, userPassword, pin, factorAHex, factorBHex, salts, progress, cancellationToken);
-        try
-        {
-            return SuiteKeySchedule.DeriveSuiteKeys(result.Master, parameters);
-        }
-        finally
-        {
-            CryptographicOperations.ZeroMemory(result.Master);
-        }
+        return SuiteKeySchedule.DeriveSuiteKeys(result.Master.Bytes, parameters);
     }
 }
 

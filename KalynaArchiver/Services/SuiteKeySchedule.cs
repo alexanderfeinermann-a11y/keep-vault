@@ -58,6 +58,27 @@ internal static class SuiteKeySchedule
     /// </summary>
     private const int GlobalStageIndex = unchecked((int)0xFFFFFFFF);
 
+    public static string CanonicalPurposeString(KeyRolePurpose purpose) => purpose switch
+    {
+        KeyRolePurpose.Encryption => "Encryption",
+        KeyRolePurpose.Sha3Mac => "Sha3Mac",
+        KeyRolePurpose.SkeinMac => "SkeinMac",
+        KeyRolePurpose.RecoverySha3Certification => "RecoverySha3Certification",
+        KeyRolePurpose.RecoverySkeinCertification => "RecoverySkeinCertification",
+        _ => throw new ArgumentOutOfRangeException(nameof(purpose), purpose, null)
+    };
+
+    public static string CanonicalCipherString(CascadeCipher cipher) => cipher switch
+    {
+        CascadeCipher.Kalyna512_512 => "Kalyna-512/512",
+        CascadeCipher.Threefish1024 => "Threefish-1024",
+        CascadeCipher.Aes256 => "AES-256",
+        CascadeCipher.Mars448 => "MARS-448",
+        CascadeCipher.Shacal2_512 => "SHACAL-2-512",
+        CascadeCipher.ChaCha20Poly1305 => "ChaCha20-Poly1305",
+        _ => throw new ArgumentOutOfRangeException(nameof(cipher), cipher, null)
+    };
+
     /// <summary>
     /// The canonical context that makes one role distinct from every other.
     /// Format: LP(D_ROLE) || LE32(10) || LP(Algorithm) || LE32(StageIndex) || LP(Cipher) || LP(Purpose) || LE32(KeyBits)
@@ -80,7 +101,7 @@ internal static class SuiteKeySchedule
         byte[] roleDomainBytes = Encoding.UTF8.GetBytes(RoleDomain);
         byte[] algorithmBytes = Encoding.UTF8.GetBytes(algorithm);
         byte[] cipherBytes = Encoding.UTF8.GetBytes(cipher);
-        byte[] purposeBytes = Encoding.UTF8.GetBytes(purpose.ToString());
+        byte[] purposeBytes = Encoding.UTF8.GetBytes(CanonicalPurposeString(purpose));
 
         int totalLength = (sizeof(int) + roleDomainBytes.Length)
             + sizeof(int)
@@ -259,7 +280,7 @@ internal static class SuiteKeySchedule
                     master,
                     parameters.Algorithm,
                     stageIndex,
-                    stage.Cipher.ToString(),
+                    CanonicalCipherString(stage.Cipher),
                     KeyRolePurpose.Encryption,
                     stage.KeyBytes);
                 try
@@ -295,7 +316,7 @@ internal static class SuiteKeySchedule
 
             skeinMacKey = LockedSensitiveBuffer.Create(parameters.SkeinMacKeyBytes);
             byte[] skeinKey = DeriveGlobalKey(
-                master, parameters.Algorithm, "Skein-MAC-1024",
+                master, parameters.Algorithm, "Skein-MAC-1024-1024",
                 KeyRolePurpose.SkeinMac, parameters.SkeinMacKeyBytes);
             try
             {

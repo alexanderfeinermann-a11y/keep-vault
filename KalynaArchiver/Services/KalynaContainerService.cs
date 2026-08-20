@@ -11,7 +11,7 @@ namespace KalynaArchiver.Services;
 public sealed partial class KalynaContainerService
 {
     private static readonly byte[] Magic = "KZPAQ1\0"u8.ToArray();
-    private static readonly byte[] ThreefishTweakDomain = "Kalyna-ZPAQ/v9/Threefish-1024/CTR-Tweak"u8.ToArray();
+    internal static readonly byte[] ThreefishTweakDomain = "Kalyna-ZPAQ/v10/Threefish-1024/CTR-Tweak"u8.ToArray();
     // Version 8 introduces the cascade suite and drops every earlier version.
     // There is deliberately no reader for v7: a format this app writes once and
     // reads years later is safer with one shape than with a compatibility path
@@ -1382,7 +1382,7 @@ public sealed partial class KalynaContainerService
     /// independent value keeps the header from carrying a parameter an attacker
     /// could vary on its own.
     /// </remarks>
-    private static byte[] CreateSuiteTweak(EncryptionSuite suite, byte[] nonce)
+    internal static byte[] CreateSuiteTweak(EncryptionSuite suite, byte[] nonce)
     {
         // Driven by the catalogue rather than by a list of suite names. A suite
         // needs a tweak exactly when it contains a Threefish layer, and that is

@@ -903,7 +903,7 @@ public sealed partial class RecoveryService
             paranoia ? locator.Salt[SaltPairBytes..(SaltPairBytes + V10Salts.SaltBytes)] : null,
             paranoia ? locator.Salt[(SaltPairBytes + V10Salts.SaltBytes)..] : null);
         salts.Validate(paranoia);
-        V10KeyDerivation.MasterResult master = await Task.Run(
+        using V10KeyDerivation.MasterResult master = await Task.Run(
             () => V10KeyDerivation.DeriveMaster(
                 parameters,
                 userPassword,
@@ -915,27 +915,18 @@ public sealed partial class RecoveryService
                 cancellationToken),
             cancellationToken).ConfigureAwait(false);
 
-        byte[] parentSha3Key;
-        byte[] parentSkeinKey;
-        try
-        {
-            parentSha3Key = SuiteKeySchedule.DeriveGlobalKey(
-                master.Master,
-                parameters.Algorithm,
-                "KPAR2/HMAC-SHA3-512",
-                KeyRolePurpose.RecoverySha3Certification,
-                parameters.Sha3MacKeyBytes);
-            parentSkeinKey = SuiteKeySchedule.DeriveGlobalKey(
-                master.Master,
-                parameters.Algorithm,
-                "KPAR2/Skein-MAC-1024",
-                KeyRolePurpose.RecoverySkeinCertification,
-                parameters.SkeinMacKeyBytes);
-        }
-        finally
-        {
-            CryptographicOperations.ZeroMemory(master.Master);
-        }
+        byte[] parentSha3Key = SuiteKeySchedule.DeriveGlobalKey(
+            master.Master.Bytes,
+            parameters.Algorithm,
+            "KPAR2/HMAC-SHA3-512",
+            KeyRolePurpose.RecoverySha3Certification,
+            parameters.Sha3MacKeyBytes);
+        byte[] parentSkeinKey = SuiteKeySchedule.DeriveGlobalKey(
+            master.Master.Bytes,
+            parameters.Algorithm,
+            "KPAR2/Skein-MAC-1024-1024",
+            KeyRolePurpose.RecoverySkeinCertification,
+            parameters.SkeinMacKeyBytes);
         byte[] sha3Message = BuildKeyDerivationMessage(Sha3KeyDomain, locator);
         byte[] skeinMessage = BuildKeyDerivationMessage(SkeinKeyDomain, locator);
         try
