@@ -261,8 +261,10 @@ public sealed partial class KalynaContainerService
                 Sha3TagSize * 8,
                 parameters.SkeinMacKeyBytes * 8,
                 SkeinTagSize * 8,
-                EntropyMixer.SaltPairBytes * 8,
-                Convert.ToBase64String(salt),
+                Convert.ToBase64String(salt[..64]),
+                Convert.ToBase64String(salt[64..128]),
+                secondSalt.Length == 0 ? null : Convert.ToBase64String(secondSalt[..64]),
+                secondSalt.Length == 0 ? null : Convert.ToBase64String(secondSalt[64..128]),
                 parameters.NonceBytes * 8,
                 Convert.ToBase64String(nonce),
                 parameters.TweakBytes * 8,
@@ -285,8 +287,6 @@ public sealed partial class KalynaContainerService
                 1024,
                 2,
                 V10MasterKdf.KdfMode,
-                secondSalt.Length == 0 ? 0 : EntropyMixer.SaltPairBytes * 8,
-                secondSalt.Length == 0 ? null : Convert.ToBase64String(secondSalt),
                 secondNonce.Length == 0 ? 0 : parameters.NonceBytes * 8,
                 secondNonce.Length == 0 ? null : Convert.ToBase64String(secondNonce));
             byte[] headerBytes = JsonSerializer.SerializeToUtf8Bytes(header, ContainerJsonContext.Default.ContainerHeader);
@@ -525,9 +525,30 @@ public sealed partial class KalynaContainerService
                 throw new InvalidDataException("Encrypted container has no ciphertext payload.");
             }
 
-            salt = Convert.FromBase64String(header.Salt);
+            byte[] sha3Salt1 = Convert.FromBase64String(header.SaltSha3Round1);
+            byte[] skeinSalt1 = Convert.FromBase64String(header.SaltSkeinRound1);
+            salt = new byte[128];
+            sha3Salt1.CopyTo(salt, 0);
+            skeinSalt1.CopyTo(salt, 64);
+            CryptographicOperations.ZeroMemory(sha3Salt1);
+            CryptographicOperations.ZeroMemory(skeinSalt1);
+
+            if (!string.IsNullOrEmpty(header.SaltSha3Round2) && !string.IsNullOrEmpty(header.SaltSkeinRound2))
+            {
+                byte[] sha3Salt2 = Convert.FromBase64String(header.SaltSha3Round2);
+                byte[] skeinSalt2 = Convert.FromBase64String(header.SaltSkeinRound2);
+                secondSalt = new byte[128];
+                sha3Salt2.CopyTo(secondSalt, 0);
+                skeinSalt2.CopyTo(secondSalt, 64);
+                CryptographicOperations.ZeroMemory(sha3Salt2);
+                CryptographicOperations.ZeroMemory(skeinSalt2);
+            }
+            else
+            {
+                secondSalt = [];
+            }
+
             nonce = Convert.FromBase64String(header.Nonce);
-            secondSalt = string.IsNullOrEmpty(header.SecondSalt) ? [] : Convert.FromBase64String(header.SecondSalt);
             secondNonce = string.IsNullOrEmpty(header.SecondNonce) ? [] : Convert.FromBase64String(header.SecondNonce);
             chunkNonceBase = BuildChunkNonceBase(nonce, secondNonce);
             tweak = string.IsNullOrEmpty(header.Tweak) ? [] : Convert.FromBase64String(header.Tweak);
@@ -737,10 +758,25 @@ public sealed partial class KalynaContainerService
                 throw new InvalidDataException("Encrypted container has no ciphertext payload.");
             }
 
-            salt = Convert.FromBase64String(header.Salt);
-            byte[] verifySecondSalt = string.IsNullOrEmpty(header.SecondSalt)
-                ? []
-                : Convert.FromBase64String(header.SecondSalt);
+            byte[] sha3Salt1 = Convert.FromBase64String(header.SaltSha3Round1);
+            byte[] skeinSalt1 = Convert.FromBase64String(header.SaltSkeinRound1);
+            salt = new byte[128];
+            sha3Salt1.CopyTo(salt, 0);
+            skeinSalt1.CopyTo(salt, 64);
+            CryptographicOperations.ZeroMemory(sha3Salt1);
+            CryptographicOperations.ZeroMemory(skeinSalt1);
+
+            byte[] verifySecondSalt = [];
+            if (!string.IsNullOrEmpty(header.SaltSha3Round2) && !string.IsNullOrEmpty(header.SaltSkeinRound2))
+            {
+                byte[] sha3Salt2 = Convert.FromBase64String(header.SaltSha3Round2);
+                byte[] skeinSalt2 = Convert.FromBase64String(header.SaltSkeinRound2);
+                verifySecondSalt = new byte[128];
+                sha3Salt2.CopyTo(verifySecondSalt, 0);
+                skeinSalt2.CopyTo(verifySecondSalt, 64);
+                CryptographicOperations.ZeroMemory(sha3Salt2);
+                CryptographicOperations.ZeroMemory(skeinSalt2);
+            }
             try
             {
                 keyMaterial = await DeriveV10KeyMaterialAsync(
@@ -845,7 +881,7 @@ public sealed partial class KalynaContainerService
                 header.Hint,
                 header.GeneratedPasswordBits,
                 header.GeneratedPasswordFactorCount,
-                header.SaltBits,
+                parameters.UsesTwoKdfRounds ? 2048 : 1024,
                 header.NonceBits,
                 true);
         }
@@ -901,20 +937,33 @@ public sealed partial class KalynaContainerService
             // two-round suite that means both rounds — running one round there
             // would give recovery a cheaper credential oracle than the
             // container itself offers.
-            byte[] firstPair = Convert.FromBase64String(header.Salt);
-            byte[] secondPair = string.IsNullOrEmpty(header.SecondSalt)
-                ? []
-                : Convert.FromBase64String(header.SecondSalt);
-            salt = new byte[firstPair.Length + secondPair.Length];
+            byte[] sha3Salt1 = Convert.FromBase64String(header.SaltSha3Round1);
+            byte[] skeinSalt1 = Convert.FromBase64String(header.SaltSkeinRound1);
+            byte[]? sha3Salt2 = string.IsNullOrEmpty(header.SaltSha3Round2)
+                ? null
+                : Convert.FromBase64String(header.SaltSha3Round2);
+            byte[]? skeinSalt2 = string.IsNullOrEmpty(header.SaltSkeinRound2)
+                ? null
+                : Convert.FromBase64String(header.SaltSkeinRound2);
+
+            int totalSaltLength = 128 + (sha3Salt2 is not null ? 128 : 0);
+            salt = new byte[totalSaltLength];
             try
             {
-                firstPair.CopyTo(salt, 0);
-                secondPair.CopyTo(salt, firstPair.Length);
+                sha3Salt1.CopyTo(salt, 0);
+                skeinSalt1.CopyTo(salt, 64);
+                if (sha3Salt2 is not null && skeinSalt2 is not null)
+                {
+                    sha3Salt2.CopyTo(salt, 128);
+                    skeinSalt2.CopyTo(salt, 192);
+                }
             }
             finally
             {
-                CryptographicOperations.ZeroMemory(firstPair);
-                CryptographicOperations.ZeroMemory(secondPair);
+                CryptographicOperations.ZeroMemory(sha3Salt1);
+                CryptographicOperations.ZeroMemory(skeinSalt1);
+                if (sha3Salt2 is not null) CryptographicOperations.ZeroMemory(sha3Salt2);
+                if (skeinSalt2 is not null) CryptographicOperations.ZeroMemory(skeinSalt2);
             }
 
             var result = new ContainerRecoveryKdfInfo(
@@ -1080,7 +1129,7 @@ public sealed partial class KalynaContainerService
     /// cores read each byte before writing the same index and never declare
     /// their buffers restricted, so the aliasing is defined.
     /// </remarks>
-    private static readonly byte[] ChunkNonceDomain = "Kalyna-ZPAQ/v9/chunk-nonce"u8.ToArray();
+    private static readonly byte[] ChunkNonceDomain = "Kalyna-ZPAQ/v10/chunk-nonce"u8.ToArray();
 
     /// <summary>
     /// Gives every chunk its own nonce instead of running one counter across
@@ -1382,31 +1431,63 @@ public sealed partial class KalynaContainerService
     /// independent value keeps the header from carrying a parameter an attacker
     /// could vary on its own.
     /// </remarks>
-    internal static byte[] CreateSuiteTweak(EncryptionSuite suite, byte[] nonce)
+    internal static int FindThreefishStageIndex(EncryptionSuiteParameters parameters)
     {
-        // Driven by the catalogue rather than by a list of suite names. A suite
-        // needs a tweak exactly when it contains a Threefish layer, and that is
-        // already recorded as its tweak size; keeping a second list in step with
-        // the first is how the next suite gets forgotten here.
-        if (!EncryptionSuiteCatalog.IsKnown(suite))
+        if (parameters.Cascade != null)
         {
-            throw new ArgumentOutOfRangeException(nameof(suite), suite, "Unknown encryption suite.");
+            for (int i = 0; i < parameters.Cascade.Stages.Count; i++)
+            {
+                if (parameters.Cascade.Stages[i].Cipher == CascadeCipher.Threefish1024)
+                {
+                    return i;
+                }
+            }
         }
+        if (parameters.Suite == EncryptionSuite.Threefish1024)
+        {
+            return 0;
+        }
+        return -1;
+    }
 
-        if (EncryptionSuiteCatalog.Get(suite).TweakBytes == 0)
+    internal static byte[] CreateSuiteTweak(EncryptionSuiteParameters parameters, byte[] nonce)
+    {
+        if (parameters.TweakBytes == 0)
         {
             return [];
         }
 
-        byte[] material = new byte[sizeof(int) + ThreefishTweakDomain.Length + sizeof(int) + nonce.Length];
+        int stageIndex = FindThreefishStageIndex(parameters);
+        if (stageIndex < 0)
+        {
+            return [];
+        }
+
+        byte[] algorithmBytes = System.Text.Encoding.UTF8.GetBytes(parameters.Algorithm);
+        byte[] material = new byte[
+            sizeof(int) + ThreefishTweakDomain.Length +
+            sizeof(int) + algorithmBytes.Length +
+            sizeof(int) +
+            sizeof(int) + nonce.Length];
+
         int offset = 0;
         BinaryPrimitives.WriteInt32LittleEndian(material.AsSpan(offset, sizeof(int)), ThreefishTweakDomain.Length);
         offset += sizeof(int);
         ThreefishTweakDomain.CopyTo(material, offset);
         offset += ThreefishTweakDomain.Length;
+
+        BinaryPrimitives.WriteInt32LittleEndian(material.AsSpan(offset, sizeof(int)), algorithmBytes.Length);
+        offset += sizeof(int);
+        algorithmBytes.CopyTo(material, offset);
+        offset += algorithmBytes.Length;
+
+        BinaryPrimitives.WriteInt32LittleEndian(material.AsSpan(offset, sizeof(int)), stageIndex);
+        offset += sizeof(int);
+
         BinaryPrimitives.WriteInt32LittleEndian(material.AsSpan(offset, sizeof(int)), nonce.Length);
         offset += sizeof(int);
         nonce.CopyTo(material, offset);
+
         byte[] hash = Sha3_512Compat.HashData(material);
         try
         {
@@ -1416,7 +1497,17 @@ public sealed partial class KalynaContainerService
         {
             CryptographicOperations.ZeroMemory(material);
             CryptographicOperations.ZeroMemory(hash);
+            CryptographicOperations.ZeroMemory(algorithmBytes);
         }
+    }
+
+    internal static byte[] CreateSuiteTweak(EncryptionSuite suite, byte[] nonce)
+    {
+        if (!EncryptionSuiteCatalog.IsKnown(suite))
+        {
+            throw new ArgumentOutOfRangeException(nameof(suite), suite, "Unknown encryption suite.");
+        }
+        return CreateSuiteTweak(EncryptionSuiteCatalog.Get(suite), nonce);
     }
 
     /// <summary>
@@ -1501,7 +1592,6 @@ public sealed partial class KalynaContainerService
             || header.Sha3TagBits != Sha3TagSize * 8
             || header.SkeinMacKeyBits != parameters.SkeinMacKeyBytes * 8
             || header.SkeinTagBits != SkeinTagSize * 8
-            || header.SaltBits != EntropyMixer.SaltPairBytes * 8
             || header.NonceBits != parameters.NonceBytes * 8
             || header.TweakBits != parameters.TweakBytes * 8
             || !string.Equals(
@@ -1529,30 +1619,36 @@ public sealed partial class KalynaContainerService
             throw new InvalidDataException("Container header contains an invalid public password hint.");
         }
 
-        if (string.IsNullOrWhiteSpace(header.Salt) || string.IsNullOrWhiteSpace(header.Nonce))
+        if (string.IsNullOrWhiteSpace(header.SaltSha3Round1)
+            || string.IsNullOrWhiteSpace(header.SaltSkeinRound1)
+            || string.IsNullOrWhiteSpace(header.Nonce))
         {
             throw new InvalidDataException("Container header contains no salt or nonce.");
         }
 
         ValidateSecondRound(header, parameters);
 
-        byte[]? salt = null;
+        byte[]? sha3Salt1 = null;
+        byte[]? skeinSalt1 = null;
         byte[]? nonce = null;
         byte[]? tweak = null;
         byte[]? expectedTweak = null;
         try
         {
-            salt = Convert.FromBase64String(header.Salt);
+            sha3Salt1 = Convert.FromBase64String(header.SaltSha3Round1);
+            skeinSalt1 = Convert.FromBase64String(header.SaltSkeinRound1);
             nonce = Convert.FromBase64String(header.Nonce);
             tweak = string.IsNullOrEmpty(header.Tweak) ? [] : Convert.FromBase64String(header.Tweak);
-            if (salt.Length != EntropyMixer.SaltPairBytes
+            if (sha3Salt1.Length != 64
+                || skeinSalt1.Length != 64
+                || CryptographicOperations.FixedTimeEquals(sha3Salt1, skeinSalt1)
                 || nonce.Length != parameters.NonceBytes
                 || tweak.Length != parameters.TweakBytes)
             {
                 throw new InvalidDataException("Container header contains invalid salt, nonce, or tweak lengths.");
             }
 
-            expectedTweak = CreateSuiteTweak(parameters.Suite, nonce);
+            expectedTweak = CreateSuiteTweak(parameters, nonce);
             if (!CryptographicOperations.FixedTimeEquals(tweak, expectedTweak))
             {
                 throw new InvalidDataException("Container header contains a non-canonical Threefish tweak.");
@@ -1564,7 +1660,8 @@ public sealed partial class KalynaContainerService
         }
         finally
         {
-            ZeroIfNotNull(salt);
+            ZeroIfNotNull(sha3Salt1);
+            ZeroIfNotNull(skeinSalt1);
             ZeroIfNotNull(nonce);
             ZeroIfNotNull(tweak);
             ZeroIfNotNull(expectedTweak);
@@ -1590,11 +1687,13 @@ public sealed partial class KalynaContainerService
     private static void ValidateSecondRound(ContainerHeader header, EncryptionSuiteParameters parameters)
     {
         bool expected = parameters.UsesTwoKdfRounds;
-        bool present = header.SecondSalt is not null || header.SecondNonce is not null;
+        bool present = header.SaltSha3Round2 is not null
+            || header.SaltSkeinRound2 is not null
+            || header.SecondNonce is not null;
 
         if (!expected)
         {
-            if (present || header.SecondSaltBits != 0 || header.SecondNonceBits != 0)
+            if (present || header.SecondNonceBits != 0)
             {
                 throw new InvalidDataException(
                     "Container header carries second-round key material for a suite that derives one round.");
@@ -1603,36 +1702,50 @@ public sealed partial class KalynaContainerService
             return;
         }
 
-        if (string.IsNullOrWhiteSpace(header.SecondSalt) || string.IsNullOrWhiteSpace(header.SecondNonce))
+        if (string.IsNullOrWhiteSpace(header.SaltSha3Round2)
+            || string.IsNullOrWhiteSpace(header.SaltSkeinRound2)
+            || string.IsNullOrWhiteSpace(header.SecondNonce))
         {
             throw new InvalidDataException(
                 "Container header is missing the second Argon2id round's salt or nonce.");
         }
 
-        if (header.SecondSaltBits != EntropyMixer.SaltPairBytes * 8
-            || header.SecondNonceBits != parameters.NonceBytes * 8)
+        if (header.SecondNonceBits != parameters.NonceBytes * 8)
         {
             throw new InvalidDataException("Container header contains invalid second-round parameter lengths.");
         }
 
-        byte[]? secondSalt = null;
+        byte[]? sha3Salt1 = null;
+        byte[]? skeinSalt1 = null;
+        byte[]? sha3Salt2 = null;
+        byte[]? skeinSalt2 = null;
         byte[]? secondNonce = null;
-        byte[]? firstSalt = null;
         try
         {
-            secondSalt = Convert.FromBase64String(header.SecondSalt);
+            sha3Salt1 = Convert.FromBase64String(header.SaltSha3Round1);
+            skeinSalt1 = Convert.FromBase64String(header.SaltSkeinRound1);
+            sha3Salt2 = Convert.FromBase64String(header.SaltSha3Round2);
+            skeinSalt2 = Convert.FromBase64String(header.SaltSkeinRound2);
             secondNonce = Convert.FromBase64String(header.SecondNonce);
-            firstSalt = Convert.FromBase64String(header.Salt!);
 
-            if (secondSalt.Length != EntropyMixer.SaltPairBytes
+            if (sha3Salt2.Length != 64
+                || skeinSalt2.Length != 64
                 || secondNonce.Length != parameters.NonceBytes)
             {
                 throw new InvalidDataException("Container header contains invalid second-round lengths.");
             }
 
-            if (CryptographicOperations.FixedTimeEquals(firstSalt, secondSalt))
+            // All four salts must be pairwise distinct
+            byte[][] allSalts = [sha3Salt1, skeinSalt1, sha3Salt2, skeinSalt2];
+            for (int i = 0; i < allSalts.Length; i++)
             {
-                throw new InvalidDataException("Container header reuses the first round's salt for the second.");
+                for (int j = i + 1; j < allSalts.Length; j++)
+                {
+                    if (CryptographicOperations.FixedTimeEquals(allSalts[i], allSalts[j]))
+                    {
+                        throw new InvalidDataException("Container header contains repeated salts across rounds.");
+                    }
+                }
             }
         }
         catch (FormatException ex)
@@ -1641,9 +1754,11 @@ public sealed partial class KalynaContainerService
         }
         finally
         {
-            ZeroIfNotNull(secondSalt);
+            ZeroIfNotNull(sha3Salt1);
+            ZeroIfNotNull(skeinSalt1);
+            ZeroIfNotNull(sha3Salt2);
+            ZeroIfNotNull(skeinSalt2);
             ZeroIfNotNull(secondNonce);
-            ZeroIfNotNull(firstSalt);
         }
     }
 
@@ -1863,8 +1978,10 @@ public sealed partial class KalynaContainerService
         int Sha3TagBits,
         int SkeinMacKeyBits,
         int SkeinTagBits,
-        int SaltBits,
-        string Salt,
+        string SaltSha3Round1,
+        string SaltSkeinRound1,
+        string? SaltSha3Round2,
+        string? SaltSkeinRound2,
         int NonceBits,
         string Nonce,
         int TweakBits,
@@ -1898,8 +2015,6 @@ public sealed partial class KalynaContainerService
         // re-serialization — a field that disappeared for single-round suites
         // would change the byte layout and the reader would reject containers
         // this app had just written.
-        int SecondSaltBits = 0,
-        string? SecondSalt = null,
         int SecondNonceBits = 0,
         string? SecondNonce = null);
 

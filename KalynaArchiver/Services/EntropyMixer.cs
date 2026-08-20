@@ -325,8 +325,15 @@ public static partial class EntropyMixer
         LockedSensitiveBuffer? nonce = null;
         try
         {
+            using var sha3Csprng = LockedSensitiveBuffer.Create(Sha3_512Compat.HashSizeInBytes);
+            using var skeinCsprng = LockedSensitiveBuffer.Create(Sha3_512Compat.HashSizeInBytes);
+            FillSystemRandom(sha3Csprng.Bytes);
+            FillSystemRandom(skeinCsprng.Bytes);
+
             salt = LockedSensitiveBuffer.Create(SaltPairBytes);
-            FillSystemRandom(salt.Bytes);
+            sha3Csprng.Bytes.CopyTo(salt.Bytes.AsSpan(0, Sha3_512Compat.HashSizeInBytes));
+            skeinCsprng.Bytes.CopyTo(salt.Bytes.AsSpan(Sha3_512Compat.HashSizeInBytes, Sha3_512Compat.HashSizeInBytes));
+
             XorInPlace(
                 salt.Bytes.AsSpan(0, Sha3_512Compat.HashSizeInBytes),
                 mouseBytes.Bytes.AsSpan(4 * PoolDrawBytes, Sha3_512Compat.HashSizeInBytes));
@@ -437,8 +444,15 @@ public static partial class EntropyMixer
         LockedSensitiveBuffer? selectedNonce = null;
         try
         {
+            using var sha3Csprng = LockedSensitiveBuffer.Create(Sha3_512Compat.HashSizeInBytes);
+            using var skeinCsprng = LockedSensitiveBuffer.Create(Sha3_512Compat.HashSizeInBytes);
+            FillSystemRandom(sha3Csprng.Bytes);
+            FillSystemRandom(skeinCsprng.Bytes);
+
             salt = LockedSensitiveBuffer.Create(SaltPairBytes);
-            FillSystemRandom(salt.Bytes);
+            sha3Csprng.Bytes.CopyTo(salt.Bytes.AsSpan(0, Sha3_512Compat.HashSizeInBytes));
+            skeinCsprng.Bytes.CopyTo(salt.Bytes.AsSpan(Sha3_512Compat.HashSizeInBytes, Sha3_512Compat.HashSizeInBytes));
+
             XorInPlace(
                 salt.Bytes.AsSpan(0, Sha3_512Compat.HashSizeInBytes),
                 mouseBytes.Bytes.AsSpan(0, Sha3_512Compat.HashSizeInBytes));
@@ -501,8 +515,15 @@ public static partial class EntropyMixer
         LockedSensitiveBuffer? selectedNonce = null;
         try
         {
+            using var sha3Csprng = LockedSensitiveBuffer.Create(Sha3_512Compat.HashSizeInBytes);
+            using var skeinCsprng = LockedSensitiveBuffer.Create(Sha3_512Compat.HashSizeInBytes);
+            FillSystemRandom(sha3Csprng.Bytes);
+            FillSystemRandom(skeinCsprng.Bytes);
+
             salt = LockedSensitiveBuffer.Create(SaltPairBytes);
-            FillSystemRandom(salt.Bytes);
+            sha3Csprng.Bytes.CopyTo(salt.Bytes.AsSpan(0, Sha3_512Compat.HashSizeInBytes));
+            skeinCsprng.Bytes.CopyTo(salt.Bytes.AsSpan(Sha3_512Compat.HashSizeInBytes, Sha3_512Compat.HashSizeInBytes));
+
             XorInPlace(
                 salt.Bytes.AsSpan(0, Sha3_512Compat.HashSizeInBytes),
                 mouseBytes.Bytes.AsSpan(0, Sha3_512Compat.HashSizeInBytes));

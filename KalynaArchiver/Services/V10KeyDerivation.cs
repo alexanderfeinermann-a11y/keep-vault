@@ -420,7 +420,7 @@ public sealed record PinPolicyAnalysis(
 public sealed class PinPolicyException : ArgumentException
 {
     public PinPolicyException(PinPolicyAnalysis analysis)
-        : base($"Die PIN entspricht nicht den Richtlinien für die Neuerstellung: {string.Join(", ", analysis.Violations)}")
+        : base($"The PIN does not satisfy the policy for new archive creation: {string.Join(", ", analysis.Violations)}")
     {
         Analysis = analysis;
     }

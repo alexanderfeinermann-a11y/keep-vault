@@ -44,8 +44,8 @@ if (sheetIndex >= 0 && sheetIndex + 1 < args.Length)
 {
     string outputDirectory = args[sheetIndex + 1];
     Directory.CreateDirectory(outputDirectory);
-    string first = new string('A', 0) + string.Concat(Enumerable.Range(0, 128).Select(i => "0123456789abcdef"[(i * 7) % 16]));
-    string second = string.Concat(Enumerable.Range(0, 128).Select(i => "0123456789abcdef"[(i * 11 + 3) % 16]));
+    string first = string.Concat(Enumerable.Range(0, 256).Select(i => "0123456789abcdef"[(i * 7) % 16]));
+    string second = string.Concat(Enumerable.Range(0, 256).Select(i => "0123456789abcdef"[(i * 11 + 3) % 16]));
     foreach (bool english in new[] { false, true })
     {
         var service = new KeySheetService();

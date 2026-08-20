@@ -62,34 +62,22 @@ internal sealed class MacOriginalDeletionService
         ArgumentNullException.ThrowIfNull(originals);
         ArgumentException.ThrowIfNullOrWhiteSpace(extractedRoot);
 
-        var expected = new Dictionary<string, string>(StringComparer.Ordinal);
-        foreach (string original in originals)
+        Dictionary<string, string> expected;
+        try
         {
-            string full = Path.GetFullPath(original);
-            if (File.Exists(full))
-            {
-                expected[Path.GetFileName(full)] = full;
-            }
-            else if (Directory.Exists(full))
-            {
-                string parent = Path.TrimEndingDirectorySeparator(full);
-                foreach (string file in Directory.EnumerateFiles(full, "*", SearchOption.AllDirectories))
-                {
-                    if (new FileInfo(file).LinkTarget is not null)
-                    {
-                        return new VerificationResult(false, 0, 0,
-                            $"Der Eingabeordner enthält einen symbolischen Link: {file}");
-                    }
+            expected = ZpaqService.BuildArchiveEntryMap(originals);
+        }
+        catch (Exception ex)
+        {
+            return new VerificationResult(false, 0, 0, $"Fehler beim Ermitteln der Archiveinträge: {ex.Message}");
+        }
 
-                    string relative = Path.Combine(
-                        Path.GetFileName(parent),
-                        Path.GetRelativePath(parent, file));
-                    expected[relative] = file;
-                }
-            }
-            else
+        foreach (var kvp in expected)
+        {
+            if (new FileInfo(kvp.Value).LinkTarget is not null)
             {
-                return new VerificationResult(false, 0, 0, $"Die Eingabe existiert nicht mehr: {full}");
+                return new VerificationResult(false, 0, 0,
+                    $"Die Eingabe enthält einen symbolischen Link: {kvp.Value}");
             }
         }
 
@@ -396,15 +384,93 @@ internal sealed class MacOriginalDeletionService
         OriginalSnapshot verified)
     {
         var failures = new List<string>();
-        foreach (string path in verified.Files.Keys)
+        var movedFiles = new List<(string OriginalPath, string QuarantinePath)>();
+        var quarantineDirs = new HashSet<string>(StringComparer.Ordinal);
+
+        try
         {
-            try
+            // Stage 1: Atomic move to quarantine directories on same volumes
+            foreach (string path in verified.Files.Keys)
             {
-                File.Delete(path);
+                string? parentDir = Path.GetDirectoryName(path);
+                if (string.IsNullOrEmpty(parentDir) || !Directory.Exists(parentDir))
+                {
+                    throw new DirectoryNotFoundException($"Elternverzeichnis nicht gefunden für {path}");
+                }
+
+                string quarantineDir = Path.Combine(parentDir, ".keepvault_quarantine_" + Guid.NewGuid().ToString("N"));
+                Directory.CreateDirectory(quarantineDir);
+                quarantineDirs.Add(quarantineDir);
+
+                string quarantinePath = Path.Combine(quarantineDir, Path.GetFileName(path));
+                File.Move(path, quarantinePath);
+                movedFiles.Add((path, quarantinePath));
             }
-            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+
+            // Stage 2: Verification of quarantined files before unlinking
+            foreach ((string origPath, string quarPath) in movedFiles)
             {
-                failures.Add($"{Path.GetFileName(path)}: {exception.Message}");
+                OriginalFileState expected = verified.Files[origPath];
+                using (FileStream fs = File.Open(quarPath, FileMode.Open, FileAccess.Read, FileShare.None))
+                {
+                    if (fs.Length != expected.Length)
+                    {
+                        throw new InvalidDataException($"Dateigröße in Quarantäne weicht ab für {origPath}");
+                    }
+
+                    string digest = Convert.ToHexString(SHA512.HashData(fs));
+                    if (!CryptographicOperations.FixedTimeEquals(
+                            Convert.FromHexString(digest),
+                            Convert.FromHexString(expected.Digest)))
+                    {
+                        throw new InvalidDataException($"Prüfsumme in Quarantäne weicht ab für {origPath}");
+                    }
+                }
+            }
+
+            // Stage 3: Unlink verified files from quarantine
+            foreach ((_, string quarPath) in movedFiles)
+            {
+                File.Delete(quarPath);
+            }
+        }
+        catch (Exception ex)
+        {
+            // Rollback: Restore any files still in quarantine to their original locations
+            foreach ((string origPath, string quarPath) in movedFiles)
+            {
+                if (File.Exists(quarPath) && !File.Exists(origPath))
+                {
+                    try
+                    {
+                        File.Move(quarPath, origPath);
+                    }
+                    catch
+                    {
+                        // best effort rollback
+                    }
+                }
+            }
+
+            failures.Add($"Löschung abgebrochen und zurückgerollt: {ex.Message}");
+            return failures;
+        }
+        finally
+        {
+            // Clean up quarantine directories
+            foreach (string qDir in quarantineDirs)
+            {
+                try
+                {
+                    if (Directory.Exists(qDir))
+                    {
+                        Directory.Delete(qDir, recursive: true);
+                    }
+                }
+                catch
+                {
+                    // best effort cleanup
+                }
             }
         }
 

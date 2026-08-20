@@ -369,8 +369,13 @@ internal static class V10MasterKdf
         ReadOnlySpan<byte> salt,
         ReadOnlySpan<byte> secret,
         uint memoryKiB,
-        Span<byte> output)
+        byte[] output)
     {
+        if (output == null || output.Length != BranchOutputBytes)
+        {
+            throw new ArgumentException($"Output buffer must be exactly {BranchOutputBytes} bytes.", nameof(output));
+        }
+
         // Fresh one-call copies. The native call clears both of these; the
         // masters they came from stay intact for the branch that follows.
         using LockedSensitiveBuffer passwordCopy = LockedSensitiveBuffer.Create(CredentialHashBytes);
@@ -385,7 +390,6 @@ internal static class V10MasterKdf
 
         byte[] saltCopy = salt.ToArray();
         byte[] associatedData = AssociatedData(algorithm, sha3Branch, round);
-        byte[] branchOutput = new byte[BranchOutputBytes];
         try
         {
             NativeArgon2id.HashRawV10(
@@ -396,12 +400,10 @@ internal static class V10MasterKdf
                 saltCopy,
                 secretCopy?.Bytes,
                 associatedData,
-                branchOutput);
-            branchOutput.CopyTo(output);
+                output);
         }
         finally
         {
-            CryptographicOperations.ZeroMemory(branchOutput);
             CryptographicOperations.ZeroMemory(saltCopy);
             CryptographicOperations.ZeroMemory(associatedData);
         }

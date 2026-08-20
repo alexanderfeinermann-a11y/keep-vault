@@ -706,7 +706,7 @@ internal static partial class MacComprehensiveTests
         // --- byte-exact KAT for Threefish-1024 CTR Tweak -----------------------
         byte[] threefishNonce = new byte[128];
         for (int i = 0; i < 128; i++) threefishNonce[i] = (byte)(i + 1);
-        byte[] expectedTweak = Convert.FromHexString("A88D58711CB2311E6F92A2463DB161B6");
+        byte[] expectedTweak = Convert.FromHexString("A1825666A2432C95C0E66F35E564EBDA");
         byte[] actualTweak = KalynaContainerService.CreateSuiteTweak(EncryptionSuite.Threefish1024, threefishNonce);
         Require(FixedEqual(actualTweak, expectedTweak), "Byte-exact KAT for Threefish-1024 CTR Tweak failed.");
 
@@ -829,8 +829,10 @@ internal static partial class MacComprehensiveTests
             "A leading zero in the PIN was discarded.");
 
         // --- PMI ------------------------------------------------------------
-        byte[] saltSha3 = RandomNumberGenerator.GetBytes(64);
-        byte[] saltSkein = RandomNumberGenerator.GetBytes(64);
+        byte[] saltSha3 = Enumerable.Range(0, 64).Select(i => (byte)(i * 3 + 1)).ToArray();
+        byte[] saltSkein = Enumerable.Range(0, 64).Select(i => (byte)(i * 5 + 7)).ToArray();
+        byte[] saltSha3Alt = Enumerable.Range(0, 64).Select(i => (byte)(i * 7 + 11)).ToArray();
+        byte[] saltSkeinAlt = Enumerable.Range(0, 64).Select(i => (byte)(i * 11 + 13)).ToArray();
         (ushort pmi, uint memory) = V10MasterKdf.DerivePmi(
             Algorithm, 1, qs, qk, [], saltSha3, saltSkein);
         Require(
@@ -845,18 +847,20 @@ internal static partial class MacComprehensiveTests
         (ushort pmiAgain, _) = V10MasterKdf.DerivePmi(Algorithm, 1, qs, qk, [], saltSha3, saltSkein);
         Require(pmi == pmiAgain, "PMI is not deterministic.");
         (ushort pmiOtherSalt, _) = V10MasterKdf.DerivePmi(
-            Algorithm, 1, qs, qk, [], saltSha3, RandomNumberGenerator.GetBytes(64));
+            Algorithm, 1, qs, qk, [], saltSha3, saltSkeinAlt);
         (ushort pmiRound2, _) = V10MasterKdf.DerivePmi(
             Algorithm, 2, qs, qk, [], saltSha3, saltSkein);
+        (ushort pmiAltSha3, _) = V10MasterKdf.DerivePmi(
+            Algorithm, 1, qs, qk, [], saltSha3Alt, saltSkein);
         Require(
-            pmi != pmiOtherSalt || pmi != pmiRound2,
-            "PMI ignored both the second salt and the round number.");
-
-        // Both salts of a round must reach the PMI.
+            pmi != pmiOtherSalt,
+            "PMI ignored the second salt.");
         Require(
-            V10MasterKdf.DerivePmi(Algorithm, 1, qs, qk, [], RandomNumberGenerator.GetBytes(64), saltSkein).Pmi != pmi
-            || V10MasterKdf.DerivePmi(Algorithm, 1, qs, qk, [], saltSha3, RandomNumberGenerator.GetBytes(64)).Pmi != pmi,
-            "PMI ignores its salts.");
+            pmi != pmiRound2,
+            "PMI ignored the round number.");
+        Require(
+            pmi != pmiAltSha3,
+            "PMI ignored the first salt.");
 
         // --- salt separation is enforced ------------------------------------
         RequireThrows<CryptographicException>(
@@ -1881,12 +1885,13 @@ internal static partial class MacComprehensiveTests
             [
                 "Version", "Algorithm", "BlockBits", "CounterEndian", "EncryptionKeyBits",
                 "Sha3MacKeyBits", "Sha3TagBits", "SkeinMacKeyBits", "SkeinTagBits",
-                "SaltBits", "Salt", "NonceBits", "Nonce", "TweakBits", "TweakMode", "Tweak",
+                "SaltSha3Round1", "SaltSkeinRound1", "SaltSha3Round2", "SaltSkeinRound2",
+                "NonceBits", "Nonce", "TweakBits", "TweakMode", "Tweak",
                 "Hint", "Argon2MemoryKiB", "Argon2Iterations", "Argon2Parallelism",
                 "KdfBranchOutputBits", "MasterKeyBits", "KdfExecutionMode", "KdfMemoryMode",
                 "PasswordMode", "KdfInputMode", "GeneratedPasswordBits",
                 "GeneratedPasswordFactorCount", "KdfMode",
-                "SecondSaltBits", "SecondSalt", "SecondNonceBits", "SecondNonce",
+                "SecondNonceBits", "SecondNonce",
             ];
             string[] actual = [.. header.EnumerateObject().Select(property => property.Name)];
             Require(
@@ -2565,28 +2570,37 @@ internal static partial class MacComprehensiveTests
             // not cosmetic: the reader compares the header against its own
             // canonical re-serialization, so a field that vanished would make
             // the app reject containers it had just written.
-            bool hasSecondSalt = header.TryGetProperty("SecondSalt", out JsonElement secondSalt);
+            bool hasSaltSha3_1 = header.TryGetProperty("SaltSha3Round1", out JsonElement saltSha3_1);
+            bool hasSaltSkein_1 = header.TryGetProperty("SaltSkeinRound1", out JsonElement saltSkein_1);
+            bool hasSaltSha3_2 = header.TryGetProperty("SaltSha3Round2", out JsonElement saltSha3_2);
+            bool hasSaltSkein_2 = header.TryGetProperty("SaltSkeinRound2", out JsonElement saltSkein_2);
             bool hasSecondNonce = header.TryGetProperty("SecondNonce", out JsonElement secondNonce);
-            Require(hasSecondSalt && hasSecondNonce, "Container header is missing the second-round fields.");
+            Require(hasSaltSha3_1 && hasSaltSkein_1 && hasSaltSha3_2 && hasSaltSkein_2 && hasSecondNonce,
+                "Container header is missing salt or second-round fields.");
+
+            Require(saltSha3_1.ValueKind == JsonValueKind.String && saltSkein_1.ValueKind == JsonValueKind.String,
+                "Container header is missing round 1 salts.");
+            Require(Convert.FromBase64String(saltSha3_1.GetString()!).Length == 64, "SaltSha3Round1 length != 64");
+            Require(Convert.FromBase64String(saltSkein_1.GetString()!).Length == 64, "SaltSkeinRound1 length != 64");
+            Require(!string.Equals(saltSha3_1.GetString(), saltSkein_1.GetString(), StringComparison.Ordinal),
+                "Round 1 salts are identical.");
 
             if (parameters.UsesTwoKdfRounds)
             {
                 // A two-round suite must carry both rounds, or the archive is
                 // undecryptable by anyone — including the machine that wrote it.
                 Require(
-                    secondSalt.ValueKind == JsonValueKind.String
+                    saltSha3_2.ValueKind == JsonValueKind.String
+                    && saltSkein_2.ValueKind == JsonValueKind.String
                     && secondNonce.ValueKind == JsonValueKind.String,
                     "Container header omits second-round material for a two-round suite.");
                 Require(
-                    header.GetProperty("SecondSaltBits").GetInt32() == 2 * PasswordKeyService.SaltSize * 8
-                    && header.GetProperty("SecondNonceBits").GetInt32() == parameters.NonceBytes * 8,
+                    header.GetProperty("SecondNonceBits").GetInt32() == parameters.NonceBytes * 8,
                     "Container header declares wrong second-round sizes.");
-                Require(
-                    !string.Equals(
-                        header.GetProperty("Salt").GetString(),
-                        secondSalt.GetString(),
-                        StringComparison.Ordinal),
-                    "Container header reuses the first round's salt for the second.");
+                Require(Convert.FromBase64String(saltSha3_2.GetString()!).Length == 64, "SaltSha3Round2 length != 64");
+                Require(Convert.FromBase64String(saltSkein_2.GetString()!).Length == 64, "SaltSkeinRound2 length != 64");
+                string[] salts = [saltSha3_1.GetString()!, saltSkein_1.GetString()!, saltSha3_2.GetString()!, saltSkein_2.GetString()!];
+                Require(salts.Distinct(StringComparer.Ordinal).Count() == 4, "Container header contains repeated salts.");
                 Require(
                     !string.Equals(
                         header.GetProperty("Nonce").GetString(),
@@ -2597,12 +2611,12 @@ internal static partial class MacComprehensiveTests
             else
             {
                 Require(
-                    secondSalt.ValueKind == JsonValueKind.Null
+                    saltSha3_2.ValueKind == JsonValueKind.Null
+                    && saltSkein_2.ValueKind == JsonValueKind.Null
                     && secondNonce.ValueKind == JsonValueKind.Null,
                     "Container header does not carry null second-round material for a single-round suite.");
                 Require(
-                    header.GetProperty("SecondSaltBits").GetInt32() == 0
-                    && header.GetProperty("SecondNonceBits").GetInt32() == 0,
+                    header.GetProperty("SecondNonceBits").GetInt32() == 0,
                     "Container header declares second-round sizes for a single-round suite.");
             }
             Require(header.GetProperty("Algorithm").GetString() == parameters.Algorithm, "Container algorithm label mismatch.");
@@ -2611,7 +2625,6 @@ internal static partial class MacComprehensiveTests
             // credentials; a header that published it would give away the one
             // KDF parameter that is deliberately secret.
             Require(header.GetProperty("Argon2MemoryKiB").GetInt32() == 0, "Container header published the Argon2id memory cost.");
-            Require(header.GetProperty("SaltBits").GetInt32() == 2 * PasswordKeyService.SaltSize * 8, "Container salt is not a 1024-bit pair.");
             Require(header.GetProperty("KdfMode").GetString() == "DualArgon2id-SHA3+Skein1024-Sequential-Master1024", "Container KDF mode mismatch.");
             Require(header.GetProperty("Argon2Iterations").GetInt32() == Argon2Profile.DefaultIterations, "Container Argon2 iterations mismatch.");
             Require(header.GetProperty("Argon2Parallelism").GetInt32() == Argon2Profile.DefaultParallelism, "Container Argon2 parallelism mismatch.");

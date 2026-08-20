@@ -214,10 +214,16 @@ public sealed class KeySheetService
             await EnsurePhysicalPrinterAsync(printerName, cancellationToken).ConfigureAwait(false);
 
         EnsurePdfFontResolver();
-        using var pdf = new SensitiveBufferStream(initialCapacity: 256 * 1024);
-        using (PdfDocument document = CreatePdfDocument(validated))
+        using var pdfA = new SensitiveBufferStream(initialCapacity: 256 * 1024);
+        using (PdfDocument documentA = CreateSingleSheetDocument(validated, KeySheetFactor.First))
         {
-            document.Save(pdf, closeStream: false);
+            documentA.Save(pdfA, closeStream: false);
+        }
+
+        using var pdfB = new SensitiveBufferStream(initialCapacity: 256 * 1024);
+        using (PdfDocument documentB = CreateSingleSheetDocument(validated, KeySheetFactor.Second))
+        {
+            documentB.Save(pdfB, closeStream: false);
         }
 
         PhysicalPrinterDescriptor immediatePrinter =
@@ -229,12 +235,19 @@ public sealed class KeySheetService
             throw new InvalidOperationException("Das physische CUPS-Druckziel wurde während der Auftragsvorbereitung verändert.");
         }
 
-        pdf.Position = 0;
-        string receipt = await MacCupsPrinter.SubmitPdfAsync(
+        pdfA.Position = 0;
+        string receiptA = await MacCupsPrinter.SubmitPdfAsync(
             immediatePrinter.Name,
-            pdf.GetWrittenMemory(),
+            pdfA.GetWrittenMemory(),
             cancellationToken).ConfigureAwait(false);
-        return new KeySheetPrintResult(immediatePrinter, receipt, DateTimeOffset.Now);
+
+        pdfB.Position = 0;
+        string receiptB = await MacCupsPrinter.SubmitPdfAsync(
+            immediatePrinter.Name,
+            pdfB.GetWrittenMemory(),
+            cancellationToken).ConfigureAwait(false);
+
+        return new KeySheetPrintResult(immediatePrinter, $"{receiptA}; {receiptB}", DateTimeOffset.Now);
     }
 
     public KeySheetPrintResult PrintKeySheets(string printerName, KeySheetData data)
@@ -309,6 +322,21 @@ public sealed class KeySheetService
         string normalized = PasswordKeyService.NormalizeGeneratedPassword(generatedPassword);
         return string.Join(' ', Enumerable.Range(0, normalized.Length / 8)
             .Select(index => normalized.Substring(index * 8, 8)));
+    }
+
+    public static string GroupGeneratedPasswordForSheet(string generatedPassword)
+    {
+        string normalized = PasswordKeyService.NormalizeGeneratedPassword(generatedPassword);
+        var groups = Enumerable.Range(0, normalized.Length / 8)
+            .Select(index => normalized.Substring(index * 8, 8))
+            .ToList();
+        var lines = new List<string>();
+        for (int i = 0; i < groups.Count; i += 4)
+        {
+            int count = Math.Min(4, groups.Count - i);
+            lines.Add(string.Join(' ', groups.GetRange(i, count)));
+        }
+        return string.Join(Environment.NewLine, lines);
     }
 
     private static ValidatedKeySheetData Validate(KeySheetData data)
@@ -488,10 +516,10 @@ public sealed class KeySheetService
         var warningFont = new XFont("Arial", MinimumFontSize, XFontStyleEx.Bold);
         var shoutFont = new XFont("Arial", 19, XFontStyleEx.Bold);
 
-        // The factor is formatted in 32 groups of 8 characters (256 hex chars).
-        // At 11pt bold Courier New, 8 groups (71 chars) fit on a single line of 500pt width,
-        // producing exactly 4 lines with clear readability.
-        var monoFont = new XFont("Courier New", 11, XFontStyleEx.Bold);
+        // The factor is formatted in 32 groups of 8 characters (256 hex chars),
+        // arranged across 8 lines with 4 groups per line.
+        // Rendered in Courier New Bold at MinimumFontSize (16 pt) for optimal legibility.
+        var monoFont = new XFont("Courier New", MinimumFontSize, XFontStyleEx.Bold);
         var formatter = new XTextFormatter(graphics);
 
         const double margin = 42;
@@ -575,7 +603,7 @@ public sealed class KeySheetService
         // line then shortens the lines instead of pushing the factor across the
         // QR codes — and the factor is the one thing on this sheet that must
         // never be the part that gets squeezed.
-        const double factorBlockHeight = 22 + (4 * 18) + 20;
+        const double factorBlockHeight = 22 + (8 * 18) + 14;
         double writingTop = y + 4;
         double writingBottom = qrHeadingBaseline - factorBlockHeight;
         const int writingLines = 3;
@@ -597,11 +625,11 @@ public sealed class KeySheetService
             new XPoint(margin, y));
         y += 22;
         formatter.DrawString(
-            GroupGeneratedPassword(generatedPassword),
+            GroupGeneratedPasswordForSheet(generatedPassword),
             monoFont,
             XBrushes.Black,
-            new XRect(margin, y, bodyWidth, 80));
-        y += 75;
+            new XRect(margin, y, bodyWidth, 8 * 18));
+        y += (8 * 18) + 8;
 
         graphics.DrawString(
             en

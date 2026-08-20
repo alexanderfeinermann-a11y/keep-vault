@@ -367,6 +367,37 @@ public sealed partial class ZpaqService
         Directory.Delete(fullPath, recursive: true);
     }
 
+    public static Dictionary<string, string> BuildArchiveEntryMap(IReadOnlyList<string> inputPaths)
+    {
+        ArgumentNullException.ThrowIfNull(inputPaths);
+        if (inputPaths.Count == 0)
+        {
+            return new Dictionary<string, string>(StringComparer.Ordinal);
+        }
+
+        string[] normalized = NormalizeAndValidateInputPaths(inputPaths);
+        string workingDirectory = GetArchiveWorkingDirectory(normalized);
+        var map = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (string full in normalized)
+        {
+            if (File.Exists(full))
+            {
+                string rel = Path.GetRelativePath(workingDirectory, full);
+                map[rel] = full;
+            }
+            else if (Directory.Exists(full))
+            {
+                foreach (string file in Directory.EnumerateFiles(full, "*", SearchOption.AllDirectories))
+                {
+                    string rel = Path.GetRelativePath(workingDirectory, file);
+                    map[rel] = file;
+                }
+            }
+        }
+
+        return map;
+    }
+
     private static string GetArchiveWorkingDirectory(IEnumerable<string> inputPaths)
     {
         string[] anchors = inputPaths

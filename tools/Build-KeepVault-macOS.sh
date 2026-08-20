@@ -14,6 +14,7 @@ architecture='universal'
 marketing_version='5.0.0'
 build_version='10'
 preflight_only=0
+release_mode=0
 identity=${KEEPVAULT_CODESIGN_IDENTITY:-}
 # Name of an "xcrun notarytool store-credentials" keychain profile. Empty means
 # the build stops short of notarization; the secrets never live here.
@@ -133,6 +134,10 @@ while (( $# != 0 )); do
       build_version=$2
       shift 2
       ;;
+    --release)
+      release_mode=1
+      shift
+      ;;
     --notary-profile)
       (( $# >= 2 )) || usage
       notary_profile=$2
@@ -178,7 +183,11 @@ fi
 
 if [[ -z ${identity} ]]; then
   identity=$(security find-identity -v -p codesigning \
-    | awk '($0 ~ /Apple Development:/) { print $2; exit }')
+    | awk '($0 ~ /Developer ID Application:/) { print $2; exit }')
+  if [[ -z ${identity} ]]; then
+    identity=$(security find-identity -v -p codesigning \
+      | awk '($0 ~ /Apple Development:/) { print $2; exit }')
+  fi
 fi
 if [[ -z ${identity} ]]; then
   print -u2 "RELEASE GATE: no Apple code-signing identity for team ${team_identifier} is available."
@@ -201,10 +210,17 @@ fi
 timestamp_arguments=(--timestamp=none)
 if [[ ${identity_label} == 'Developer ID Application:'* ]]; then
   timestamp_arguments=(--timestamp)
-  print -u2 'RELEASE GATE: Developer ID output requires configured notarytool credentials, stapling, and notarization verification.'
-  print -u2 'This local build script intentionally supports only the available Apple Development identity.'
-  exit 2
-elif [[ ${identity_label} != 'Apple Development:'* ]]; then
+  if [[ -z ${notary_profile} ]]; then
+    print -u2 'RELEASE GATE: Developer ID release requires --notary-profile.'
+    exit 2
+  fi
+elif [[ ${identity_label} == 'Apple Development:'* ]]; then
+  timestamp_arguments=(--timestamp=none)
+  if (( release_mode )); then
+    print -u2 'RELEASE GATE: published release requires Developer ID.'
+    exit 2
+  fi
+else
   print -u2 'The selected identity is neither Apple Development nor Developer ID Application.'
   exit 2
 fi
@@ -901,6 +917,19 @@ ${script_dir}/Verify-KeepVault-macOS.sh \
   --allow-development \
   --require-launcher-signature \
   --mldsa-public-key ${mldsa_public_key}
+
+print 'RELEASE GATE: staging test natives and running comprehensive tests + key-sheet render verification...'
+${script_dir}/Stage-TestNatives-macOS.sh \
+  --app ${final_app} \
+  --identity ${identity}
+(
+  cd ${repo_root}
+  ${dotnet_command} run --project KeepVaultMac.Tests/KeepVaultMac.Tests.csproj -c Release -- --full
+  test_sheet_dir=$(mktemp -d "${TMPDIR:-/tmp}/keep-vault-test-sheets.XXXXXX")
+  ${dotnet_command} run --project KeepVaultMac.Tests/KeepVaultMac.Tests.csproj -c Release -- --dump-key-sheets "${test_sheet_dir}"
+  rm -rf -- "${test_sheet_dir}"
+)
+
 print "app=${final_app}"
 print "archive=${final_zip}"
 
