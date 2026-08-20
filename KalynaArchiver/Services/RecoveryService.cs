@@ -19,9 +19,9 @@ public sealed partial class RecoveryService
     private static readonly byte[] LocatorMagic = "KPR2LOC2"u8.ToArray();
     private static readonly byte[] MetadataBlockMagic = "KPR2BLK2"u8.ToArray();
     private static readonly byte[] MetadataEnvelopeMagic = "KPR2META"u8.ToArray();
-    private static readonly byte[] CertificationDomain = "Kalyna-ZPAQ/KPAR2/v2/Metadata-Certification"u8.ToArray();
-    private static readonly byte[] Sha3KeyDomain = "Kalyna-ZPAQ/KPAR2/v2/SHA3-Recovery-Key"u8.ToArray();
-    private static readonly byte[] SkeinKeyDomain = "Kalyna-ZPAQ/KPAR2/v2/Skein-Recovery-Key"u8.ToArray();
+    private static readonly byte[] CertificationDomain = "Kalyna-ZPAQ/KPAR2/v3/Metadata-Certification"u8.ToArray();
+    private static readonly byte[] Sha3KeyDomain = "Kalyna-ZPAQ/KPAR2/v3/SHA3-Recovery-Key"u8.ToArray();
+    private static readonly byte[] SkeinKeyDomain = "Kalyna-ZPAQ/KPAR2/v3/Skein-Recovery-Key"u8.ToArray();
 
     /// <summary>
     /// KPAR2 format version. 3 is the container v10 layout: the salt field is
@@ -64,7 +64,7 @@ public sealed partial class RecoveryService
             : EncryptionSuiteCatalog.Get((EncryptionSuite)encryptionSuite).UsesTwoKdfRounds
                 ? 2 * SaltPairBytes
                 : SaltPairBytes;
-    private const string RecoveryAlgorithm = "KPAR2-v2-SHA3-512+Skein-1024-RS(20,3)";
+    private const string RecoveryAlgorithm = "KPAR2-v3-SHA3-512+Skein-1024-RS(20,3)";
     private const int DataShardCount = 20;
     private const int ParityShardCount = 3;
     private const int BodyShardSize = 4 * 1024 * 1024;

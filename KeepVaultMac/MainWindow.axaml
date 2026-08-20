@@ -252,7 +252,7 @@
                     <StackPanel Spacing="8">
                       <TextBlock x:Name="PasswordGeneratorTitle" Text="Zwei unabhängige 1024-Bit-Faktoren" FontWeight="SemiBold" />
                       <TextBlock x:Name="PasswordGeneratorHelpText"
-                                 Text="Neun getrennte Entropiepools benötigen je 512 Maus-Samples."
+                                 Text="Neun getrennte Entropiepools benötigen je 1024 Maus-Samples."
                                  Classes="muted" FontSize="12" TextWrapping="Wrap" />
                       <ProgressBar x:Name="EntropyProgress" Minimum="0" Height="7" Foreground="#5DE4EC" />
                       <TextBlock x:Name="EntropyStatusText" Text="Entropie wird gesammelt …" Foreground="#5DE4EC" FontSize="12" TextWrapping="Wrap" />

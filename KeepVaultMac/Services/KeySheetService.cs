@@ -259,7 +259,7 @@ public sealed class KeySheetService
         using var sha3 = new Sha3_512Incremental();
         using var skein = new Skein1024Digest();
 
-        AppendFingerprintPart(sha3, skein, "Kalyna-ZPAQ/v9/key-sheet-fingerprint"u8);
+        AppendFingerprintPart(sha3, skein, "Kalyna-ZPAQ/v10/key-sheet-fingerprint"u8);
         AppendFingerprintPart(sha3, skein, pathBytes.Bytes);
         AppendFingerprintPart(sha3, skein, suiteBytes.Bytes);
         AppendFingerprintPart(sha3, skein, firstBytes.Bytes);
@@ -460,6 +460,14 @@ public sealed class KeySheetService
         return document;
     }
 
+    /// <summary>
+    /// Draws one factor page.
+    /// </summary>
+    /// <remarks>
+    /// This method is passed only the factor it is meant to draw: passing both
+    /// would allow an edit to quietly place factor B on page A or vice versa,
+    /// which would void the two-sheet guarantee without failing any draw call.
+    /// </remarks>
     private static void DrawPdfSheet(
         PdfPage page,
         ValidatedKeySheetData data,
@@ -480,9 +488,10 @@ public sealed class KeySheetService
         var warningFont = new XFont("Arial", MinimumFontSize, XFontStyleEx.Bold);
         var shoutFont = new XFont("Arial", 19, XFontStyleEx.Bold);
 
-        // The factor is the one thing on this sheet that must never be misread,
-        // so it is set at the same size as the heading announcing it.
-        var monoFont = new XFont("Courier New", MinimumFontSize);
+        // The factor is formatted in 32 groups of 8 characters (256 hex chars).
+        // At 11pt bold Courier New, 8 groups (71 chars) fit on a single line of 500pt width,
+        // producing exactly 4 lines with clear readability.
+        var monoFont = new XFont("Courier New", 11, XFontStyleEx.Bold);
         var formatter = new XTextFormatter(graphics);
 
         const double margin = 42;
@@ -566,7 +575,7 @@ public sealed class KeySheetService
         // line then shortens the lines instead of pushing the factor across the
         // QR codes — and the factor is the one thing on this sheet that must
         // never be the part that gets squeezed.
-        const double factorBlockHeight = 22 + (4 * 20) + 20;
+        const double factorBlockHeight = 22 + (4 * 18) + 20;
         double writingTop = y + 4;
         double writingBottom = qrHeadingBaseline - factorBlockHeight;
         const int writingLines = 3;
@@ -581,8 +590,8 @@ public sealed class KeySheetService
 
         graphics.DrawString(
             en
-                ? $"Generated hexadecimal 512-bit factor {factorName}"
-                : $"Generierter hexadezimaler 512-Bit-Faktor {factorName}",
+                ? $"Generated hexadecimal 1024-bit factor {factorName}"
+                : $"Generierter hexadezimaler 1024-Bit-Faktor {factorName}",
             headingFont,
             XBrushes.Black,
             new XPoint(margin, y));
@@ -591,8 +600,8 @@ public sealed class KeySheetService
             GroupGeneratedPassword(generatedPassword),
             monoFont,
             XBrushes.Black,
-            new XRect(margin, y, bodyWidth, 92));
-        y += 80;
+            new XRect(margin, y, bodyWidth, 80));
+        y += 75;
 
         graphics.DrawString(
             en

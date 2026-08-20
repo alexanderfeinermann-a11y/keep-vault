@@ -60,13 +60,14 @@ internal static class SuiteKeySchedule
 
     /// <summary>
     /// The canonical context that makes one role distinct from every other.
+    /// Format: LP(D_ROLE) || LE32(10) || LP(Algorithm) || LE32(StageIndex) || LP(Cipher) || LP(Purpose) || LE32(KeyBits)
     /// </summary>
     /// <remarks>
     /// KeyBits is part of the context on purpose: a role that asks for 256 bits
     /// and one that asks for 512 must not produce a prefix relationship, which
     /// is exactly what would happen if the same context were truncated twice.
     /// </remarks>
-    public static byte[] RoleContext(
+    public static byte[] BuildRoleContext(
         string algorithm,
         int stageIndex,
         string cipher,
@@ -75,15 +76,52 @@ internal static class SuiteKeySchedule
     {
         ArgumentException.ThrowIfNullOrEmpty(algorithm);
         ArgumentException.ThrowIfNullOrEmpty(cipher);
-        return LengthPrefix.Encode(
-            LengthPrefix.Utf8(RoleDomain),
-            LengthPrefix.EncodeInt32(10),
-            LengthPrefix.Utf8(algorithm),
-            LengthPrefix.EncodeInt32(stageIndex),
-            LengthPrefix.Utf8(cipher),
-            LengthPrefix.Utf8(purpose.ToString()),
-            LengthPrefix.EncodeInt32(keyBits));
+
+        byte[] roleDomainBytes = Encoding.UTF8.GetBytes(RoleDomain);
+        byte[] algorithmBytes = Encoding.UTF8.GetBytes(algorithm);
+        byte[] cipherBytes = Encoding.UTF8.GetBytes(cipher);
+        byte[] purposeBytes = Encoding.UTF8.GetBytes(purpose.ToString());
+
+        int totalLength = (sizeof(int) + roleDomainBytes.Length)
+            + sizeof(int)
+            + (sizeof(int) + algorithmBytes.Length)
+            + sizeof(int)
+            + (sizeof(int) + cipherBytes.Length)
+            + (sizeof(int) + purposeBytes.Length)
+            + sizeof(int);
+
+        byte[] result = new byte[totalLength];
+        int offset = 0;
+
+        WriteLengthPrefixed(result, ref offset, roleDomainBytes);
+        System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(result.AsSpan(offset), 10);
+        offset += sizeof(int);
+        WriteLengthPrefixed(result, ref offset, algorithmBytes);
+        System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(result.AsSpan(offset), stageIndex);
+        offset += sizeof(int);
+        WriteLengthPrefixed(result, ref offset, cipherBytes);
+        WriteLengthPrefixed(result, ref offset, purposeBytes);
+        System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(result.AsSpan(offset), keyBits);
+        offset += sizeof(int);
+
+        return result;
     }
+
+    private static void WriteLengthPrefixed(Span<byte> destination, ref int offset, ReadOnlySpan<byte> data)
+    {
+        System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(destination.Slice(offset), data.Length);
+        offset += sizeof(int);
+        data.CopyTo(destination.Slice(offset));
+        offset += data.Length;
+    }
+
+    public static byte[] RoleContext(
+        string algorithm,
+        int stageIndex,
+        string cipher,
+        KeyRolePurpose purpose,
+        int keyBits) =>
+        BuildRoleContext(algorithm, stageIndex, cipher, purpose, keyBits);
 
     public static byte[] GlobalRoleContext(string algorithm, string cipher, KeyRolePurpose purpose, int keyBits) =>
         RoleContext(algorithm, GlobalStageIndex, cipher, purpose, keyBits);
@@ -127,22 +165,14 @@ internal static class SuiteKeySchedule
 
     private static byte[] DeriveSha3Side(ReadOnlySpan<byte> master, ReadOnlySpan<byte> roleContext)
     {
-        byte[] roleMaster0 = master[..64].ToArray();
-        byte[] roleMaster1 = master[64..].ToArray();
-        byte[] info0 = LengthPrefix.Encode(
-            LengthPrefix.Utf8(Sha3RoleDomain),
-            roleContext.ToArray(),
-            LengthPrefix.Utf8("Half-0"));
-        byte[] info1 = LengthPrefix.Encode(
-            LengthPrefix.Utf8(Sha3RoleDomain),
-            roleContext.ToArray(),
-            LengthPrefix.Utf8("Half-1"));
+        byte[] info0 = BuildSha3Info(roleContext, "Half-0");
+        byte[] info1 = BuildSha3Info(roleContext, "Half-1");
         byte[]? half0 = null;
         byte[]? half1 = null;
         try
         {
-            half0 = Sha3HkdfExpand.Expand(roleMaster0, info0, 64);
-            half1 = Sha3HkdfExpand.Expand(roleMaster1, info1, 64);
+            half0 = Sha3HkdfExpand.Expand(master[..64], info0, 64);
+            half1 = Sha3HkdfExpand.Expand(master[64..], info1, 64);
             byte[] result = new byte[RoleBytes];
             half0.CopyTo(result, 0);
             half1.CopyTo(result, 64);
@@ -150,13 +180,26 @@ internal static class SuiteKeySchedule
         }
         finally
         {
-            CryptographicOperations.ZeroMemory(roleMaster0);
-            CryptographicOperations.ZeroMemory(roleMaster1);
             CryptographicOperations.ZeroMemory(info0);
             CryptographicOperations.ZeroMemory(info1);
             if (half0 is not null) CryptographicOperations.ZeroMemory(half0);
             if (half1 is not null) CryptographicOperations.ZeroMemory(half1);
         }
+    }
+
+    private static byte[] BuildSha3Info(ReadOnlySpan<byte> roleContext, string halfLabel)
+    {
+        byte[] domainBytes = Encoding.UTF8.GetBytes(Sha3RoleDomain);
+        byte[] labelBytes = Encoding.UTF8.GetBytes(halfLabel);
+        int totalLength = (sizeof(int) + domainBytes.Length)
+            + (sizeof(int) + roleContext.Length)
+            + (sizeof(int) + labelBytes.Length);
+        byte[] info = new byte[totalLength];
+        int offset = 0;
+        WriteLengthPrefixed(info, ref offset, domainBytes);
+        WriteLengthPrefixed(info, ref offset, roleContext);
+        WriteLengthPrefixed(info, ref offset, labelBytes);
+        return info;
     }
 
     /// <summary>

@@ -1352,6 +1352,8 @@ public sealed partial class MainWindow : Window, IDisposable
         _generatedPairReady = false;
         CreatePasswordBox.Text = string.Empty;
         CreatePasswordConfirmBox.Text = string.Empty;
+        CreatePinBox.Text = string.Empty;
+        CreatePinConfirmBox.Text = string.Empty;
         GeneratedPasswordFirstBox.Text = string.Empty;
         GeneratedPasswordSecondBox.Text = string.Empty;
         entropy?.Dispose();
@@ -1363,6 +1365,7 @@ public sealed partial class MainWindow : Window, IDisposable
     private void ClearExtractSecrets()
     {
         ExtractPasswordBox.Text = string.Empty;
+        ExtractPinBox.Text = string.Empty;
         ExtractGeneratedPasswordFirstBox.Text = string.Empty;
         ExtractGeneratedPasswordSecondBox.Text = string.Empty;
     }
@@ -1378,6 +1381,14 @@ public sealed partial class MainWindow : Window, IDisposable
         {
             throw new InvalidOperationException(T("passwordMismatch"));
         }
+
+        string pin = CreatePinBox.Text ?? string.Empty;
+        string pinConfirm = CreatePinConfirmBox.Text ?? string.Empty;
+        V10KeyDerivation.ValidatePinForCreation(pin);
+        if (!string.Equals(pin, pinConfirm, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(T("pinMismatch"));
+        }
     }
 
     private void EnsureExtractionFactors()
@@ -1388,26 +1399,23 @@ public sealed partial class MainWindow : Window, IDisposable
             throw new InvalidOperationException(T("passwordLength"));
         }
 
-        try
-        {
-            V10KeyDerivation.ValidatePin(ExtractPinBox.Text ?? string.Empty);
-        }
-        catch (ArgumentException exception)
-        {
-            throw new InvalidOperationException(
-                string.Format(
-                    CultureInfo.CurrentCulture,
-                    T("pinInvalid"),
-                    V10KeyDerivation.MinPinLength,
-                    V10KeyDerivation.MaxPinLength),
-                exception);
-        }
+        string pin = ExtractPinBox.Text ?? string.Empty;
+        V10KeyDerivation.ValidatePinSyntax(pin);
 
-        EnsureGeneratedPassword(ExtractGeneratedPasswordFirstBox.Text ?? string.Empty);
-        EnsureGeneratedPassword(ExtractGeneratedPasswordSecondBox.Text ?? string.Empty);
+        string first = ExtractGeneratedPasswordFirstBox.Text ?? string.Empty;
+        string second = ExtractGeneratedPasswordSecondBox.Text ?? string.Empty;
+        EnsureGeneratedPassword(first);
+        EnsureGeneratedPassword(second);
     }
 
-    private static void EnsureGeneratedPassword(string value) => _ = PasswordKeyService.NormalizeGeneratedPassword(value);
+    private static void EnsureGeneratedPassword(string generatedPassword)
+    {
+        string normalized = PasswordKeyService.NormalizeGeneratedPassword(generatedPassword);
+        if (normalized.Length != PasswordKeyService.GeneratedPasswordLength)
+        {
+            throw new InvalidOperationException("Both 1024-bit factors from the key sheet are required.");
+        }
+    }
 
     private void EnsureEntropyReady(EntropyPurpose purpose)
     {
@@ -1424,7 +1432,7 @@ public sealed partial class MainWindow : Window, IDisposable
             EntropyMixer.MissingSamples(purpose)));
     }
 
-    private void UpdateEntropyStatus(bool force)
+    private void UpdateEntropyStatus(bool force = false)
     {
         if (!_componentsReady)
         {
@@ -1433,12 +1441,12 @@ public sealed partial class MainWindow : Window, IDisposable
 
         EntropyPoolStatus status = EntropyMixer.GetPoolStatus();
 
-        // 512 samples per pool is the minimum that unlocks generation, not a
+        // 1024 samples per pool is the minimum that unlocks generation, not a
         // ceiling: collection continues for as long as the pointer moves, and
         // the reported counts must keep rising so that the extra entropy stays
         // visible. Throttle on the true pool minimum, never on the value
         // clamped for the progress bar — clamping the throttle input froze the
-        // whole display at 512.
+        // whole display at 1024.
         long poolMinimum = status.Minimum;
         if (!force && poolMinimum == _lastEntropyUiMinimum)
         {
@@ -1511,20 +1519,13 @@ public sealed partial class MainWindow : Window, IDisposable
         string pin = CreatePinBox.Text ?? string.Empty;
         string confirm = CreatePinConfirmBox.Text ?? string.Empty;
         string? failure = null;
-        try
-        {
-            V10KeyDerivation.ValidatePin(pin);
-        }
-        catch (ArgumentException)
-        {
-            failure = string.Format(
-                CultureInfo.CurrentCulture,
-                T("pinInvalid"),
-                V10KeyDerivation.MinPinLength,
-                V10KeyDerivation.MaxPinLength);
-        }
 
-        if (failure is null && !string.Equals(pin, confirm, StringComparison.Ordinal))
+        PinPolicyAnalysis analysis = V10KeyDerivation.AnalyzePinForCreation(pin);
+        if (!analysis.IsAccepted)
+        {
+            failure = PinViolationText(analysis.Violations[0]);
+        }
+        else if (!string.Equals(pin, confirm, StringComparison.Ordinal))
         {
             failure = T("pinMismatch");
         }
@@ -1532,6 +1533,19 @@ public sealed partial class MainWindow : Window, IDisposable
         PinPolicyStatusText.Text = failure ?? T("pinAccepted");
         PinPolicyStatusText.Foreground = Brush.Parse(failure is null ? "#7EE2B8" : "#F29AA6");
     }
+
+    private string PinViolationText(PinPolicyViolation violation) => violation switch
+    {
+        PinPolicyViolation.TooShort => string.Format(CultureInfo.CurrentCulture, T("pinTooShort"), V10KeyDerivation.MinPinLength),
+        PinPolicyViolation.TooLong => string.Format(CultureInfo.CurrentCulture, T("pinTooLong"), V10KeyDerivation.MaxPinLength),
+        PinPolicyViolation.NonDigit => T("pinNonDigit"),
+        PinPolicyViolation.NotEnoughDistinctDigits => string.Format(CultureInfo.CurrentCulture, T("pinDistinct"), V10KeyDerivation.MinDistinctPinDigits),
+        PinPolicyViolation.RepeatedDigitsTriple => T("pinRepeatedTriple"),
+        PinPolicyViolation.SequentialAscending => T("pinSequentialAscending"),
+        PinPolicyViolation.SequentialDescending => T("pinSequentialDescending"),
+        PinPolicyViolation.Blocklisted => T("pinBlocklisted"),
+        _ => T("pinInvalid"),
+    };
 
     private string PasswordViolationText(PasswordPolicyViolation violation) => violation switch
     {

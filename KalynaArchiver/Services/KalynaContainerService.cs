@@ -162,7 +162,7 @@ public sealed partial class KalynaContainerService
         PasswordKeyService.ValidateUserPasswordForCreation(userPassword, firstGeneratedPassword, secondGeneratedPassword);
         // Checked before any work starts. The derivation would refuse it too,
         // but only after the archive has been compressed and streamed.
-        V10KeyDerivation.ValidatePin(pin);
+        V10KeyDerivation.ValidatePinForCreation(pin);
         PasswordKeyService.ValidateArgon2Profile(argon2Profile);
         ValidateHintForCreation(hint);
 
@@ -276,7 +276,10 @@ public sealed partial class KalynaContainerService
                 0,
                 effectiveProfile.Iterations,
                 effectiveProfile.Parallelism,
+                512,
                 MasterKeyBits,
+                "Sequential",
+                "PMI16",
                 V10MasterKdf.PasswordMode,
                 V10MasterKdf.KdfInputMode,
                 1024,
@@ -1487,20 +1490,6 @@ public sealed partial class KalynaContainerService
             + " is unavailable.");
     }
 
-    private static Argon2Profile GetArgon2Profile(ContainerHeader header)
-    {
-        var profile = new Argon2Profile(header.Argon2MemoryKiB, header.Argon2Iterations, header.Argon2Parallelism);
-        try
-        {
-            PasswordKeyService.ValidateArgon2Profile(profile);
-            return profile;
-        }
-        catch (ArgumentOutOfRangeException ex)
-        {
-            throw new InvalidDataException("Container header contains an invalid Argon2id profile.", ex);
-        }
-    }
-
     private static void ValidateHeader(ContainerHeader header)
     {
         EncryptionSuiteParameters parameters = EncryptionSuiteCatalog.FromAlgorithm(header.Algorithm);
@@ -1519,7 +1508,10 @@ public sealed partial class KalynaContainerService
                 header.TweakMode,
                 parameters.TweakBytes > 0 ? EncryptionSuiteCatalog.ThreefishTweakMode : "None",
                 StringComparison.Ordinal)
-            || header.Argon2OutputBits != MasterKeyBits)
+            || header.KdfBranchOutputBits != 512
+            || header.MasterKeyBits != MasterKeyBits
+            || !string.Equals(header.KdfExecutionMode, "Sequential", StringComparison.Ordinal)
+            || !string.Equals(header.KdfMemoryMode, "PMI16", StringComparison.Ordinal))
         {
             throw new InvalidDataException("Container header contains invalid v10 suite parameters.");
         }
@@ -1882,7 +1874,10 @@ public sealed partial class KalynaContainerService
         int Argon2MemoryKiB,
         int Argon2Iterations,
         int Argon2Parallelism,
-        int Argon2OutputBits,
+        int KdfBranchOutputBits,
+        int MasterKeyBits,
+        string? KdfExecutionMode,
+        string? KdfMemoryMode,
         string? PasswordMode,
         string? KdfInputMode,
         int GeneratedPasswordBits,

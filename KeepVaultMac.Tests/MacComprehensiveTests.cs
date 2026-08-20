@@ -48,7 +48,9 @@ internal static partial class MacComprehensiveTests
             ("every Mach-O in the release bundle carries a hybrid signature", TestBundleMachOClosureAsync),
             ("the companion QR scanner is checked against the pinned keys", TestCompanionScannerAsync),
             ("v10 primitives against independent second implementations", TestV10PrimitivesAsync),
+            ("v10 creation PIN policy and weak-pattern rejection", TestPinCreationPolicyAsync),
             ("v10 master KDF: credential binding, PMI range and round chaining", TestV10MasterKdfAsync),
+            ("v10 peak memory stays at one Argon2 matrix, and the header leaks nothing", TestV10CostAndHeaderAsync),
             ("SHA3, Skein, Kalyna and Threefish reference vectors", TestPrimitiveVectorsAsync),
             ("ML-DSA-87 managed/reference interoperability", TestMldsaInteropAsync),
             ("randomised differential testing against every reference library", TestReferenceDifferentialAsync),
@@ -60,8 +62,8 @@ internal static partial class MacComprehensiveTests
             ("salt and nonce for every single-round suite without prepared entropy", TestUnpreparedEncryptionParametersAsync),
             ("v9 per-chunk nonces across a multi-chunk archive", TestPerChunkNoncesAsync),
             ("MARS and SHACAL-2 published vectors and CTR behaviour", TestCascadeCipherVectorsAsync),
-            ("KPAR2-v2 repair, authentication and transplantation rejection", TestRecoveryAsync),
-            ("KPAR2-v2 accepts every catalogued suite, not just the first two", TestRecoveryAcrossSuitesAsync),
+            ("KPAR2-v3 repair, authentication and transplantation rejection", TestRecoveryAsync),
+            ("KPAR2-v3 accepts every catalogued suite, not just the first two", TestRecoveryAcrossSuitesAsync),
             ("cryptographic erase ordering and hard-link refusal", TestCryptographicEraseAsync),
             ("verified original deletion refuses on any mismatch", TestVerifiedOriginalDeletionAsync),
             // The GUI groups run last: they drive the real window through
@@ -513,7 +515,7 @@ internal static partial class MacComprehensiveTests
             try
             {
                 Require(
-                    salt.Bytes.Length == PasswordKeyService.SaltSize,
+                    salt.Bytes.Length == EntropyMixer.SaltPairBytes,
                     $"{suite} produced a salt of the wrong width.");
                 Require(
                     nonce.Bytes.Length == parameters.NonceBytes,
@@ -644,7 +646,100 @@ internal static partial class MacComprehensiveTests
             !narrow.SequenceEqual(wide[..32]),
             "A narrow role key is a prefix of a wider one from the same role.");
 
+        // --- byte-exact Known Answer Test (KAT) for C_j (RoleContext) ---------
+        // Format: LP(D_ROLE) || LE32(10) || LP(Algorithm) || LE32(StageIndex) || LP(Cipher) || LP(Purpose) || LE32(KeyBits)
+        // Test vector: Algorithm="Kalyna-512", StageIndex=0, Cipher="Kalyna-512", Purpose=Encryption, KeyBits=512
+        byte[] expectedRoleContext =
+        [
+            // LP("Kalyna-ZPAQ/v10/RoleKey"): 4-byte LE length (23) + UTF-8 bytes
+            0x17, 0x00, 0x00, 0x00,
+            0x4B, 0x61, 0x6C, 0x79, 0x6E, 0x61, 0x2D, 0x5A, 0x50, 0x41, 0x51, 0x2F,
+            0x76, 0x31, 0x30, 0x2F, 0x52, 0x6F, 0x6C, 0x65, 0x4B, 0x65, 0x79,
+            // LE32(10)
+            0x0A, 0x00, 0x00, 0x00,
+            // LP("Kalyna-512"): 4-byte LE length (10) + UTF-8 bytes
+            0x0A, 0x00, 0x00, 0x00,
+            0x4B, 0x61, 0x6C, 0x79, 0x6E, 0x61, 0x2D, 0x35, 0x31, 0x32,
+            // LE32(0)
+            0x00, 0x00, 0x00, 0x00,
+            // LP("Kalyna-512"): 4-byte LE length (10) + UTF-8 bytes
+            0x0A, 0x00, 0x00, 0x00,
+            0x4B, 0x61, 0x6C, 0x79, 0x6E, 0x61, 0x2D, 0x35, 0x31, 0x32,
+            // LP("Encryption"): 4-byte LE length (10) + UTF-8 bytes
+            0x0A, 0x00, 0x00, 0x00,
+            0x45, 0x6E, 0x63, 0x72, 0x79, 0x70, 0x74, 0x69, 0x6F, 0x6E,
+            // LE32(512)
+            0x00, 0x02, 0x00, 0x00
+        ];
+
+        byte[] actualRoleContext = SuiteKeySchedule.RoleContext("Kalyna-512", 0, "Kalyna-512", KeyRolePurpose.Encryption, 512);
+        Require(FixedEqual(actualRoleContext, expectedRoleContext), "Byte-exact KAT for RoleContext failed.");
+
         Zero(key, message, mac, otherKey, prk, info, left, right, master, master2, narrow, wide);
+        return Task.CompletedTask;
+    }
+
+    private static Task TestPinCreationPolicyAsync()
+    {
+        // Valid creation PINs
+        string[] validPins = ["428317", "84920153", "19482736", "3819405627", "9274018365"];
+        foreach (string pin in validPins)
+        {
+            PinPolicyAnalysis analysis = V10KeyDerivation.AnalyzePinForCreation(pin);
+            Require(analysis.IsAccepted, $"Valid PIN '{pin}' was rejected: {string.Join(", ", analysis.Violations)}");
+            V10KeyDerivation.ValidatePinForCreation(pin);
+            V10KeyDerivation.ValidatePinSyntax(pin);
+        }
+
+        // Invalid syntax PINs
+        string[] syntaxInvalidPins = ["", "12345", "12345678901234567", "12a456", "12 456", "12-456", "12345!"];
+        foreach (string pin in syntaxInvalidPins)
+        {
+            PinPolicyAnalysis analysis = V10KeyDerivation.AnalyzePinForCreation(pin);
+            Require(!analysis.IsAccepted, $"Syntax-invalid PIN '{pin}' was accepted.");
+            bool threwCreation = false;
+            try { V10KeyDerivation.ValidatePinForCreation(pin); } catch (Exception) { threwCreation = true; }
+            Require(threwCreation, $"ValidatePinForCreation did not throw for syntax-invalid PIN '{pin}'.");
+
+            bool threwSyntax = false;
+            try { V10KeyDerivation.ValidatePinSyntax(pin); } catch (Exception) { threwSyntax = true; }
+            Require(threwSyntax, $"ValidatePinSyntax did not throw for syntax-invalid PIN '{pin}'.");
+        }
+
+        // Creation-policy violation PINs (valid syntax 6-16 digits, but weak)
+        (string Pin, PinPolicyViolation ExpectedViolation)[] weakPins =
+        [
+            ("000000", PinPolicyViolation.RepeatedDigitsTriple),
+            ("111111", PinPolicyViolation.RepeatedDigitsTriple),
+            ("111222", PinPolicyViolation.RepeatedDigitsTriple),
+            ("123456", PinPolicyViolation.SequentialAscending),
+            ("012345", PinPolicyViolation.SequentialAscending),
+            ("987654", PinPolicyViolation.SequentialDescending),
+            ("654321", PinPolicyViolation.SequentialDescending),
+            ("121212", PinPolicyViolation.Blocklisted),
+            ("112233", PinPolicyViolation.Blocklisted),
+            ("123123", PinPolicyViolation.Blocklisted),
+            ("12341234", PinPolicyViolation.Blocklisted),
+            ("111234", PinPolicyViolation.RepeatedDigitsTriple),
+            ("112211", PinPolicyViolation.NotEnoughDistinctDigits),
+            ("112212", PinPolicyViolation.NotEnoughDistinctDigits),
+        ];
+
+        foreach (var (pin, expectedViolation) in weakPins)
+        {
+            PinPolicyAnalysis analysis = V10KeyDerivation.AnalyzePinForCreation(pin);
+            Require(!analysis.IsAccepted, $"Weak PIN '{pin}' was accepted by creation policy.");
+            Require(analysis.Violations.Contains(expectedViolation),
+                $"Weak PIN '{pin}' did not report expected violation '{expectedViolation}'. Got: {string.Join(", ", analysis.Violations)}");
+
+            bool threw = false;
+            try { V10KeyDerivation.ValidatePinForCreation(pin); } catch (PinPolicyException) { threw = true; }
+            Require(threw, $"ValidatePinForCreation did not throw PinPolicyException for weak PIN '{pin}'.");
+
+            // Extraction syntax validation must pass for these weak PINs (so existing archives can still be opened)
+            V10KeyDerivation.ValidatePinSyntax(pin);
+        }
+
         return Task.CompletedTask;
     }
 
@@ -1612,6 +1707,201 @@ internal static partial class MacComprehensiveTests
         Zero(payload, changed);
     }
 
+    /// <summary>
+    /// Two things the v10 derivation promises and that nothing else checks: the
+    /// two Argon2id branches never hold their matrices at the same time, and the
+    /// derived memory cost never reaches the header.
+    /// </summary>
+    /// <remarks>
+    /// Both are easy to lose by accident. A <c>Task.WhenAll</c> over the two
+    /// branches would double peak memory and still produce the right key, and
+    /// on a machine with enough RAM nothing would look wrong. A field added to
+    /// the header later could publish the cost the derivation deliberately keeps
+    /// secret, and every existing test would still pass.
+    /// </remarks>
+    private static async Task TestV10CostAndHeaderAsync()
+    {
+        await TestParanoiaPeakMemoryAsync().ConfigureAwait(false);
+        await TestHeaderPublishesNoDerivedCostAsync().ConfigureAwait(false);
+    }
+
+    private static async Task TestParanoiaPeakMemoryAsync()
+    {
+        EncryptionSuiteParameters parameters =
+            EncryptionSuiteCatalog.Get(EncryptionSuite.ParanoiaCascade);
+        string factorA = GeneratedFactor('A');
+        string factorB = GeneratedFactor('B');
+        var salts = new V10Salts(
+            DeterministicSalt(0x11), DeterministicSalt(0x22),
+            DeterministicSalt(0x33), DeterministicSalt(0x44));
+
+        // The cost this credential set selects, computed the same way the
+        // derivation computes it. Asserting against a fixed 2 GiB would pass
+        // even if both branches ran at once and each happened to pick a small
+        // profile.
+        byte[] sha3Credential = V10MasterKdf.DeriveSha3CredentialHash(
+            parameters.Algorithm, UserPassword, UserPin,
+            HexToBytes(factorA), HexToBytes(factorB));
+        byte[] skeinCredential = V10MasterKdf.DeriveSkeinCredentialHash(
+            parameters.Algorithm, UserPassword, UserPin,
+            HexToBytes(factorA), HexToBytes(factorB));
+        (_, uint memoryKiB) = V10MasterKdf.DerivePmi(
+            parameters.Algorithm, 1, sha3Credential, skeinCredential,
+            ReadOnlySpan<byte>.Empty, salts.Sha3Round1, salts.SkeinRound1);
+        Zero(sha3Credential, skeinCredential);
+
+        long oneMatrixBytes = (long)memoryKiB * 1024;
+        using var process = Process.GetCurrentProcess();
+        process.Refresh();
+        long baseline = process.WorkingSet64;
+        long peak = baseline;
+
+        using var sampling = new CancellationTokenSource();
+        Task sampler = Task.Run(
+            async () =>
+            {
+                while (!sampling.IsCancellationRequested)
+                {
+                    using Process current = Process.GetCurrentProcess();
+                    long resident = current.WorkingSet64;
+                    if (resident > Interlocked.Read(ref peak))
+                    {
+                        Interlocked.Exchange(ref peak, resident);
+                    }
+
+                    try
+                    {
+                        await Task.Delay(25, sampling.Token).ConfigureAwait(false);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        return;
+                    }
+                }
+            },
+            CancellationToken.None);
+
+        try
+        {
+            V10KeyDerivation.MasterResult master = V10KeyDerivation.DeriveMaster(
+                parameters, UserPassword, UserPin, factorA, factorB, salts, null, CancellationToken.None);
+            CryptographicOperations.ZeroMemory(master.Master);
+        }
+        finally
+        {
+            sampling.Cancel();
+            await sampler.ConfigureAwait(false);
+        }
+
+        long growth = Interlocked.Read(ref peak) - baseline;
+
+        // One matrix plus half of another. Four sequential rounds each stay
+        // under this; two branches held at once could not.
+        long ceiling = oneMatrixBytes + (oneMatrixBytes / 2);
+        Require(
+            growth < ceiling,
+            $"Paranoia peaked at {growth / (1024 * 1024)} MiB over baseline, "
+            + $"more than one {oneMatrixBytes / (1024 * 1024)} MiB Argon2 matrix allows.");
+
+        // And it really did allocate one: a derivation that quietly ran at a
+        // fraction of the cost would also stay under the ceiling.
+        Require(
+            growth > oneMatrixBytes / 2,
+            $"Paranoia peaked at only {growth / (1024 * 1024)} MiB over baseline, "
+            + "which is too little for even one Argon2 matrix.");
+    }
+
+    private static async Task TestHeaderPublishesNoDerivedCostAsync()
+    {
+        string root = CreateTempRoot("keep-vault-v10-header-");
+        try
+        {
+            AddMouseSamplesUntilReady();
+            using GeneratedArchiveEntropy entropy = EntropyMixer.CreateArchiveEntropy();
+            var containers = new KalynaContainerService();
+            string path = Path.Combine(root, "header.kzpaq");
+            byte[] payload = RandomNumberGenerator.GetBytes(4096);
+            await using (var source = new MemoryStream(payload, writable: false))
+            {
+                await containers.EncryptZpaqStreamWithPreparedEntropyAsync(
+                    source,
+                    path,
+                    UserPassword,
+                    UserPin,
+                    entropy.FirstPassword,
+                    entropy.SecondPassword,
+                    EncryptionSuite.ParanoiaCascade,
+                    entropy,
+                    null,
+                    null,
+                    CancellationToken.None).ConfigureAwait(false);
+            }
+
+            byte[] headerBytes = ReadHeaderBytes(path);
+            using JsonDocument document = JsonDocument.Parse(headerBytes);
+            JsonElement header = document.RootElement;
+
+            // The exact field set. A field added later cannot smuggle a
+            // secret-derived value into the header without this failing.
+            string[] expected =
+            [
+                "Version", "Algorithm", "BlockBits", "CounterEndian", "EncryptionKeyBits",
+                "Sha3MacKeyBits", "Sha3TagBits", "SkeinMacKeyBits", "SkeinTagBits",
+                "SaltBits", "Salt", "NonceBits", "Nonce", "TweakBits", "TweakMode", "Tweak",
+                "Hint", "Argon2MemoryKiB", "Argon2Iterations", "Argon2Parallelism",
+                "KdfBranchOutputBits", "MasterKeyBits", "KdfExecutionMode", "KdfMemoryMode",
+                "PasswordMode", "KdfInputMode", "GeneratedPasswordBits",
+                "GeneratedPasswordFactorCount", "KdfMode",
+                "SecondSaltBits", "SecondSalt", "SecondNonceBits", "SecondNonce",
+            ];
+            string[] actual = [.. header.EnumerateObject().Select(property => property.Name)];
+            Require(
+                actual.Length == expected.Length && !actual.Except(expected, StringComparer.Ordinal).Any(),
+                $"The v10 header field set changed: {string.Join(", ", actual.Except(expected, StringComparer.Ordinal))}");
+
+            Require(
+                header.GetProperty("Argon2MemoryKiB").GetInt32() == 0,
+                "The header published the Argon2id memory cost.");
+
+            // No integer field anywhere in the header may fall inside the range
+            // the derived cost lives in. That catches a cost written under some
+            // other name as well as under its own.
+            foreach (JsonProperty property in header.EnumerateObject())
+            {
+                if (property.Value.ValueKind == JsonValueKind.Number
+                    && property.Value.TryGetInt64(out long value)
+                    && value >= V10MasterKdf.MemoryMinKiB
+                    && value <= V10MasterKdf.MemoryMaxKiB)
+                {
+                    throw new InvalidOperationException(
+                        $"Header field {property.Name} holds {value}, inside the derived Argon2id memory range.");
+                }
+            }
+
+            Zero(payload, headerBytes);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    private static byte[] ReadHeaderBytes(string path)
+    {
+        using FileStream input = File.OpenRead(path);
+        input.Position = 7;
+        Span<byte> lengthBytes = stackalloc byte[4];
+        input.ReadExactly(lengthBytes);
+        byte[] headerBytes = new byte[BinaryPrimitives.ReadInt32LittleEndian(lengthBytes)];
+        input.ReadExactly(headerBytes);
+        return headerBytes;
+    }
+
+    private static byte[] DeterministicSalt(byte seed) =>
+        [.. Enumerable.Range(0, V10Salts.SaltBytes).Select(index => (byte)(seed ^ (index * 31)))];
+
+    private static byte[] HexToBytes(string hex) => Convert.FromHexString(hex);
+
     private static async Task TestContainersAsync()
     {
         string root = CreateTempRoot("keep-vault-container-full-");
@@ -2300,8 +2590,17 @@ internal static partial class MacComprehensiveTests
                 header.GetProperty("NonceBits").GetInt32() == parameters.NonceBytes * 8,
                 "Container nonce size mismatch.");
             Require(
-                header.GetProperty("Argon2OutputBits").GetInt32() == 1024,
+                header.GetProperty("KdfBranchOutputBits").GetInt32() == 512,
+                "Container branch output size mismatch.");
+            Require(
+                header.GetProperty("MasterKeyBits").GetInt32() == 1024,
                 "Container master key size mismatch.");
+            Require(
+                header.GetProperty("KdfExecutionMode").GetString() == "Sequential",
+                "Container KdfExecutionMode mismatch.");
+            Require(
+                header.GetProperty("KdfMemoryMode").GetString() == "PMI16",
+                "Container KdfMemoryMode mismatch.");
             if (suite == EncryptionSuite.ThreefishOverKalyna)
             {
                 // The split the whole construction rests on, asserted against
@@ -2311,7 +2610,7 @@ internal static partial class MacComprehensiveTests
                 // 192 cipher-key bytes plus the two MAC keys.
                 Require(header.GetProperty("EncryptionKeyBits").GetInt32() == 192 * 8, "Cascade key is not 192 bytes.");
                 Require(header.GetProperty("NonceBits").GetInt32() == 192 * 8, "Cascade nonce is not 192 bytes.");
-                Require(header.GetProperty("Argon2OutputBits").GetInt32() == 1024, "Cascade master is not 1024 bits.");
+                Require(header.GetProperty("MasterKeyBits").GetInt32() == 1024, "Cascade master is not 1024 bits.");
             }
 
             if (suite == EncryptionSuite.ParanoiaCascade)
@@ -2322,7 +2621,7 @@ internal static partial class MacComprehensiveTests
                 // 1024-bit role value, so the cascade could be any width.
                 Require(header.GetProperty("EncryptionKeyBits").GetInt32() == 376 * 8, "Paranoia key is not 376 bytes.");
                 Require(header.GetProperty("NonceBits").GetInt32() == 268 * 8, "Paranoia nonce is not 268 bytes.");
-                Require(header.GetProperty("Argon2OutputBits").GetInt32() == 1024, "Paranoia master is not 1024 bits.");
+                Require(header.GetProperty("MasterKeyBits").GetInt32() == 1024, "Paranoia master is not 1024 bits.");
             }
             Require(input.Length - input.Position > 64 + 128, "Container lacks two tags and ciphertext.");
         }

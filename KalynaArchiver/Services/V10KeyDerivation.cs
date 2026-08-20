@@ -30,7 +30,11 @@ internal static class V10KeyDerivation
     /// </summary>
     public sealed record MasterResult(byte[] Master, uint Round1MemoryKiB, uint? Round2MemoryKiB);
 
-    public static void ValidatePin(string? pin)
+    public const int MinDistinctPinDigits = 4;
+
+    public static void ValidatePin(string? pin) => ValidatePinSyntax(pin);
+
+    public static void ValidatePinSyntax(string? pin)
     {
         if (string.IsNullOrEmpty(pin))
         {
@@ -51,6 +55,182 @@ internal static class V10KeyDerivation
             }
         }
     }
+
+    public static PinPolicyAnalysis AnalyzePinForCreation(string? pin)
+    {
+        string raw = pin ?? string.Empty;
+        var violations = new List<PinPolicyViolation>();
+
+        if (string.IsNullOrEmpty(raw))
+        {
+            violations.Add(PinPolicyViolation.TooShort);
+            return new PinPolicyAnalysis(0, 0, violations);
+        }
+
+        bool hasNonDigit = false;
+        foreach (char c in raw)
+        {
+            if (c is < '0' or > '9')
+            {
+                hasNonDigit = true;
+                break;
+            }
+        }
+
+        if (hasNonDigit)
+        {
+            violations.Add(PinPolicyViolation.NonDigit);
+        }
+
+        if (raw.Length < MinPinLength)
+        {
+            violations.Add(PinPolicyViolation.TooShort);
+        }
+        else if (raw.Length > MaxPinLength)
+        {
+            violations.Add(PinPolicyViolation.TooLong);
+        }
+
+        if (hasNonDigit)
+        {
+            return new PinPolicyAnalysis(raw.Length, 0, violations);
+        }
+
+        int distinctCount = raw.Distinct().Count();
+        if (distinctCount < MinDistinctPinDigits)
+        {
+            violations.Add(PinPolicyViolation.NotEnoughDistinctDigits);
+        }
+
+        if (HasRepeatedTriple(raw))
+        {
+            violations.Add(PinPolicyViolation.RepeatedDigitsTriple);
+        }
+
+        if (HasSequentialAscending(raw))
+        {
+            violations.Add(PinPolicyViolation.SequentialAscending);
+        }
+
+        if (HasSequentialDescending(raw))
+        {
+            violations.Add(PinPolicyViolation.SequentialDescending);
+        }
+
+        if (IsBlocklistedOrRepetitive(raw))
+        {
+            violations.Add(PinPolicyViolation.Blocklisted);
+        }
+
+        return new PinPolicyAnalysis(raw.Length, distinctCount, violations);
+    }
+
+    public static void ValidatePinForCreation(string? pin)
+    {
+        PinPolicyAnalysis analysis = AnalyzePinForCreation(pin);
+        if (!analysis.IsAccepted)
+        {
+            throw new PinPolicyException(analysis);
+        }
+    }
+
+    private static bool HasRepeatedTriple(string pin)
+    {
+        for (int i = 0; i <= pin.Length - 3; i++)
+        {
+            if (pin[i] == pin[i + 1] && pin[i] == pin[i + 2])
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool HasSequentialAscending(string pin)
+    {
+        for (int i = 0; i <= pin.Length - 3; i++)
+        {
+            if (pin[i + 1] == pin[i] + 1 && pin[i + 2] == pin[i] + 2)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool HasSequentialDescending(string pin)
+    {
+        for (int i = 0; i <= pin.Length - 3; i++)
+        {
+            if (pin[i + 1] == pin[i] - 1 && pin[i + 2] == pin[i] - 2)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool IsBlocklistedOrRepetitive(string pin)
+    {
+        if (CommonWeakPins.Contains(pin))
+        {
+            return true;
+        }
+
+        for (int patternLength = 2; patternLength <= 4 && patternLength * 2 <= pin.Length; patternLength++)
+        {
+            if (pin.Length % patternLength == 0)
+            {
+                string pattern = pin[..patternLength];
+                bool allMatch = true;
+                for (int i = patternLength; i < pin.Length; i += patternLength)
+                {
+                    if (pin.Substring(i, patternLength) != pattern)
+                    {
+                        allMatch = false;
+                        break;
+                    }
+                }
+
+                if (allMatch)
+                {
+                    return true;
+                }
+            }
+        }
+
+        if (pin.Length % 2 == 0)
+        {
+            bool isPaired = true;
+            for (int i = 0; i < pin.Length; i += 2)
+            {
+                if (pin[i] != pin[i + 1])
+                {
+                    isPaired = false;
+                    break;
+                }
+            }
+
+            if (isPaired)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static readonly HashSet<string> CommonWeakPins = new(StringComparer.Ordinal)
+    {
+        "121212", "12121212", "1212121212", "121212121212",
+        "131313", "141414", "151515", "161616", "171717", "181818", "191919", "202020",
+        "696969", "112233", "11223344", "123123", "12341234", "1234512345",
+        "246810", "135791", "987654", "654321", "123456", "012345", "543210",
+        "000000", "111111", "222222", "333333", "444444", "555555", "666666", "777777", "888888", "999999",
+    };
 
     /// <summary>
     /// Parses one key-sheet factor into locked memory.
@@ -124,54 +304,51 @@ internal static class V10KeyDerivation
         }
 
         string algorithm = parameters.Algorithm;
-        byte[]? sha3Credential = null;
-        byte[]? skeinCredential = null;
-        byte[]? round1Master = null;
-        byte[]? round2Master = null;
+        using LockedSensitiveBuffer sha3Credential = LockedSensitiveBuffer.Create(V10MasterKdf.CredentialHashBytes);
+        using LockedSensitiveBuffer skeinCredential = LockedSensitiveBuffer.Create(V10MasterKdf.CredentialHashBytes);
+
+        V10MasterKdf.DeriveSha3CredentialHash(
+            algorithm, userPassword, pin, factorA.Bytes, factorB.Bytes, sha3Credential.Bytes);
+        V10MasterKdf.DeriveSkeinCredentialHash(
+            algorithm, userPassword, pin, factorA.Bytes, factorB.Bytes, skeinCredential.Bytes);
+
+        cancellationToken.ThrowIfCancellationRequested();
+        (_, uint memory1) = V10MasterKdf.DerivePmi(
+            algorithm, 1, sha3Credential.Bytes, skeinCredential.Bytes,
+            ReadOnlySpan<byte>.Empty, salts.Sha3Round1, salts.SkeinRound1);
+        progress?.Report(paranoia ? "Key derivation, round 1 of 2" : "Key derivation");
+
+        LockedSensitiveBuffer round1Master = LockedSensitiveBuffer.Create(V10MasterKdf.MasterBytes);
         try
         {
-            sha3Credential = V10MasterKdf.DeriveSha3CredentialHash(
-                algorithm, userPassword, pin, factorA.Bytes, factorB.Bytes);
-            skeinCredential = V10MasterKdf.DeriveSkeinCredentialHash(
-                algorithm, userPassword, pin, factorA.Bytes, factorB.Bytes);
-
-            cancellationToken.ThrowIfCancellationRequested();
-            (_, uint memory1) = V10MasterKdf.DerivePmi(
-                algorithm, 1, sha3Credential, skeinCredential,
-                ReadOnlySpan<byte>.Empty, salts.Sha3Round1, salts.SkeinRound1);
-            progress?.Report(paranoia ? "Key derivation, round 1 of 2" : "Key derivation");
-            round1Master = V10MasterKdf.DeriveRoundMaster(
-                algorithm, 1, sha3Credential, skeinCredential,
-                salts.Sha3Round1, salts.SkeinRound1, secret: null, memory1);
+            V10MasterKdf.DeriveRoundMaster(
+                algorithm, 1, sha3Credential.Bytes, skeinCredential.Bytes,
+                salts.Sha3Round1, salts.SkeinRound1, ReadOnlySpan<byte>.Empty, memory1, round1Master.Bytes);
 
             if (!paranoia)
             {
-                byte[] onlyMaster = round1Master;
-                round1Master = null;
+                byte[] onlyMaster = (byte[])round1Master.Bytes.Clone();
                 return new MasterResult(onlyMaster, memory1, null);
             }
 
             cancellationToken.ThrowIfCancellationRequested();
             (_, uint memory2) = V10MasterKdf.DerivePmi(
-                algorithm, 2, sha3Credential, skeinCredential,
-                round1Master, salts.Sha3Round2!, salts.SkeinRound2!);
+                algorithm, 2, sha3Credential.Bytes, skeinCredential.Bytes,
+                round1Master.Bytes, salts.Sha3Round2!, salts.SkeinRound2!);
             progress?.Report("Key derivation, round 2 of 2");
             // The first master is the Argon2id secret here, not the password:
             // it makes round two unreachable without round one, and it keeps
             // the credentials themselves in the same position in both rounds.
-            round2Master = V10MasterKdf.DeriveRoundMaster(
-                algorithm, 2, sha3Credential, skeinCredential,
-                salts.Sha3Round2!, salts.SkeinRound2!, round1Master, memory2);
-            byte[] master = round2Master;
-            round2Master = null;
+            using LockedSensitiveBuffer round2Master = LockedSensitiveBuffer.Create(V10MasterKdf.MasterBytes);
+            V10MasterKdf.DeriveRoundMaster(
+                algorithm, 2, sha3Credential.Bytes, skeinCredential.Bytes,
+                salts.Sha3Round2!, salts.SkeinRound2!, round1Master.Bytes, memory2, round2Master.Bytes);
+            byte[] master = (byte[])round2Master.Bytes.Clone();
             return new MasterResult(master, memory1, memory2);
         }
         finally
         {
-            if (sha3Credential is not null) CryptographicOperations.ZeroMemory(sha3Credential);
-            if (skeinCredential is not null) CryptographicOperations.ZeroMemory(skeinCredential);
-            if (round1Master is not null) CryptographicOperations.ZeroMemory(round1Master);
-            if (round2Master is not null) CryptographicOperations.ZeroMemory(round2Master);
+            round1Master.Dispose();
         }
     }
 
@@ -199,4 +376,35 @@ internal static class V10KeyDerivation
             CryptographicOperations.ZeroMemory(result.Master);
         }
     }
+}
+
+public enum PinPolicyViolation
+{
+    TooShort,
+    TooLong,
+    NonDigit,
+    NotEnoughDistinctDigits,
+    RepeatedDigitsTriple,
+    SequentialAscending,
+    SequentialDescending,
+    Blocklisted,
+}
+
+public sealed record PinPolicyAnalysis(
+    int Length,
+    int DistinctDigits,
+    IReadOnlyList<PinPolicyViolation> Violations)
+{
+    public bool IsAccepted => Violations.Count == 0;
+}
+
+public sealed class PinPolicyException : ArgumentException
+{
+    public PinPolicyException(PinPolicyAnalysis analysis)
+        : base($"Die PIN entspricht nicht den Richtlinien für die Neuerstellung: {string.Join(", ", analysis.Violations)}")
+    {
+        Analysis = analysis;
+    }
+
+    public PinPolicyAnalysis Analysis { get; }
 }

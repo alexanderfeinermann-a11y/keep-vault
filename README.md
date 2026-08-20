@@ -391,15 +391,17 @@ diversity. Every output is the XOR of two independent things:
 - `SecRandomCopyBytes` as the primary CSPRNG
 - a domain-separated SHA3-512 expansion of the relevant mouse pool
 
-The factors, salt and all three nonce parts are generated together and atomically
-from one epoch, each from its own pool. Afterwards every pool is replaced, zeroed
+The factors, both salts and all three nonce parts are generated together and
+atomically from one epoch, each from its own pool. Afterwards every pool is replaced, zeroed
 while locked, and its counter reset to zero — so zero in that state means
-*consumed*, not *insufficient*. Salt and the full nonce stay in locked RAM until
-encryption begins and are taken exactly once. If that attempt fails after they
-were taken, A and B stay valid, but the retry derives a fresh salt and fresh
-nonces from a new epoch, so a nonce is never reused under the same key.
+*consumed*, not *insufficient*. Both salts and the full nonce stay in locked
+RAM until encryption begins and are taken exactly once. If that attempt fails
+after they were taken, A and B stay valid, but the retry derives fresh salts and
+fresh nonces from a new epoch, so a nonce is never reused under the same key.
 
-Salt is 64 bytes for every suite. The public 16-byte Threefish tweak is derived
+Each round carries a 1024-bit salt pair — 512 bits for the SHA3 branch and 512
+for the Skein branch — and the two are refused if they are ever equal. Paranoia
+carries two such pairs. The public 16-byte Threefish tweak is derived
 deterministically and domain-separated from the nonce and stored in the
 authenticated header. Salt, nonce and tweak do not need to be secret.
 
@@ -415,8 +417,12 @@ factors must be printed or deliberately exported as a test PDF.
 - Page order: factor A, a genuinely blank separator page carrying the
   installation instructions, factor B.
 - Each secret page names the suite, the device name, the archive path, exactly
-  one factor, a blank handwritten field for the user password, and that factor's
-  QR code twice.
+  one 1024-bit factor in 32 groups of eight hex characters, a blank handwritten
+  field for the user password, and that factor's QR code twice.
+- The PIN is deliberately **not** on the sheet, and the sheet says so. The
+  handwriting field for the passphrase is already a compromise; a sheet carrying
+  the passphrase, the PIN and a factor would hold three of the four credentials
+  at once.
 - A and B are meant to be stored separately and offline.
 - **Save test PDF** deliberately writes both factors to the chosen volume
   permanently and is not a safe default path.
@@ -465,7 +471,9 @@ UBI feed-forward to obtain the raw Threefish block.
 
 CTR authenticates nothing by itself. Tamper protection comes from HMAC-SHA3-512
 with a 64-byte key and tag together with Skein's native keyed mode with a
-128-byte key and tag. Both keys are disjoint ranges of the Argon2id output.
+128-byte key and tag. Each MAC key is derived from its own role context in the
+same schedule the cipher keys use — not carved out of a shared buffer, and not
+derivable from any cipher key.
 
 Unencrypted `.zpaq` archives instead get mandatory `<archive>.sha3` and
 `<archive>.skein` sidecars. These detect corruption but, without a private
@@ -476,7 +484,7 @@ archive and both sidecars.
 
 ## Bit-error correction
 
-Every archive gets a non-backward-compatible KPAR2-v2 sidecar
+Every archive gets a non-backward-compatible KPAR2-v3 sidecar
 `<archive>.kpar2`:
 
 - Reed-Solomon `RS(20,3)`: 20 data plus 3 parity shards, 15 percent overhead

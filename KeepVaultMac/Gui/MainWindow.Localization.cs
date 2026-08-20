@@ -145,8 +145,8 @@ public sealed partial class MainWindow
             "encrypt" => en ? "Encrypt archive" : "Archiv verschlüsseln",
             "cipherSuite" => en ? "Cipher suite" : "Verfahren",
             "argon2Profile" => en
-                ? "Argon2id: 1 GiB memory, 4 iterations, parallelism 4, locked RAM required"
-                : "Argon2id: 1 GiB Speicher, 4 Iterationen, Parallelität 4, gesperrter RAM erforderlich",
+                ? "Two sequential KDF paths (1 GiB to just under 2 GiB via PMI16, t=4, p=4) with shared 1024-bit master (Paranoia: 4 Argon2id passes, locked RAM required)"
+                : "Zwei sequenzielle KDF-Pfade (1 GiB bis knapp 2 GiB via PMI16, t=4, p=4) mit gemeinsamem 1024-Bit-Master (Paranoia: 4 Argon2id-Aufrufe, gesperrter RAM erforderlich)",
             "deleteOriginals" => en
                 ? "Delete original files after a verified comparison"
                 : "Originaldateien nach geprüftem Abgleich löschen",
@@ -192,6 +192,14 @@ public sealed partial class MainWindow
             "pinAccepted" => en
                 ? "PIN accepted."
                 : "PIN akzeptiert.",
+            "pinTooShort" => en ? "Use at least {0} digits." : "Mindestens {0} Ziffern verwenden.",
+            "pinTooLong" => en ? "Use no more than {0} digits." : "Höchstens {0} Ziffern verwenden.",
+            "pinNonDigit" => en ? "The PIN must consist of digits only." : "Die PIN darf nur aus Ziffern bestehen.",
+            "pinDistinct" => en ? "Use at least {0} distinct digits." : "Mindestens {0} verschiedene Ziffern verwenden.",
+            "pinRepeatedTriple" => en ? "Do not repeat the same digit 3 or more times consecutively." : "Keine 3 gleichen Ziffern hintereinander verwenden.",
+            "pinSequentialAscending" => en ? "Do not use 3 or more ascending consecutive digits." : "Keine 3 aufsteigenden Ziffernfolgen verwenden.",
+            "pinSequentialDescending" => en ? "Do not use 3 or more descending consecutive digits." : "Keine 3 absteigenden Ziffernfolgen verwenden.",
+            "pinBlocklisted" => en ? "This PIN pattern is too predictable." : "Dieses PIN-Muster ist leicht erratbar.",
             "entropyCollecting" => en
                 ? "Collecting: total {0}; A {1}+{2}/{10}; B {3}+{4}/{10}; salt-SHA3 {5}/{10}; salt-Skein {6}/{10}; nonce 1 {7}/{10}; nonce 2 {8}/{10}; nonce 3 {9}/{10}"
                 : "Sammlung: gesamt {0}; A {1}+{2}/{10}; B {3}+{4}/{10}; Salt-SHA3 {5}/{10}; Salt-Skein {6}/{10}; Nonce 1 {7}/{10}; Nonce 2 {8}/{10}; Nonce 3 {9}/{10}",
@@ -318,7 +326,7 @@ public sealed partial class MainWindow
             "zpaqExtractFailed" => en ? "ZPAQ could not extract the archive." : "ZPAQ konnte das Archiv nicht entpacken.",
             "zpaqListFailed" => en ? "ZPAQ could not list the archive." : "ZPAQ konnte den Archivinhalt nicht anzeigen.",
             "extractedTo" => en ? "Extracted to" : "Entpackt nach",
-            "emergencyRecoveryMissing" => en ? "No valid KPAR2-v2 recovery data was found." : "Es wurden keine gültigen KPAR2-v2-Wiederherstellungsdaten gefunden.",
+            "emergencyRecoveryMissing" => en ? "No valid KPAR2-v3 recovery data was found." : "Es wurden keine gültigen KPAR2-v3-Wiederherstellungsdaten gefunden.",
             "emergencyEncryptedWarning" => en
                 ? "Emergency mode skips KPAR2 metadata authentication, never changes the original and writes a new file. All factors and successful dual container authentication remain required. Continue?"
                 : "Der Notfallmodus überspringt die KPAR2-Metadaten-Authentifizierung, verändert niemals das Original und schreibt eine neue Datei. Alle Faktoren und eine erfolgreiche doppelte Container-Authentifizierung bleiben erforderlich. Fortfahren?",

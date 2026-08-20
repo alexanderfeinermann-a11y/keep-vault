@@ -113,6 +113,59 @@ internal static class V10MasterKdf
     /// <summary>
     /// Q_S: the SHA3 credential path, one 512-bit digest per factor.
     /// </summary>
+    public static void DeriveSha3CredentialHash(
+        string algorithm,
+        string userPassword,
+        string pin,
+        ReadOnlySpan<byte> factorA,
+        ReadOnlySpan<byte> factorB,
+        Span<byte> destination)
+    {
+        RequireFactor(factorA, nameof(factorA));
+        RequireFactor(factorB, nameof(factorB));
+        if (destination.Length < CredentialHashBytes)
+        {
+            throw new ArgumentException($"Destination must be at least {CredentialHashBytes} bytes.", nameof(destination));
+        }
+
+        byte[] password = Encoding.UTF8.GetBytes(userPassword);
+        byte[] pinBytes = Encoding.ASCII.GetBytes(pin);
+        byte[] domainA = Encoding.UTF8.GetBytes($"Kalyna-ZPAQ/v10/{algorithm}/SHA3-512/User+PIN+Factor-A");
+        byte[] domainB = Encoding.UTF8.GetBytes($"Kalyna-ZPAQ/v10/{algorithm}/SHA3-512/User+PIN+Factor-B");
+
+        int lenA = (sizeof(int) + domainA.Length) + (sizeof(int) + password.Length) + (sizeof(int) + pinBytes.Length) + (sizeof(int) + factorA.Length);
+        int lenB = (sizeof(int) + domainB.Length) + (sizeof(int) + password.Length) + (sizeof(int) + pinBytes.Length) + (sizeof(int) + factorB.Length);
+
+        byte[] messageA = new byte[lenA];
+        byte[] messageB = new byte[lenB];
+        try
+        {
+            int offsetA = 0;
+            WriteLengthPrefixed(messageA, ref offsetA, domainA);
+            WriteLengthPrefixed(messageA, ref offsetA, password);
+            WriteLengthPrefixed(messageA, ref offsetA, pinBytes);
+            WriteLengthPrefixed(messageA, ref offsetA, factorA);
+
+            int offsetB = 0;
+            WriteLengthPrefixed(messageB, ref offsetB, domainB);
+            WriteLengthPrefixed(messageB, ref offsetB, password);
+            WriteLengthPrefixed(messageB, ref offsetB, pinBytes);
+            WriteLengthPrefixed(messageB, ref offsetB, factorB);
+
+            _ = Sha3_512Compat.HashData(messageA, destination.Slice(0, 64));
+            _ = Sha3_512Compat.HashData(messageB, destination.Slice(64, 64));
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(messageA);
+            CryptographicOperations.ZeroMemory(messageB);
+            CryptographicOperations.ZeroMemory(domainA);
+            CryptographicOperations.ZeroMemory(domainB);
+            CryptographicOperations.ZeroMemory(password);
+            CryptographicOperations.ZeroMemory(pinBytes);
+        }
+    }
+
     public static byte[] DeriveSha3CredentialHash(
         string algorithm,
         string userPassword,
@@ -120,46 +173,59 @@ internal static class V10MasterKdf
         ReadOnlySpan<byte> factorA,
         ReadOnlySpan<byte> factorB)
     {
-        RequireFactor(factorA, nameof(factorA));
-        RequireFactor(factorB, nameof(factorB));
-        byte[] password = Encoding.UTF8.GetBytes(userPassword);
-        byte[] pinBytes = Encoding.ASCII.GetBytes(pin);
-        try
-        {
-            byte[] messageA = LengthPrefix.Encode(
-                LengthPrefix.Utf8($"Kalyna-ZPAQ/v10/{algorithm}/SHA3-512/User+PIN+Factor-A"),
-                password,
-                pinBytes,
-                factorA.ToArray());
-            byte[] messageB = LengthPrefix.Encode(
-                LengthPrefix.Utf8($"Kalyna-ZPAQ/v10/{algorithm}/SHA3-512/User+PIN+Factor-B"),
-                password,
-                pinBytes,
-                factorB.ToArray());
-            try
-            {
-                byte[] result = new byte[CredentialHashBytes];
-                _ = Sha3_512Compat.HashData(messageA, result.AsSpan(0, 64));
-                _ = Sha3_512Compat.HashData(messageB, result.AsSpan(64, 64));
-                return result;
-            }
-            finally
-            {
-                CryptographicOperations.ZeroMemory(messageA);
-                CryptographicOperations.ZeroMemory(messageB);
-            }
-        }
-        finally
-        {
-            CryptographicOperations.ZeroMemory(password);
-            CryptographicOperations.ZeroMemory(pinBytes);
-        }
+        byte[] result = new byte[CredentialHashBytes];
+        DeriveSha3CredentialHash(algorithm, userPassword, pin, factorA, factorB, result);
+        return result;
     }
 
     /// <summary>
     /// Q_K: the keyed Skein credential path. Both factors form the MAC key; the
     /// password and PIN are the message.
     /// </summary>
+    public static void DeriveSkeinCredentialHash(
+        string algorithm,
+        string userPassword,
+        string pin,
+        ReadOnlySpan<byte> factorA,
+        ReadOnlySpan<byte> factorB,
+        Span<byte> destination)
+    {
+        RequireFactor(factorA, nameof(factorA));
+        RequireFactor(factorB, nameof(factorB));
+        if (destination.Length < CredentialHashBytes)
+        {
+            throw new ArgumentException($"Destination must be at least {CredentialHashBytes} bytes.", nameof(destination));
+        }
+
+        using var keyBuffer = LockedSensitiveBuffer.Create(FactorBytes * 2);
+        byte[] password = Encoding.UTF8.GetBytes(userPassword);
+        byte[] pinBytes = Encoding.ASCII.GetBytes(pin);
+
+        int msgLen = (sizeof(int) + password.Length) + (sizeof(int) + pinBytes.Length);
+        byte[] message = new byte[msgLen];
+        try
+        {
+            factorA.CopyTo(keyBuffer.Bytes.AsSpan(0, FactorBytes));
+            factorB.CopyTo(keyBuffer.Bytes.AsSpan(FactorBytes, FactorBytes));
+
+            int offset = 0;
+            WriteLengthPrefixed(message, ref offset, password);
+            WriteLengthPrefixed(message, ref offset, pinBytes);
+
+            KeyedSkein1024.Compute(
+                keyBuffer.Bytes,
+                $"Kalyna-ZPAQ/v10/{algorithm}/Skein-MAC-1024-1024/User+PIN/Factors-A+B-Key",
+                message,
+                destination);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(message);
+            CryptographicOperations.ZeroMemory(password);
+            CryptographicOperations.ZeroMemory(pinBytes);
+        }
+    }
+
     public static byte[] DeriveSkeinCredentialHash(
         string algorithm,
         string userPassword,
@@ -167,34 +233,9 @@ internal static class V10MasterKdf
         ReadOnlySpan<byte> factorA,
         ReadOnlySpan<byte> factorB)
     {
-        RequireFactor(factorA, nameof(factorA));
-        RequireFactor(factorB, nameof(factorB));
-        byte[] key = new byte[FactorBytes * 2];
-        byte[] password = Encoding.UTF8.GetBytes(userPassword);
-        byte[] pinBytes = Encoding.ASCII.GetBytes(pin);
-        try
-        {
-            factorA.CopyTo(key.AsSpan(0, FactorBytes));
-            factorB.CopyTo(key.AsSpan(FactorBytes, FactorBytes));
-            byte[] message = LengthPrefix.Encode(password, pinBytes);
-            try
-            {
-                return KeyedSkein1024.Compute(
-                    key,
-                    $"Kalyna-ZPAQ/v10/{algorithm}/Skein-MAC-1024-1024/User+PIN/Factors-A+B-Key",
-                    message);
-            }
-            finally
-            {
-                CryptographicOperations.ZeroMemory(message);
-            }
-        }
-        finally
-        {
-            CryptographicOperations.ZeroMemory(key);
-            CryptographicOperations.ZeroMemory(password);
-            CryptographicOperations.ZeroMemory(pinBytes);
-        }
+        byte[] result = new byte[CredentialHashBytes];
+        DeriveSkeinCredentialHash(algorithm, userPassword, pin, factorA, factorB, result);
+        return result;
     }
 
     /// <summary>
@@ -217,23 +258,30 @@ internal static class V10MasterKdf
         ReadOnlySpan<byte> skeinSalt)
     {
         string domain = $"Kalyna-ZPAQ/v10/{algorithm}/SHA3-512/PMI/Round-{round}";
-        byte[] message = previousMaster.IsEmpty
-            ? LengthPrefix.Encode(
-                LengthPrefix.Utf8(domain),
-                sha3CredentialHash.ToArray(),
-                skeinCredentialHash.ToArray(),
-                sha3Salt.ToArray(),
-                skeinSalt.ToArray())
-            : LengthPrefix.Encode(
-                LengthPrefix.Utf8(domain),
-                sha3CredentialHash.ToArray(),
-                skeinCredentialHash.ToArray(),
-                previousMaster.ToArray(),
-                sha3Salt.ToArray(),
-                skeinSalt.ToArray());
+        byte[] domainBytes = Encoding.UTF8.GetBytes(domain);
+
+        int total = (sizeof(int) + domainBytes.Length)
+            + (sizeof(int) + sha3CredentialHash.Length)
+            + (sizeof(int) + skeinCredentialHash.Length)
+            + (previousMaster.IsEmpty ? 0 : sizeof(int) + previousMaster.Length)
+            + (sizeof(int) + sha3Salt.Length)
+            + (sizeof(int) + skeinSalt.Length);
+
+        byte[] message = new byte[total];
         byte[] digest = new byte[64];
         try
         {
+            int offset = 0;
+            WriteLengthPrefixed(message, ref offset, domainBytes);
+            WriteLengthPrefixed(message, ref offset, sha3CredentialHash);
+            WriteLengthPrefixed(message, ref offset, skeinCredentialHash);
+            if (!previousMaster.IsEmpty)
+            {
+                WriteLengthPrefixed(message, ref offset, previousMaster);
+            }
+            WriteLengthPrefixed(message, ref offset, sha3Salt);
+            WriteLengthPrefixed(message, ref offset, skeinSalt);
+
             _ = Sha3_512Compat.HashData(message, digest);
             ushort pmi = BinaryPrimitives.ReadUInt16BigEndian(digest.AsSpan(0, 2));
             uint memory = MemoryMinKiB + (MemoryStepKiB * pmi);
@@ -248,6 +296,7 @@ internal static class V10MasterKdf
         {
             CryptographicOperations.ZeroMemory(message);
             CryptographicOperations.ZeroMemory(digest);
+            CryptographicOperations.ZeroMemory(domainBytes);
         }
     }
 
@@ -260,10 +309,41 @@ internal static class V10MasterKdf
     /// </summary>
     /// <remarks>
     /// <paramref name="secret"/> is the previous round's full master for
-    /// Paranoia round 2, and null otherwise. Within a normal round the two
+    /// Paranoia round 2, and empty otherwise. Within a normal round the two
     /// branches stay cryptographically unlinked on purpose — chaining them
     /// would blur the two-path structure without buying anything.
     /// </remarks>
+    public static void DeriveRoundMaster(
+        string algorithm,
+        int round,
+        ReadOnlySpan<byte> sha3CredentialHash,
+        ReadOnlySpan<byte> skeinCredentialHash,
+        ReadOnlySpan<byte> sha3Salt,
+        ReadOnlySpan<byte> skeinSalt,
+        ReadOnlySpan<byte> secret,
+        uint memoryKiB,
+        Span<byte> destination)
+    {
+        if (destination.Length < MasterBytes)
+        {
+            throw new ArgumentException($"Destination must be at least {MasterBytes} bytes.", nameof(destination));
+        }
+
+        using LockedSensitiveBuffer left = LockedSensitiveBuffer.Create(BranchOutputBytes);
+        using LockedSensitiveBuffer right = LockedSensitiveBuffer.Create(BranchOutputBytes);
+
+        // The SHA3 branch runs to completion, and its matrix is freed inside
+        // the native call, before the Skein branch allocates its own.
+        RunBranch(
+            algorithm, round, sha3Branch: true,
+            sha3CredentialHash, sha3Salt, secret, memoryKiB, left.Bytes);
+        RunBranch(
+            algorithm, round, sha3Branch: false,
+            skeinCredentialHash, skeinSalt, secret, memoryKiB, right.Bytes);
+
+        MasterInterleave.Interleave(left.Bytes, right.Bytes, destination);
+    }
+
     public static byte[] DeriveRoundMaster(
         string algorithm,
         int round,
@@ -274,51 +354,38 @@ internal static class V10MasterKdf
         byte[]? secret,
         uint memoryKiB)
     {
-        byte[]? left = null;
-        byte[]? right = null;
-        try
-        {
-            // The SHA3 branch runs to completion, and its matrix is freed inside
-            // the native call, before the Skein branch allocates its own.
-            left = RunBranch(
-                algorithm, round, sha3Branch: true,
-                sha3CredentialHash, sha3Salt, secret, memoryKiB);
-            right = RunBranch(
-                algorithm, round, sha3Branch: false,
-                skeinCredentialHash, skeinSalt, secret, memoryKiB);
-            return MasterInterleave.Interleave(left, right);
-        }
-        finally
-        {
-            if (left is not null) CryptographicOperations.ZeroMemory(left);
-            if (right is not null) CryptographicOperations.ZeroMemory(right);
-        }
+        byte[] master = new byte[MasterBytes];
+        DeriveRoundMaster(
+            algorithm, round, sha3CredentialHash, skeinCredentialHash,
+            sha3Salt, skeinSalt, secret ?? ReadOnlySpan<byte>.Empty, memoryKiB, master);
+        return master;
     }
 
-    private static byte[] RunBranch(
+    private static void RunBranch(
         string algorithm,
         int round,
         bool sha3Branch,
         ReadOnlySpan<byte> credentialHash,
         ReadOnlySpan<byte> salt,
-        byte[]? secret,
-        uint memoryKiB)
+        ReadOnlySpan<byte> secret,
+        uint memoryKiB,
+        Span<byte> output)
     {
         // Fresh one-call copies. The native call clears both of these; the
         // masters they came from stay intact for the branch that follows.
         using LockedSensitiveBuffer passwordCopy = LockedSensitiveBuffer.Create(CredentialHashBytes);
         credentialHash.CopyTo(passwordCopy.Bytes);
-        using LockedSensitiveBuffer? secretCopy = secret is null
+        using LockedSensitiveBuffer? secretCopy = secret.IsEmpty
             ? null
             : LockedSensitiveBuffer.Create(MasterBytes);
-        if (secret is not null)
+        if (!secret.IsEmpty)
         {
-            secret.CopyTo(secretCopy!.Bytes, 0);
+            secret.CopyTo(secretCopy!.Bytes);
         }
 
         byte[] saltCopy = salt.ToArray();
         byte[] associatedData = AssociatedData(algorithm, sha3Branch, round);
-        byte[] output = new byte[BranchOutputBytes];
+        byte[] branchOutput = new byte[BranchOutputBytes];
         try
         {
             NativeArgon2id.HashRawV10(
@@ -329,19 +396,23 @@ internal static class V10MasterKdf
                 saltCopy,
                 secretCopy?.Bytes,
                 associatedData,
-                output);
-            return output;
-        }
-        catch
-        {
-            CryptographicOperations.ZeroMemory(output);
-            throw;
+                branchOutput);
+            branchOutput.CopyTo(output);
         }
         finally
         {
+            CryptographicOperations.ZeroMemory(branchOutput);
             CryptographicOperations.ZeroMemory(saltCopy);
             CryptographicOperations.ZeroMemory(associatedData);
         }
+    }
+
+    private static void WriteLengthPrefixed(Span<byte> destination, ref int offset, ReadOnlySpan<byte> data)
+    {
+        BinaryPrimitives.WriteInt32LittleEndian(destination.Slice(offset), data.Length);
+        offset += sizeof(int);
+        data.CopyTo(destination.Slice(offset));
+        offset += data.Length;
     }
 
     private static void RequireFactor(ReadOnlySpan<byte> factor, string name)

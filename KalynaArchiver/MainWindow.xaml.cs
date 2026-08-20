@@ -1402,7 +1402,7 @@ public sealed partial class MainWindow : Window, IDisposable
         using LockedSensitiveBuffer skeinFingerprint = LockedSensitiveBuffer.Create(Skein1024Digest.DigestSize);
         using IncrementalHash hasher = IncrementalHash.CreateHash(HashAlgorithmName.SHA3_512);
         using var skein = new Skein1024Digest();
-        AppendFingerprintPart(hasher, skein, "Kalyna-ZPAQ/v9/key-sheet-fingerprint"u8);
+        AppendFingerprintPart(hasher, skein, "Kalyna-ZPAQ/v10/key-sheet-fingerprint"u8);
         AppendFingerprintPart(hasher, skein, pathBytes.Bytes);
         AppendFingerprintPart(hasher, skein, suiteBytes.Bytes);
         AppendFingerprintPart(hasher, skein, firstBytes.Bytes);

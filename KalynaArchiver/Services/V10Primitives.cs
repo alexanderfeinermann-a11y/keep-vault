@@ -78,10 +78,35 @@ internal static class KeyedSkein1024
         string personalisation,
         ReadOnlySpan<byte> message)
     {
+        byte[] output = new byte[OutputBytes];
+        try
+        {
+            Compute(key, personalisation, message, output);
+            byte[] result = output;
+            output = null!;
+            return result;
+        }
+        finally
+        {
+            if (output is not null) CryptographicOperations.ZeroMemory(output);
+        }
+    }
+
+    public static void Compute(
+        ReadOnlySpan<byte> key,
+        string personalisation,
+        ReadOnlySpan<byte> message,
+        Span<byte> destination)
+    {
         ArgumentException.ThrowIfNullOrEmpty(personalisation);
         if (key.IsEmpty)
         {
             throw new ArgumentException("A keyed Skein-MAC requires a key.", nameof(key));
+        }
+
+        if (destination.Length < OutputBytes)
+        {
+            throw new ArgumentException($"Destination must be at least {OutputBytes} bytes.", nameof(destination));
         }
 
         var mac = new SkeinMac(SkeinEngine.SKEIN_1024, OutputBytes * 8);
@@ -105,15 +130,21 @@ internal static class KeyedSkein1024
             }
 
             byte[] output = new byte[OutputBytes];
-            int written = mac.DoFinal(output, 0);
-            if (written != OutputBytes)
+            try
+            {
+                int written = mac.DoFinal(output, 0);
+                if (written != OutputBytes)
+                {
+                    throw new CryptographicException(
+                        $"Skein-MAC-1024-1024 returned {written} bytes instead of {OutputBytes}.");
+                }
+
+                output.CopyTo(destination);
+            }
+            finally
             {
                 CryptographicOperations.ZeroMemory(output);
-                throw new CryptographicException(
-                    $"Skein-MAC-1024-1024 returned {written} bytes instead of {OutputBytes}.");
             }
-
-            return output;
         }
         finally
         {
@@ -180,19 +211,28 @@ internal static class MasterInterleave
 
     public static byte[] Interleave(ReadOnlySpan<byte> left, ReadOnlySpan<byte> right)
     {
+        byte[] master = new byte[MasterBytes];
+        Interleave(left, right, master);
+        return master;
+    }
+
+    public static void Interleave(ReadOnlySpan<byte> left, ReadOnlySpan<byte> right, Span<byte> destination)
+    {
         if (left.Length != BranchBytes || right.Length != BranchBytes)
         {
             throw new ArgumentException(
                 $"Both Argon2id branch outputs must be {BranchBytes} bytes.");
         }
 
-        byte[] master = new byte[MasterBytes];
-        for (int i = 0; i < BranchBytes; i++)
+        if (destination.Length < MasterBytes)
         {
-            master[(2 * i) + 0] = left[i];
-            master[(2 * i) + 1] = right[i];
+            throw new ArgumentException($"Destination must be at least {MasterBytes} bytes.", nameof(destination));
         }
 
-        return master;
+        for (int i = 0; i < BranchBytes; i++)
+        {
+            destination[(2 * i) + 0] = left[i];
+            destination[(2 * i) + 1] = right[i];
+        }
     }
 }
