@@ -11,8 +11,8 @@ bundle_identifier='de.michael-feinermann.keep-vault'
 core_identifier='de.michael-feinermann.keep-vault.core'
 configuration='Release'
 architecture='universal'
-marketing_version='1.0.0'
-build_version='1'
+marketing_version='5.0.0'
+build_version='10'
 preflight_only=0
 identity=${KEEPVAULT_CODESIGN_IDENTITY:-}
 # Name of an "xcrun notarytool store-credentials" keychain profile. Empty means
