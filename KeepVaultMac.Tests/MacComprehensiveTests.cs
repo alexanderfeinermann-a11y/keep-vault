@@ -360,6 +360,56 @@ internal static partial class MacComprehensiveTests
             Require(
                 !HybridSignatureService.VerifyFile(executable, bundle + ".khsig", policy).IsTrusted,
                 "A missing scanner signature was treated as valid.");
+
+            // The scanner is held to the same SHA3-512/Skein-1024 dual manifest
+            // as every other artifact, so a corrupted manifest and a manifest
+            // that no longer describes the binary both have to be refused --
+            // otherwise this component would be measured by fewer hashes than
+            // the rest of the package.
+            foreach (string suffix in new[] { ".sha3", ".skein" })
+            {
+                string manifestPath = bundle + suffix;
+                Require(File.Exists(manifestPath), $"The scanner ships no {suffix} manifest.");
+                Require(
+                    HybridSignatureService.VerifyFile(
+                        manifestPath,
+                        manifestPath + HybridSignatureService.SidecarExtension,
+                        policy).IsTrusted,
+                    $"The scanner's {suffix} manifest is not signed by the pinned keys.");
+
+                string original = await File.ReadAllTextAsync(manifestPath).ConfigureAwait(false);
+                string flipped = original.TrimEnd();
+                flipped = flipped[..^1] + (flipped[^1] == '0' ? '1' : '0');
+                await File.WriteAllTextAsync(manifestPath, flipped).ConfigureAwait(false);
+                Require(
+                    !HybridSignatureService.VerifyFile(
+                        manifestPath,
+                        manifestPath + HybridSignatureService.SidecarExtension,
+                        policy).IsTrusted,
+                    $"A modified {suffix} manifest still passed its own signature check.");
+                await File.WriteAllTextAsync(manifestPath, original).ConfigureAwait(false);
+            }
+
+            // And the manifests must actually describe this binary: the live
+            // scanner's own manifests are checked against its own bytes.
+            foreach ((string suffix, int hexLength) in new[] { (".sha3", 128), (".skein", 256) })
+            {
+                string expected = new(
+                    (await File.ReadAllTextAsync(live.Path! + suffix).ConfigureAwait(false))
+                        .Where(character => !char.IsWhiteSpace(character))
+                        .ToArray());
+                Require(
+                    expected.Length == hexLength,
+                    $"The installed scanner's {suffix} manifest is not {hexLength} hex characters.");
+                byte[] liveBinary = await File.ReadAllBytesAsync(
+                    Path.Combine(live.Path!, "Contents", "MacOS", "QR-Scanner")).ConfigureAwait(false);
+                byte[] actual = suffix == ".sha3"
+                    ? Sha3_512Compat.HashData(liveBinary)
+                    : Skein1024Digest.HashData(liveBinary);
+                Require(
+                    string.Equals(Convert.ToHexString(actual), expected, StringComparison.OrdinalIgnoreCase),
+                    $"The installed scanner does not match its {suffix} manifest.");
+            }
         }
         finally
         {
@@ -1263,6 +1313,13 @@ internal static partial class MacComprehensiveTests
             GeneratedFactor('C'),
             factorB,
             $"{suite} wrong factor A").ConfigureAwait(false);
+        await RequireAuthenticationFailureWithoutOutputAsync(
+            containers,
+            path,
+            UserPassword,
+            factorA,
+            GeneratedFactor('D'),
+            $"{suite} wrong factor B").ConfigureAwait(false);
 
         string nonCanonical = CopyContainer(path, root, $"{suite}-noncanonical.kzpaq");
         AddHeaderWhitespace(nonCanonical);
@@ -1296,27 +1353,24 @@ internal static partial class MacComprehensiveTests
             () => containers.ReadContainerInfoAsync(reducedProfile, CancellationToken.None),
             $"{suite} accepted a reduced Argon2 profile.").ConfigureAwait(false);
 
-        if (suite is EncryptionSuite.Threefish1024 or EncryptionSuite.ThreefishOverKalyna)
+        foreach ((string label, Action<string> mutate, Type expected) in new[]
         {
-            foreach ((string label, Action<string> mutate, Type expected) in new[]
-            {
-                ("magic", new Action<string>(candidate => FlipByte(candidate, 0)), typeof(InvalidDataException)),
-                ("SHA3 tag", new Action<string>(candidate => FlipContainerTag(candidate, skein: false)), typeof(CryptographicException)),
-                ("Skein tag", new Action<string>(candidate => FlipContainerTag(candidate, skein: true)), typeof(CryptographicException)),
-                ("ciphertext", new Action<string>(candidate => FlipByte(candidate, new FileInfo(candidate).Length - 1)), typeof(CryptographicException)),
-            })
-            {
-                string candidate = CopyContainer(path, root, $"{suite}-{label.Replace(' ', '-')}.kzpaq");
-                mutate(candidate);
-                await RequireFailureWithoutOutputAsync(
-                    containers,
-                    candidate,
-                    UserPassword,
-                    factorA,
-                    factorB,
-                    expected,
-                    $"Threefish changed {label}").ConfigureAwait(false);
-            }
+            ("magic", new Action<string>(candidate => FlipByte(candidate, 0)), typeof(InvalidDataException)),
+            ("SHA3 tag", new Action<string>(candidate => FlipContainerTag(candidate, skein: false)), typeof(CryptographicException)),
+            ("Skein tag", new Action<string>(candidate => FlipContainerTag(candidate, skein: true)), typeof(CryptographicException)),
+            ("ciphertext", new Action<string>(candidate => FlipByte(candidate, new FileInfo(candidate).Length - 1)), typeof(CryptographicException)),
+        })
+        {
+            string candidate = CopyContainer(path, root, $"{suite}-{label.Replace(' ', '-')}.kzpaq");
+            mutate(candidate);
+            await RequireFailureWithoutOutputAsync(
+                containers,
+                candidate,
+                UserPassword,
+                factorA,
+                factorB,
+                expected,
+                $"{suite} changed {label}").ConfigureAwait(false);
         }
 
         string existing = Path.Combine(root, $"{suite}-existing.kzpaq");
@@ -1374,13 +1428,7 @@ internal static partial class MacComprehensiveTests
     /// </remarks>
     private static async Task TestRecoveryAcrossSuitesAsync()
     {
-        EncryptionSuite[] suites =
-        [
-            EncryptionSuite.ParanoiaCascade,
-            EncryptionSuite.MixedCascade,
-        ];
-
-        foreach (EncryptionSuite suite in suites)
+        foreach (EncryptionSuite suite in EncryptionSuiteCatalog.DisplayOrder)
         {
             string root = CreateTempRoot("keep-vault-kpar2-suite-");
             try
@@ -1441,6 +1489,24 @@ internal static partial class MacComprehensiveTests
                         null,
                         CancellationToken.None),
                     $"A wrong user password authenticated the {suite} KPAR2 metadata.").ConfigureAwait(false);
+                await RequireThrowsAsync<CryptographicException>(
+                    () => recovery.VerifyAndRepairAuthenticatedAsync(
+                        encrypted,
+                        UserPassword,
+                        GeneratedFactor('C'),
+                        factorB,
+                        null,
+                        CancellationToken.None),
+                    $"A wrong factor A authenticated the {suite} KPAR2 metadata.").ConfigureAwait(false);
+                await RequireThrowsAsync<CryptographicException>(
+                    () => recovery.VerifyAndRepairAuthenticatedAsync(
+                        encrypted,
+                        UserPassword,
+                        factorA,
+                        GeneratedFactor('D'),
+                        null,
+                        CancellationToken.None),
+                    $"A wrong factor B authenticated the {suite} KPAR2 metadata.").ConfigureAwait(false);
 
                 Zero(payload);
             }
@@ -2416,7 +2482,7 @@ internal static partial class MacComprehensiveTests
         }
     }
 
-    private static Task TestTwoRoundDerivationAsync()
+    private static async Task TestTwoRoundDerivationAsync()
     {
         // SHA-512 must agree with the published digests and with the second
         // implementation before anything derived from it is trusted.
@@ -2492,7 +2558,131 @@ internal static partial class MacComprehensiveTests
             !EntropyMixer.HasRequiredSamples(EntropyPurpose.Salt),
             "The two-round derivation did not consume the salt pool exactly once.");
 
-        return Task.CompletedTask;
+        await TestParanoiaCredentialPreHashSurvivesRoundOneAsync().ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Regression test for the v9 bug where the first PHC Argon2id call cleared
+    /// the shared 128-byte prehash and made round two run over zero bytes.
+    /// </summary>
+    /// <remarks>
+    /// The expected prehash uses the compiled FIPS 202 reference adapter and the
+    /// expected Argon2id output uses Bouncy Castle. Production uses the separate
+    /// Bouncy Castle SHA3 path followed by the native PHC Argon2 adapter, so the
+    /// assertion does not reproduce the implementation under test. Comparing
+    /// explicitly against Argon2id(0^1024, salt2, ...) makes a normal
+    /// encrypt/decrypt roundtrip's blind spot impossible here.
+    /// </remarks>
+    private static async Task TestParanoiaCredentialPreHashSurvivesRoundOneAsync()
+    {
+        const EncryptionSuite suite = EncryptionSuite.ParanoiaCascade;
+        string factorA = GeneratedFactor('A');
+        string factorB = GeneratedFactor('B');
+        byte[] firstSalt = Enumerable.Range(0, PasswordKeyService.SaltSize)
+            .Select(index => (byte)(index + 1))
+            .ToArray();
+        byte[] secondSalt = Enumerable.Range(0, PasswordKeyService.SaltSize)
+            .Select(index => (byte)(0xA5 ^ (index * 29)))
+            .ToArray();
+        byte[] credentialPreHash = BuildIndependentParanoiaPreHash(UserPassword, factorA, factorB);
+        byte[] zeroPreHash = new byte[PasswordKeyService.Argon2PasswordInputSize];
+        byte[] expectedRoundTwo = [];
+        byte[] zeroInputRoundTwo = [];
+        long lockedBaseline = SecureMemory.LockedBytesForTests;
+        try
+        {
+            expectedRoundTwo = BouncyArgon2(
+                credentialPreHash,
+                secondSalt,
+                PasswordKeyService.CascadeDerivedKeySize);
+            zeroInputRoundTwo = BouncyArgon2(
+                zeroPreHash,
+                secondSalt,
+                PasswordKeyService.CascadeDerivedKeySize);
+
+            int roundTwoBytesUsed = EncryptionSuiteCatalog.Get(suite).DerivedKeyBytes
+                - PasswordKeyService.CascadeDerivedKeySize;
+            Require(roundTwoBytesUsed > 0, "The paranoia suite no longer consumes round-two key bytes.");
+            Require(
+                !expectedRoundTwo.AsSpan(0, roundTwoBytesUsed)
+                    .SequenceEqual(zeroInputRoundTwo.AsSpan(0, roundTwoBytesUsed)),
+                "The independent true-input and zero-input Argon2id controls unexpectedly match.");
+
+            using (DerivedKey actual = await new PasswordKeyService().DeriveTwoRoundAsync(
+                UserPassword,
+                factorA,
+                factorB,
+                firstSalt.ToArray(),
+                secondSalt.ToArray(),
+                suite,
+                Argon2Profile.Default,
+                CancellationToken.None).ConfigureAwait(false))
+            {
+                ReadOnlySpan<byte> actualRoundTwo = actual.Bytes.Slice(
+                    PasswordKeyService.CascadeDerivedKeySize,
+                    roundTwoBytesUsed);
+                Require(
+                    actualRoundTwo.SequenceEqual(expectedRoundTwo.AsSpan(0, roundTwoBytesUsed)),
+                    "Paranoia round two does not match independent Argon2id over the credential prehash.");
+                Require(
+                    !actualRoundTwo.SequenceEqual(zeroInputRoundTwo.AsSpan(0, roundTwoBytesUsed)),
+                    "Paranoia round two still matches Argon2id over a zeroed 1024-bit prehash.");
+            }
+
+            Require(
+                SecureMemory.LockedBytesForTests == lockedBaseline,
+                "The two-round regression KAT left a locked one-call or master buffer behind.");
+        }
+        finally
+        {
+            Zero(firstSalt, secondSalt, credentialPreHash, zeroPreHash, expectedRoundTwo, zeroInputRoundTwo);
+        }
+    }
+
+    private static byte[] BuildIndependentParanoiaPreHash(
+        string userPassword,
+        string factorA,
+        string factorB)
+    {
+        const string algorithm =
+            "ChaCha20-Poly1305(Threefish-1024-CTR(Kalyna-512/512-CTR(SHACAL-2-512-CTR("
+            + "MARS-448-CTR(AES-256-CTR)))))+HMAC-SHA3-512+Skein-MAC-1024";
+        byte[] userPasswordBytes = Encoding.UTF8.GetBytes(userPassword);
+        byte[] factorABytes = Encoding.ASCII.GetBytes(PasswordKeyService.NormalizeGeneratedPassword(factorA));
+        byte[] factorBBytes = Encoding.ASCII.GetBytes(PasswordKeyService.NormalizeGeneratedPassword(factorB));
+        byte[] domainA = Encoding.ASCII.GetBytes($"Kalyna-ZPAQ/v9/{algorithm}/SHA3-512/User+Factor-A");
+        byte[] domainB = Encoding.ASCII.GetBytes($"Kalyna-ZPAQ/v9/{algorithm}/SHA3-512/User+Factor-B");
+        byte[] messageA = BuildLengthPrefixedMessage(domainA, userPasswordBytes, factorABytes);
+        byte[] messageB = BuildLengthPrefixedMessage(domainB, userPasswordBytes, factorBBytes);
+        string sha3ReferencePath = Environment.GetEnvironmentVariable("KEEPVAULT_SHA3_REFERENCE")
+            ?? Path.Combine(AppContext.BaseDirectory, "Native", "libsha3_ref.dylib");
+        Require(File.Exists(sha3ReferencePath), $"SHA3-512 reference adapter is missing: {sha3ReferencePath}");
+        using var sha3 = new KeepVaultMac.Tests.Sha3Reference(sha3ReferencePath);
+        byte[] hashA = sha3.Hash(messageA);
+        byte[] hashB = sha3.Hash(messageB);
+        try
+        {
+            return [.. hashA, .. hashB];
+        }
+        finally
+        {
+            Zero(userPasswordBytes, factorABytes, factorBBytes, domainA, domainB, messageA, messageB, hashA, hashB);
+        }
+    }
+
+    private static byte[] BuildLengthPrefixedMessage(params byte[][] values)
+    {
+        byte[] result = new byte[values.Sum(value => sizeof(int) + value.Length)];
+        int offset = 0;
+        foreach (byte[] value in values)
+        {
+            BinaryPrimitives.WriteInt32LittleEndian(result.AsSpan(offset, sizeof(int)), value.Length);
+            offset += sizeof(int);
+            value.CopyTo(result, offset);
+            offset += value.Length;
+        }
+
+        return result;
     }
 
     private static void AddMouseSamplesUntilReady()

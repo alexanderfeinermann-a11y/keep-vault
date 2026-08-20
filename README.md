@@ -141,6 +141,15 @@ Both salts and both nonces are stored in the header. A v9 archive whose header
 carried only the first round could not be decrypted by anyone, including the
 machine that wrote it.
 
+Versions 4.0.0 and 4.0.1 passed the same mutable 128-byte credential prehash to
+both native Argon2id calls. Because the PHC adapter deliberately clears its
+password input, their second round actually used 128 zero bytes. Version 4.0.2
+keeps one locked master prehash and gives each call a fresh locked copy. This
+correction leaves the v9 header, parameters and salts unchanged, but it changes
+the derived Paranoia key: old Paranoia containers and corrected Paranoia
+containers are not mutually readable. There is no fallback to the known-bad
+derivation. Single-round suites are unaffected.
+
 ### The container
 
 - Magic `KZPAQ1\0`, UTF-8 JSON header, 64-byte HMAC-SHA3-512 tag, 128-byte
@@ -379,6 +388,14 @@ validated the locator's suite id against a hard-coded range that admitted only
 the first two, which meant most suites produced an archive the app would encrypt
 and then refuse to protect.
 
+KPAR2 v2 has one v9-specific exception: its fixed bootstrap stores only the
+first 64-byte Argon2id salt. For Paranoia it therefore derives the recovery MAC
+parents with one Argon2id round rather than reconstructing the container's full
+two-round key. Adding the second salt or changing that derivation would make
+existing v2 sidecars unreadable, so 4.0.2 retains the v2 behavior and treats its
+lower Paranoia recovery-metadata work factor as a residual risk. KPAR2 v3 must
+store the complete bootstrap and use exactly the container KDF.
+
 For **unencrypted archives** the same SHA3 and Skein values are explicitly
 unkeyed error-detection values. A repair is therefore always written to a new,
 conflict-free file name and the damaged original is left untouched.
@@ -487,12 +504,18 @@ configurable through `KEEPVAULT_HYBRID_PFX` and `KEEPVAULT_MLDSA_PRIVATE_KEY`.
 
 ```sh
 ./tools/Build-Native-macOS.sh          # reference ciphers, Argon2, ZPAQ
-./tools/Build-KeepVault-macOS.sh       # app bundle, signed and sealed
+./QrCodeScanner/tools/Build-QrScanner-macOS.sh --version 4.0.2 --build-number 6
+./tools/Build-KeepVault-macOS.sh --version 4.0.2 --build-number 6
 ./tools/Build-Portable-macOS.sh        # portable folder and ZIP
 ./tools/Install-KeepVault-macOS.sh     # verify and install to /Applications
 ./tools/Verify-KeepVault-macOS.sh      # check an installed or built bundle
 ./tools/Protect-HybridKeys-macOS.sh    # put both signing keys behind one prompt
 ```
+
+The QR scanner and Keep Vault must be built with the same marketing version and
+build number. The portable release gate requires the scanner, checks both
+bundle identifiers and rejects a missing or mismatched companion before signing
+the package.
 
 The build compiles all six fingerprints in, signs the app and every native file,
 then produces SHA3-512 and Skein-1024 manifests plus a `.khsig` for each release
@@ -510,7 +533,7 @@ cd KeepVaultMac.Tests
 dotnet run -c Release -- --full
 ```
 
-Twenty-four comprehensive groups, on top of twelve smoke tests. `--only <text>`
+Twenty-five comprehensive groups, on top of thirteen smoke tests. `--only <text>`
 narrows a run to one group while fixing it.
 
 The suite covers macOS process hardening; signed native trust and tamper

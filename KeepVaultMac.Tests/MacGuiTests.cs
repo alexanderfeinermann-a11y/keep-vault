@@ -39,6 +39,7 @@ internal static class MacGuiTests
         ("GUI encryption toggle and target normalization", () => RunOnUiThread(TestEncryptionToggle)),
         ("GUI folder target lands beside the folder", () => RunOnUiThread(TestFolderTargetSuggestion)),
         ("GUI password policy feedback", () => RunOnUiThread(TestPasswordPolicyFeedback)),
+        ("GUI verified-original-deletion localization", () => RunOnUiThread(TestDeleteOriginalsLocalization)),
         ("GUI reference control inventory", () => RunOnUiThread(TestReferenceControlsPresent)),
     ];
 
@@ -358,6 +359,56 @@ internal static class MacGuiTests
     }
 
     /// <summary>
+    /// The destructive option and its safety explanation must follow the
+    /// language picker together. The XAML starts in German, so testing an actual
+    /// switch to English catches controls that were never wired into
+    /// ApplyLanguage rather than merely checking their initial text.
+    /// </summary>
+    private static void TestDeleteOriginalsLocalization(MainWindow window)
+    {
+        ComboBox language = Control<ComboBox>(window, "LanguageBox");
+        CheckBox deleteOriginals = Control<CheckBox>(window, "DeleteOriginalsBox");
+        TextBlock deleteOriginalsHint = Control<TextBlock>(window, "DeleteOriginalsHint");
+
+        SelectLanguage(language, "de");
+        MacComprehensiveTests.Require(
+            string.Equals(
+                deleteOriginals.Content as string,
+                "Originaldateien nach geprüftem Abgleich löschen",
+                StringComparison.Ordinal),
+            "The verified-original-deletion option is not localized in German.");
+        MacComprehensiveTests.Require(
+            string.Equals(
+                deleteOriginalsHint.Text,
+                "Das Archiv wird danach erneut entpackt und bitweise mit den Originalen verglichen. Gelöscht wird erst bei vollständiger Übereinstimmung.",
+                StringComparison.Ordinal),
+            "The verified-original-deletion explanation is not localized in German.");
+
+        SelectLanguage(language, "en");
+        MacComprehensiveTests.Require(
+            string.Equals(
+                deleteOriginals.Content as string,
+                "Delete original files after a verified comparison",
+                StringComparison.Ordinal),
+            "The verified-original-deletion option is not localized in English.");
+        MacComprehensiveTests.Require(
+            string.Equals(
+                deleteOriginalsHint.Text,
+                "The archive is then extracted again and compared byte-for-byte with the original files. Files are deleted only after a complete match.",
+                StringComparison.Ordinal),
+            "The verified-original-deletion explanation is not localized in English.");
+    }
+
+    private static void SelectLanguage(ComboBox language, string expectedTag)
+    {
+        ComboBoxItem item = language.Items
+            .OfType<ComboBoxItem>()
+            .Single(candidate => string.Equals(candidate.Tag as string, expectedTag, StringComparison.Ordinal));
+        language.SelectedItem = item;
+        Dispatcher.UIThread.RunJobs();
+    }
+
+    /// <summary>
     /// Every interactive control the Windows reference exposes must exist here
     /// too, so a renamed or dropped control fails the suite instead of silently
     /// removing a capability from the macOS build.
@@ -369,6 +420,7 @@ internal static class MacGuiTests
             "EncryptBox", "CipherSuiteBox", "CompressionBox", "ArchivePathBox", "InputList",
             "CreatePasswordBox", "CreatePasswordConfirmBox", "GeneratedPasswordFirstBox",
             "GeneratedPasswordSecondBox", "GeneratePasswordButton", "EntropyStatusText",
+            "DeleteOriginalsBox", "DeleteOriginalsHint",
             "ExtractArchiveBox", "OutputFolderBox", "ExtractPasswordBox",
             "ExtractGeneratedPasswordFirstBox", "ExtractGeneratedPasswordSecondBox",
             "ErasePathBox", "LogBox", "ClearLogButton", "LanguageBox",

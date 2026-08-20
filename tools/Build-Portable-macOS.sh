@@ -73,9 +73,11 @@ pfx_password_service=${KEEPVAULT_PFX_KEYCHAIN_SERVICE:-de.michael-feinermann.kee
 pfx_password_account=${KEEPVAULT_PFX_KEYCHAIN_ACCOUNT:-${USER:-}}
 dotnet_command=${KEEPVAULT_DOTNET:-/Users/michael/.dotnet-keepvault/dotnet}
 source_app=${repo_root}/dist/Keep\ Vault-macOS/Keep\ Vault.app
+scanner_app=${repo_root}/QrCodeScanner/dist/QR-Scanner.app
 
 usage() {
-  print -u2 'Usage: Build-Portable-macOS.sh [--app "Keep Vault.app"] [--identity HASH] [--output-name NAME]'
+  print -u2 'Usage: Build-Portable-macOS.sh [--app "Keep Vault.app"] [--scanner "QR-Scanner.app"]'
+  print -u2 '       [--identity HASH] [--output-name NAME]'
   print -u2 '       [--architecture universal|arm64] [--dotnet /path/to/dotnet]'
   exit 64
 }
@@ -83,6 +85,7 @@ usage() {
 while (( $# != 0 )); do
   case $1 in
     --app) (( $# >= 2 )) || usage; source_app=$2; shift 2 ;;
+    --scanner) (( $# >= 2 )) || usage; scanner_app=$2; shift 2 ;;
     --identity) (( $# >= 2 )) || usage; identity=$2; shift 2 ;;
     --output-name) (( $# >= 2 )) || usage; output_name=$2; shift 2 ;;
     --architecture) (( $# >= 2 )) || usage; architecture=$2; shift 2 ;;
@@ -104,6 +107,12 @@ if [[ ! -d ${source_app} || -L ${source_app} ]]; then
   print -u2 'Run tools/Build-KeepVault-macOS.sh first.'
   exit 1
 fi
+if [[ ! -d ${scanner_app} || -L ${scanner_app} ]]; then
+  print -u2 "Signed QR-Scanner bundle not found or is a symbolic link: ${scanner_app}"
+  print -u2 'Build it with the same --version and --build-number as Keep Vault first.'
+  exit 1
+fi
+${script_dir}/Verify-ReleasePairMetadata-macOS.sh --app ${source_app} --scanner ${scanner_app}
 if [[ ! -x ${dotnet_command} || -L ${dotnet_command} ]]; then
   print -u2 "The official .NET SDK host is unavailable or a symbolic link: ${dotnet_command}"
   exit 1
@@ -200,20 +209,13 @@ for launcher_sidecar_suffix in .sha3 .skein .khsig .sha3.khsig .skein.khsig; do
 done
 ditto ${verifier_path} ${portable_dir}/Keep\ Vault\ Release\ Verifier
 
-# The QR scanner rides along when it has been built. It is a separate program
+# The QR scanner always rides along. It is a separate program
 # with its own identifier, signature and sandbox, and shares no code with Keep
 # Vault — it travels in the same package only because the two are used together
-# and should be versioned together.
-scanner_app=${repo_root}/QrCodeScanner/dist/QR-Scanner.app
-bundled_scanner=0
-if [[ -d ${scanner_app} && ! -L ${scanner_app} ]]; then
-  ditto ${scanner_app} ${portable_dir}/QR-Scanner.app
-  codesign --verify --strict --verbose=2 ${portable_dir}/QR-Scanner.app
-  bundled_scanner=1
-  print "bundled_scanner=${portable_dir}/QR-Scanner.app"
-else
-  print -u2 'QR-Scanner.app was not built; the package will contain Keep Vault only.'
-fi
+# and are released under one matching version/build pair.
+ditto ${scanner_app} ${portable_dir}/QR-Scanner.app
+codesign --verify --strict --verbose=2 ${portable_dir}/QR-Scanner.app
+print "bundled_scanner=${portable_dir}/QR-Scanner.app"
 
 props=${mac_project}/Directory.Build.props
 read_pin() {
@@ -301,7 +303,7 @@ package_signature_arguments=(
   --launcher-pins ${build_root}/PackageHybridPins.swift
   --target ${portable_dir}/Keep\ Vault\ Release\ Verifier
 )
-(( bundled_scanner )) && package_signature_arguments+=(--target ${portable_dir}/QR-Scanner.app/Contents/MacOS/QR-Scanner)
+package_signature_arguments+=(--target ${portable_dir}/QR-Scanner.app/Contents/MacOS/QR-Scanner)
 if [[ -n ${pfx_password_service} ]]; then
   package_signature_arguments+=(--pfx-password-keychain-service ${pfx_password_service})
   [[ -n ${pfx_password_account} ]] && package_signature_arguments+=(--pfx-keychain-account ${pfx_password_account})
@@ -315,21 +317,19 @@ fi
 )
 print "verifier_dual_signature=${portable_dir}/Keep Vault Release Verifier.khsig"
 
-if (( bundled_scanner )); then
-  scanner_sidecar_source=${portable_dir}/QR-Scanner.app/Contents/MacOS/QR-Scanner
-  for sidecar_suffix in .sha3 .skein .khsig .sha3.khsig .skein.khsig; do
-    if [[ ! -f ${scanner_sidecar_source}${sidecar_suffix} ]]; then
-      print -u2 "The scanner's dual signature is incomplete: ${sidecar_suffix}"
-      exit 1
-    fi
-    mv -- ${scanner_sidecar_source}${sidecar_suffix} ${portable_dir}/QR-Scanner.app${sidecar_suffix}
-  done
+scanner_sidecar_source=${portable_dir}/QR-Scanner.app/Contents/MacOS/QR-Scanner
+for sidecar_suffix in .sha3 .skein .khsig .sha3.khsig .skein.khsig; do
+  if [[ ! -f ${scanner_sidecar_source}${sidecar_suffix} ]]; then
+    print -u2 "The scanner's dual signature is incomplete: ${sidecar_suffix}"
+    exit 1
+  fi
+  mv -- ${scanner_sidecar_source}${sidecar_suffix} ${portable_dir}/QR-Scanner.app${sidecar_suffix}
+done
 
-  # Moving the sidecars out again leaves the bundle byte-identical to what Apple
-  # sealed, which this re-check proves rather than assumes.
-  codesign --verify --strict --verbose=2 ${portable_dir}/QR-Scanner.app
-  print "scanner_dual_signature=${portable_dir}/QR-Scanner.app.khsig"
-fi
+# Moving the sidecars out again leaves the bundle byte-identical to what Apple
+# sealed, which this re-check proves rather than assumes.
+codesign --verify --strict --verbose=2 ${portable_dir}/QR-Scanner.app
+print "scanner_dual_signature=${portable_dir}/QR-Scanner.app.khsig"
 
 # --- Archive, manifests, hybrid signatures ----------------------------------
 # Signing the archive also emits its SHA3-512 and Skein-1024 manifests and signs

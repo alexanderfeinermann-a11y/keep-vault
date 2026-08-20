@@ -42,6 +42,8 @@ public sealed partial class MainWindow
         EncryptBox.Content = T("encrypt");
         CipherSuiteLabel.Text = T("cipherSuite");
         Argon2ProfileText.Text = T("argon2Profile");
+        DeleteOriginalsBox.Content = T("deleteOriginals");
+        DeleteOriginalsHint.Text = T("deleteOriginalsHint");
         CreateArchiveButton.Content = T("saveArchive");
         CreatePasswordSetupTitle.Text = T("createPasswordTitle");
         CreatePasswordSetupHelpText.Text = T("createPasswordHelp");
@@ -141,6 +143,12 @@ public sealed partial class MainWindow
             "argon2Profile" => en
                 ? "Argon2id: 1 GiB memory, 4 iterations, parallelism 4, locked RAM required"
                 : "Argon2id: 1 GiB Speicher, 4 Iterationen, Parallelität 4, gesperrter RAM erforderlich",
+            "deleteOriginals" => en
+                ? "Delete original files after a verified comparison"
+                : "Originaldateien nach geprüftem Abgleich löschen",
+            "deleteOriginalsHint" => en
+                ? "The archive is then extracted again and compared byte-for-byte with the original files. Files are deleted only after a complete match."
+                : "Das Archiv wird danach erneut entpackt und bitweise mit den Originalen verglichen. Gelöscht wird erst bei vollständiger Übereinstimmung.",
             "saveArchive" => en ? "Save archive" : "Archiv speichern",
             "createPasswordTitle" => en ? "Three-part password" : "Dreiteiliges Passwort",
             "createPasswordHelp" => en

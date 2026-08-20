@@ -31,12 +31,6 @@ public sealed class PasswordKeyService
     /// The paranoia cascade: 376 bytes of cipher key across six layers, plus the
     /// two MAC keys.
     /// </summary>
-    /// <remarks>
-    /// This is still derived in a single Argon2id round. The design calls for
-    /// two rounds with separate salts, and until that lands a container written
-    /// with this suite will not open once it does. The suite is therefore not
-    /// ready to be offered for real archives.
-    /// </remarks>
     private const int ParanoiaDerivedKeySize = 568;
     public const int KeySize = KalynaDerivedKeySize;
 
@@ -312,17 +306,17 @@ public sealed class PasswordKeyService
         string normalizedSecond = NormalizeGeneratedPassword(secondGeneratedPassword);
         ValidateUserPasswordForCreation(userPassword, normalizedFirst, normalizedSecond);
 
-        using LockedSensitiveBuffer argon2PasswordInput = CreateLockedArgon2PasswordInput(
+        using LockedSensitiveBuffer masterArgon2PasswordInput = CreateLockedArgon2PasswordInput(
             userPassword,
             normalizedFirst,
             normalizedSecond,
             suite);
 
-        using DerivedKey round1 = await DeriveFromPreHashAsync(
-            argon2PasswordInput.Bytes, firstSalt, CascadeDerivedKeySize, profile, cancellationToken)
+        using DerivedKey round1 = await DeriveFromMasterPreHashAsync(
+            masterArgon2PasswordInput.Bytes, firstSalt, CascadeDerivedKeySize, profile, cancellationToken)
             .ConfigureAwait(false);
-        using DerivedKey round2 = await DeriveFromPreHashAsync(
-            argon2PasswordInput.Bytes, secondSalt, CascadeDerivedKeySize, round1.Profile, cancellationToken)
+        using DerivedKey round2 = await DeriveFromMasterPreHashAsync(
+            masterArgon2PasswordInput.Bytes, secondSalt, CascadeDerivedKeySize, round1.Profile, cancellationToken)
             .ConfigureAwait(false);
 
         int required = parameters.DerivedKeyBytes;
@@ -496,6 +490,42 @@ public sealed class PasswordKeyService
     private static LockedSensitiveBuffer CreateLockedBuffer(int length)
     {
         return LockedSensitiveBuffer.Create(length);
+    }
+
+    /// <summary>
+    /// Gives one Argon2id invocation its own locked copy of the credential
+    /// prehash while leaving the locked master available to later rounds.
+    /// </summary>
+    /// <remarks>
+    /// The native PHC adapter intentionally uses
+    /// <c>ARGON2_FLAG_CLEAR_PASSWORD</c>, and <see cref="DeriveFromPreHashAsync"/>
+    /// also clears the buffer on every exit. Passing the master directly would
+    /// therefore turn every later round into Argon2id over an all-zero password.
+    /// The one-call copy is consumed and released before this method returns;
+    /// its caller owns and eventually clears the master.
+    /// </remarks>
+    private static async Task<DerivedKey> DeriveFromMasterPreHashAsync(
+        byte[] masterArgon2PasswordInput,
+        byte[] salt,
+        int outputLength,
+        Argon2Profile profile,
+        CancellationToken cancellationToken)
+    {
+        if (masterArgon2PasswordInput.Length != Argon2PasswordInputSize)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(masterArgon2PasswordInput),
+                $"Der Argon2id-Master-Passworteingang muss {Argon2PasswordInputSize} Byte lang sein.");
+        }
+
+        using LockedSensitiveBuffer oneCallInput = CreateLockedBuffer(Argon2PasswordInputSize);
+        masterArgon2PasswordInput.CopyTo(oneCallInput.Bytes, 0);
+        return await DeriveFromPreHashAsync(
+            oneCallInput.Bytes,
+            salt,
+            outputLength,
+            profile,
+            cancellationToken).ConfigureAwait(false);
     }
 
     private static void ZeroIfNotNull(byte[]? value)

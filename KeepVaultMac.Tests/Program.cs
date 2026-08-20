@@ -19,6 +19,7 @@ var tests = new List<(string Name, Func<Task> Run)>
     ("Apple signature framework binding", TestAppleSignatureBindingAsync),
     ("locked secret buffer lifecycle", TestLockedSecretBufferAsync),
     ("password policy", TestPasswordPolicyAsync),
+    ("release companion version plumbing", TestReleaseCompanionVersionPlumbingAsync),
 };
 
 foreach ((string name, Func<Task> run) in tests)
@@ -103,6 +104,116 @@ static Task TestHmacSha3Async()
     }
 
     return Task.CompletedTask;
+}
+
+static async Task TestReleaseCompanionVersionPlumbingAsync()
+{
+    string repositoryRoot = FindRepositoryRoot();
+    string scannerBuilder = Path.Combine(repositoryRoot, "QrCodeScanner", "tools", "Build-QrScanner-macOS.sh");
+    string pairVerifier = Path.Combine(repositoryRoot, "tools", "Verify-ReleasePairMetadata-macOS.sh");
+    Require(File.Exists(scannerBuilder), "The QR-Scanner build script is missing.");
+    Require(File.Exists(pairVerifier), "The release-pair metadata verifier is missing.");
+
+    (int scannerExit, string scannerOutput, _) = await RunProcessAsync(
+        scannerBuilder,
+        "--preflight",
+        "--version", "4.0.2",
+        "--build-number", "6").ConfigureAwait(false);
+    Require(scannerExit == 0, "QR-Scanner rejected valid release version/build arguments.");
+    Require(
+        scannerOutput.Contains("preflight_version=4.0.2", StringComparison.Ordinal)
+            && scannerOutput.Contains("preflight_build=6", StringComparison.Ordinal),
+        "QR-Scanner did not render the requested release metadata in preflight.");
+
+    (int invalidExit, _, _) = await RunProcessAsync(
+        scannerBuilder,
+        "--preflight",
+        "--version", "not-a-version",
+        "--build-number", "6").ConfigureAwait(false);
+    Require(invalidExit != 0, "QR-Scanner accepted malformed release metadata.");
+
+    string root = Directory.CreateTempSubdirectory("keep-vault-release-metadata-").FullName;
+    string app = Path.Combine(root, "Keep Vault.app");
+    string scanner = Path.Combine(root, "QR-Scanner.app");
+    try
+    {
+        WriteTestInfoPlist(app, "de.michael-feinermann.keep-vault", "4.0.2", "6");
+        WriteTestInfoPlist(scanner, "de.michael-feinermann.qr-scanner", "4.0.2", "6");
+        (int matchedExit, string matchedOutput, _) = await RunProcessAsync(
+            pairVerifier,
+            "--app", app,
+            "--scanner", scanner).ConfigureAwait(false);
+        Require(matchedExit == 0, "The release-pair gate rejected matching 4.0.2/build-6 metadata.");
+        Require(
+            matchedOutput.Contains("release_pair_version=4.0.2", StringComparison.Ordinal)
+                && matchedOutput.Contains("release_pair_build=6", StringComparison.Ordinal),
+            "The release-pair gate did not report the matched metadata.");
+
+        WriteTestInfoPlist(scanner, "de.michael-feinermann.qr-scanner", "4.0.1", "5");
+        (int mismatchExit, _, _) = await RunProcessAsync(
+            pairVerifier,
+            "--app", app,
+            "--scanner", scanner).ConfigureAwait(false);
+        Require(mismatchExit != 0, "The release-pair gate accepted a stale QR-Scanner version.");
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+static string FindRepositoryRoot()
+{
+    for (string? path = AppContext.BaseDirectory; path is not null; path = Path.GetDirectoryName(path))
+    {
+        if (Directory.Exists(Path.Combine(path, ".git")))
+        {
+            return path;
+        }
+    }
+
+    throw new DirectoryNotFoundException("The Keep Vault repository root could not be located.");
+}
+
+static void WriteTestInfoPlist(string bundle, string identifier, string version, string build)
+{
+    string contents = Path.Combine(bundle, "Contents");
+    Directory.CreateDirectory(contents);
+    string plist = $"""
+        <?xml version="1.0" encoding="UTF-8"?>
+        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+        <plist version="1.0"><dict>
+          <key>CFBundleIdentifier</key><string>{identifier}</string>
+          <key>CFBundleShortVersionString</key><string>{version}</string>
+          <key>CFBundleVersion</key><string>{build}</string>
+        </dict></plist>
+        """;
+    File.WriteAllText(Path.Combine(contents, "Info.plist"), plist);
+}
+
+static async Task<(int ExitCode, string StandardOutput, string StandardError)> RunProcessAsync(
+    string executable,
+    params string[] arguments)
+{
+    var startInfo = new System.Diagnostics.ProcessStartInfo
+    {
+        FileName = executable,
+        UseShellExecute = false,
+        RedirectStandardOutput = true,
+        RedirectStandardError = true,
+        CreateNoWindow = true,
+    };
+    foreach (string argument in arguments)
+    {
+        startInfo.ArgumentList.Add(argument);
+    }
+
+    using System.Diagnostics.Process process = System.Diagnostics.Process.Start(startInfo)
+        ?? throw new InvalidOperationException($"Could not start {Path.GetFileName(executable)}.");
+    Task<string> stdout = process.StandardOutput.ReadToEndAsync();
+    Task<string> stderr = process.StandardError.ReadToEndAsync();
+    await process.WaitForExitAsync().ConfigureAwait(false);
+    return (process.ExitCode, await stdout.ConfigureAwait(false), await stderr.ConfigureAwait(false));
 }
 
 static Task TestDescriptorIdentityAsync()

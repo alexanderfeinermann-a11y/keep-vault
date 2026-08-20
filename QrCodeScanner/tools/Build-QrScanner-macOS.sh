@@ -25,6 +25,7 @@ architecture='universal'
 deployment_target='14.0'
 install_app=0
 run_tests=1
+preflight_only=0
 identity=${QRSCANNER_CODESIGN_IDENTITY:-}
 # Name of an "xcrun notarytool store-credentials" keychain profile. Empty means
 # the build stops short of notarization; no secret ever lives in this file.
@@ -50,11 +51,26 @@ while (( $# > 0 )); do
       architecture=$2
       shift
       ;;
+    --version)
+      (( $# >= 2 )) || { print -u2 'Missing value for --version.'; exit 64; }
+      marketing_version=$2
+      shift
+      ;;
+    --build-number)
+      (( $# >= 2 )) || { print -u2 'Missing value for --build-number.'; exit 64; }
+      build_version=$2
+      shift
+      ;;
+    --preflight)
+      preflight_only=1
+      ;;
     --skip-tests)
       run_tests=0
       ;;
     -h|--help)
-      print 'Usage: Build-QrScanner-macOS.sh [--install] [--identity NAME] [--notary-profile NAME] [--arch universal|arm64|x86_64] [--skip-tests]'
+      print 'Usage: Build-QrScanner-macOS.sh [--install] [--identity NAME] [--notary-profile NAME]'
+      print '       [--arch universal|arm64|x86_64] [--version X.Y.Z] [--build-number N]'
+      print '       [--skip-tests] [--preflight]'
       exit 0
       ;;
     *)
@@ -65,12 +81,51 @@ while (( $# > 0 )); do
   shift
 done
 
+if [[ ! ${marketing_version} =~ '^[0-9]+([.][0-9]+){1,2}$' || ! ${build_version} =~ '^[1-9][0-9]*$' ]]; then
+  print -u2 'Version values must be numeric (for example 4.0.2 and build 6).'
+  exit 64
+fi
+
+render_info_plist() {
+  local destination=$1
+  sed -e "s/@@MARKETING_VERSION@@/${marketing_version}/g" \
+      -e "s/@@BUILD_VERSION@@/${build_version}/g" \
+    ${packaging_dir}/Info.plist.template > ${destination}
+  plutil -lint ${destination} > /dev/null
+  [[ $(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' ${destination}) == ${bundle_identifier} ]] || {
+    print -u2 'The rendered QR-Scanner bundle identifier is incorrect.'
+    exit 1
+  }
+  [[ $(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' ${destination}) == ${marketing_version} ]] || {
+    print -u2 'The rendered QR-Scanner marketing version is incorrect.'
+    exit 1
+  }
+  [[ $(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' ${destination}) == ${build_version} ]] || {
+    print -u2 'The rendered QR-Scanner build number is incorrect.'
+    exit 1
+  }
+}
+
 for required_command in xcrun codesign security plutil ditto iconutil; do
   if ! command -v ${required_command} > /dev/null 2>&1; then
     print -u2 "Required command not found: ${required_command}"
     exit 1
   fi
 done
+
+if (( preflight_only )); then
+  preflight_root=$(mktemp -d "${TMPDIR:-/tmp}/qr-scanner-preflight.XXXXXXXX")
+  cleanup_preflight() {
+    if [[ -n ${preflight_root:-} && -d ${preflight_root} && ${preflight_root} == */qr-scanner-preflight.* ]]; then
+      rm -rf -- ${preflight_root}
+    fi
+  }
+  trap cleanup_preflight EXIT INT TERM
+  render_info_plist ${preflight_root}/Info.plist
+  print "preflight_version=${marketing_version}"
+  print "preflight_build=${build_version}"
+  exit 0
+fi
 
 # Pick a signing identity if none was named.
 #
@@ -137,10 +192,7 @@ esac
 # bundle. LaunchServices reads the bundle's copy; the embedded section is what
 # the camera prompt reads when the process is examined directly.
 plist_path=${build_root}/Info.plist
-sed -e "s/@@MARKETING_VERSION@@/${marketing_version}/g" \
-    -e "s/@@BUILD_VERSION@@/${build_version}/g" \
-  ${packaging_dir}/Info.plist.template > ${plist_path}
-plutil -lint ${plist_path} > /dev/null
+render_info_plist ${plist_path}
 
 thin_binaries=()
 for slice in ${architectures[@]}; do

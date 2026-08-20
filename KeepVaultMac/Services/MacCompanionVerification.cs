@@ -1,4 +1,5 @@
 using System.Runtime.Versioning;
+using System.Security.Cryptography;
 using KalynaArchiver.Signing;
 
 namespace KalynaArchiver.Services;
@@ -91,11 +92,24 @@ internal static class MacCompanionVerification
                     $"QR-Scanner.app failed its dual signature check: {signature.Message}");
             }
 
+            // The hybrid signature binds a SHA-512 digest. Everything else in
+            // the package is additionally held to the SHA3-512 and Skein-1024
+            // dual manifest, and the scanner ships those files too -- checking
+            // only the signature here would have left one component measured by
+            // fewer hashes than the rest, for no reason other than that this
+            // check was written later.
+            string? manifestFailure = VerifyDualManifest(bundle, executable, policy);
+            if (manifestFailure is not null)
+            {
+                return new CompanionVerificationResult(true, false, bundle, manifestFailure);
+            }
+
             return new CompanionVerificationResult(
                 true,
                 true,
                 bundle,
-                "QR-Scanner.app carries a valid RSA-PSS/SHA-512 and ML-DSA-87 signature from the pinned keys.");
+                "QR-Scanner.app matches its SHA3-512/Skein-1024 manifest and carries a valid "
+                + "RSA-PSS/SHA-512 and ML-DSA-87 signature from the pinned keys.");
         }
         catch (Exception exception)
         {
@@ -105,6 +119,77 @@ internal static class MacCompanionVerification
                 bundle,
                 $"QR-Scanner.app could not be checked: {exception.Message}");
         }
+    }
+
+    /// <summary>
+    /// Holds the companion to the same SHA3-512 and Skein-1024 dual manifest as
+    /// every other artifact, and requires both manifests to be signed by the
+    /// pinned keys themselves.
+    /// </summary>
+    /// <remarks>
+    /// Returns null when everything matches, otherwise the sentence to report.
+    /// An unsigned manifest is worth nothing: whoever replaced the executable
+    /// would simply write the new digests next to it.
+    /// </remarks>
+    private static string? VerifyDualManifest(
+        string bundle,
+        string executable,
+        HybridSignaturePolicy policy)
+    {
+        const int Sha3HexLength = 128;
+        const int SkeinHexLength = 256;
+
+        foreach ((string suffix, int hexLength, string algorithm) in new[]
+        {
+            (".sha3", Sha3HexLength, "SHA3-512"),
+            (".skein", SkeinHexLength, "Skein-1024"),
+        })
+        {
+            string manifestPath = bundle + suffix;
+            if (!File.Exists(manifestPath))
+            {
+                return $"QR-Scanner.app has no {algorithm} manifest ({Path.GetFileName(manifestPath)}).";
+            }
+
+            HybridSignatureVerificationResult manifestSignature = HybridSignatureService.VerifyFile(
+                manifestPath,
+                manifestPath + HybridSignatureService.SidecarExtension,
+                policy);
+            if (!manifestSignature.IsTrusted
+                || !manifestSignature.RsaPssValid
+                || !manifestSignature.Mldsa87Valid)
+            {
+                return $"The {algorithm} manifest of QR-Scanner.app is not signed by the pinned keys: "
+                    + manifestSignature.Message;
+            }
+
+            string expected = new(File.ReadAllText(manifestPath)
+                .Where(character => !char.IsWhiteSpace(character))
+                .ToArray());
+            if (expected.Length != hexLength || expected.Any(character => !Uri.IsHexDigit(character)))
+            {
+                return $"The {algorithm} manifest of QR-Scanner.app is not {hexLength} hexadecimal characters.";
+            }
+
+            byte[] actual = suffix == ".sha3"
+                ? Sha3_512Compat.HashData(File.ReadAllBytes(executable))
+                : Skein1024Digest.HashData(File.ReadAllBytes(executable));
+            byte[] expectedBytes = Convert.FromHexString(expected);
+            try
+            {
+                if (!CryptographicOperations.FixedTimeEquals(actual, expectedBytes))
+                {
+                    return $"QR-Scanner.app does not match its {algorithm} manifest.";
+                }
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(actual);
+                CryptographicOperations.ZeroMemory(expectedBytes);
+            }
+        }
+
+        return null;
     }
 
     /// <summary>

@@ -13,7 +13,8 @@ Vault wird nicht gebraucht.
 ## Bauen und installieren
 
 ```bash
-./QrCodeScanner/tools/Build-QrScanner-macOS.sh --install
+./QrCodeScanner/tools/Build-QrScanner-macOS.sh \
+  --version 4.0.2 --build-number 6 --install
 ```
 
 Das Skript baut universell (arm64 + x86_64), fuehrt die Tests aus, erzeugt das
@@ -22,6 +23,9 @@ die App unter `/Applications/QR-Scanner.app` ab. Danach steht sie in Finder,
 Launchpad und Spotlight und laesst sich per Doppelklick oeffnen.
 
 Ohne `--install` bleibt das Ergebnis in `QrCodeScanner/dist/`.
+Für ein gemeinsames Keep-Vault-Release müssen `--version` und
+`--build-number` exakt den Werten des Keep-Vault-Builds entsprechen; der
+portable Paket-Build lehnt fehlende oder abweichende Scanner-Metadaten ab.
 
 Beim ersten Start fragt macOS einmal nach der Kamera. Wird die Frage verneint,
 laesst sich das nur in den Systemeinstellungen unter „Datenschutz & Sicherheit“
