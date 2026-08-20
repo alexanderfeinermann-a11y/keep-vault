@@ -427,23 +427,10 @@ internal sealed class MacOriginalDeletionService
                     }
                 }
             }
-
-            // Stage 3: Unlink verified files from quarantine (irreversible commit)
-            foreach ((string origPath, string quarPath) in movedFiles)
-            {
-                try
-                {
-                    File.Delete(quarPath);
-                }
-                catch (Exception ex)
-                {
-                    failures.Add($"Quarantänedatei konnte nicht gelöscht werden ({origPath}): {ex.Message}");
-                }
-            }
         }
         catch (Exception ex)
         {
-            // Rollback: Restore any files still in quarantine to their original locations
+            // Pre-Commit Rollback: Restore all quarantined files to their original locations
             var rollbackErrors = new List<string>();
             foreach ((string origPath, string quarPath) in movedFiles)
             {
@@ -462,31 +449,30 @@ internal sealed class MacOriginalDeletionService
                 }
             }
 
-            failures.Add($"Löschung abgebrochen: {ex.Message}");
+            failures.Add($"Löschung vor dem Commit abgebrochen: {ex.Message}");
             if (rollbackErrors.Count > 0)
             {
                 failures.AddRange(rollbackErrors);
             }
+
+            CleanupQuarantineDirectories(quarantineDirs);
             return failures;
         }
-        finally
+
+        // Stage 3: Irreversible Commit (unlink verified quarantined files)
+        foreach ((string origPath, string quarPath) in movedFiles)
         {
-            // Clean up ONLY demonstrably empty quarantine directories — NEVER delete recursively.
-            foreach (string qDir in quarantineDirs)
+            try
             {
-                try
-                {
-                    if (Directory.Exists(qDir) && !Directory.EnumerateFileSystemEntries(qDir).Any())
-                    {
-                        Directory.Delete(qDir, recursive: false);
-                    }
-                }
-                catch
-                {
-                    // best effort non-recursive cleanup
-                }
+                File.Delete(quarPath);
+            }
+            catch (Exception ex)
+            {
+                failures.Add($"Commit-Fehler: Quarantänedatei konnte nicht gelöscht werden ({origPath}): {ex.Message}. Datei verbleibt in: {quarPath}");
             }
         }
+
+        CleanupQuarantineDirectories(quarantineDirs);
 
         foreach (string original in originals)
         {
@@ -519,6 +505,24 @@ internal sealed class MacOriginalDeletionService
         if (!Directory.EnumerateFileSystemEntries(directory).Any())
         {
             Directory.Delete(directory);
+        }
+    }
+
+    private static void CleanupQuarantineDirectories(IEnumerable<string> quarantineDirs)
+    {
+        foreach (string qDir in quarantineDirs)
+        {
+            try
+            {
+                if (Directory.Exists(qDir) && !Directory.EnumerateFileSystemEntries(qDir).Any())
+                {
+                    Directory.Delete(qDir, recursive: false);
+                }
+            }
+            catch
+            {
+                // best effort non-recursive cleanup
+            }
         }
     }
 }

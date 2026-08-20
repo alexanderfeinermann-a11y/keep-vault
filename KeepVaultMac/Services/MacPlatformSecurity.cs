@@ -343,6 +343,28 @@ internal static partial class MacSafeFileSystem
         internal fixed long Reserved[2];
     }
 
+    internal static SafeFileHandle OpenDirectoryHandle(string path)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(path);
+        int descriptor = Open(path, OpenReadOnly | OpenDirectory | OpenCloseOnExec | OpenNoFollowAny);
+        if (descriptor < 0)
+        {
+            throw new IOException(
+                $"macOS could not open directory handle for '{path}'.",
+                new Win32Exception(Marshal.GetLastPInvokeError()));
+        }
+        return new SafeFileHandle(descriptor, ownsHandle: true);
+    }
+
+    internal static long GetFreeDiskSpaceBytes(string path)
+    {
+        if (StatVfs(path, out DarwinStatVfs stat) != 0)
+        {
+            return -1;
+        }
+        return checked((long)(stat.f_bavail * stat.f_frsize));
+    }
+
     [LibraryImport("libSystem.B.dylib", EntryPoint = "open", SetLastError = true, StringMarshalling = StringMarshalling.Utf8)]
     private static partial int Open(string path, int flags);
 
@@ -363,6 +385,31 @@ internal static partial class MacSafeFileSystem
 
     [LibraryImport("libSystem.B.dylib", EntryPoint = "free")]
     private static partial void Free(nint pointer);
+
+    [LibraryImport("libSystem.B.dylib", EntryPoint = "mkdirat", SetLastError = true, StringMarshalling = StringMarshalling.Utf8)]
+    internal static partial int MkdirAt(int dirfd, string path, uint mode);
+
+    [LibraryImport("libSystem.B.dylib", EntryPoint = "openat", SetLastError = true, StringMarshalling = StringMarshalling.Utf8)]
+    internal static partial int OpenAt(int dirfd, string path, int flags, int mode);
+
+    [LibraryImport("libSystem.B.dylib", EntryPoint = "statvfs", SetLastError = true, StringMarshalling = StringMarshalling.Utf8)]
+    private static partial int StatVfs(string path, out DarwinStatVfs buf);
+}
+
+[StructLayout(LayoutKind.Sequential)]
+internal struct DarwinStatVfs
+{
+    public ulong f_bsize;
+    public ulong f_frsize;
+    public uint f_blocks;
+    public uint f_bfree;
+    public uint f_bavail;
+    public uint f_files;
+    public uint f_ffree;
+    public uint f_favail;
+    public ulong f_fsid;
+    public ulong f_flag;
+    public ulong f_namemax;
 }
 
 internal readonly record struct MacFileIdentity(int Device, ulong Inode, ushort LinkCount, ushort Mode, long Size)
@@ -474,6 +521,159 @@ internal static partial class MacCodeSignature
 
     [LibraryImport("/System/Library/Frameworks/Security.framework/Security", EntryPoint = "SecStaticCodeCheckValidityWithErrors")]
     private static partial int SecStaticCodeCheckValidityWithErrors(nint staticCode, uint flags, nint requirement, out nint errors);
+}
+
+internal sealed class MacExtractionStaging : IDisposable
+{
+    private readonly SafeFileHandle _parentHandle;
+    private readonly SafeFileHandle _stagingHandle;
+    private readonly MacFileIdentity _stagingIdentity;
+    public string DestinationPath { get; }
+    public string StagingPath { get; }
+    public string StagingName { get; }
+    private bool _installed;
+
+    public MacExtractionStaging(string destinationPath)
+    {
+        DestinationPath = Path.GetFullPath(destinationPath);
+        if (File.Exists(DestinationPath))
+        {
+            throw new InvalidOperationException("Extraction target must be a directory path.");
+        }
+
+        string parentDir = Path.GetDirectoryName(DestinationPath) ?? Environment.CurrentDirectory;
+        Directory.CreateDirectory(parentDir);
+        string canonicalParent = MacSafeFileSystem.ResolveExistingRealPath(parentDir);
+
+        _parentHandle = MacSafeFileSystem.OpenDirectoryHandle(canonicalParent);
+        StagingName = $".{Path.GetFileName(DestinationPath)}.{Guid.NewGuid():N}.extract-part";
+        StagingPath = Path.Combine(canonicalParent, StagingName);
+
+        bool parentAdded = false;
+        try
+        {
+            _parentHandle.DangerousAddRef(ref parentAdded);
+            int parentFd = checked((int)_parentHandle.DangerousGetHandle());
+            // 0x1C0 is POSIX octal 0700 (S_IRWXU: rwx------)
+            if (MacSafeFileSystem.MkdirAt(parentFd, StagingName, 0x1C0) != 0)
+            {
+                throw new Win32Exception(Marshal.GetLastPInvokeError(), "Could not create extraction staging directory.");
+            }
+
+            int stagingFd = MacSafeFileSystem.OpenAt(
+                parentFd,
+                StagingName,
+                0x0000 /* O_RDONLY */ | 0x00100000 /* O_DIRECTORY */ | 0x20000000 /* O_NOFOLLOW_ANY */ | 0x01000000 /* O_CLOEXEC */,
+                0);
+            if (stagingFd < 0)
+            {
+                throw new Win32Exception(Marshal.GetLastPInvokeError(), "Could not open extraction staging directory descriptor.");
+            }
+
+            _stagingHandle = new SafeFileHandle(stagingFd, ownsHandle: true);
+            _stagingIdentity = MacSafeFileSystem.GetIdentity(_stagingHandle);
+        }
+        finally
+        {
+            if (parentAdded)
+            {
+                _parentHandle.DangerousRelease();
+            }
+        }
+    }
+
+    public void VerifyIdentity()
+    {
+        MacSafeFileSystem.RequirePathStillNamesHandle(_stagingHandle, StagingPath);
+        MacFileIdentity current = MacSafeFileSystem.GetIdentity(_stagingHandle);
+        if (current.Device != _stagingIdentity.Device || current.Inode != _stagingIdentity.Inode)
+        {
+            throw new InvalidOperationException("Extraction staging directory identity changed during extraction.");
+        }
+    }
+
+    public void Install()
+    {
+        VerifyIdentity();
+        if (File.Exists(DestinationPath))
+        {
+            throw new IOException("A file appeared at the extraction target before installation.");
+        }
+
+        if (Directory.Exists(DestinationPath))
+        {
+            FileAttributes attributes = File.GetAttributes(DestinationPath);
+            if ((attributes & FileAttributes.ReparsePoint) != 0
+                || Directory.EnumerateFileSystemEntries(DestinationPath).Any())
+            {
+                throw new IOException("The extraction target changed while extraction was running.");
+            }
+
+            Directory.Delete(DestinationPath);
+        }
+
+        Directory.Move(StagingPath, DestinationPath);
+        _installed = true;
+    }
+
+    public void Cleanup()
+    {
+        if (_installed)
+        {
+            return;
+        }
+
+        try
+        {
+            if (!Directory.Exists(StagingPath))
+            {
+                return;
+            }
+
+            // Ensure StagingPath still matches our verified staging descriptor before any deletion
+            if (!_stagingHandle.IsInvalid && !_stagingHandle.IsClosed)
+            {
+                MacFileIdentity currentStat = MacSafeFileSystem.GetIdentity(_stagingHandle);
+                if (currentStat.Device != _stagingIdentity.Device || currentStat.Inode != _stagingIdentity.Inode)
+                {
+                    // Path substitution detected! Refuse recursive deletion of foreign directory.
+                    return;
+                }
+                try
+                {
+                    MacSafeFileSystem.RequirePathStillNamesHandle(_stagingHandle, StagingPath);
+                }
+                catch
+                {
+                    // Path swapped or changed; refuse to delete foreign files
+                    return;
+                }
+            }
+
+            FileAttributes attributes = File.GetAttributes(StagingPath);
+            if ((attributes & FileAttributes.ReparsePoint) != 0)
+            {
+                Directory.Delete(StagingPath);
+                return;
+            }
+
+            Directory.Delete(StagingPath, recursive: true);
+        }
+        catch
+        {
+            // best effort non-destructive cleanup
+        }
+    }
+
+    public void Dispose()
+    {
+        if (!_installed)
+        {
+            Cleanup();
+        }
+        _stagingHandle?.Dispose();
+        _parentHandle?.Dispose();
+    }
 }
 
 internal sealed record MacSignatureInfo(SignatureState State, string? TeamIdentifier, string Message);

@@ -247,7 +247,7 @@ public static partial class EntropyMixer
     {
         // One consumption of the pools yields both Argon2id rounds: the first
         // expansion uses SHA3-512, the second SHA-512 over the same snapshot.
-        // That is what lets the paranoia suite have a genuinely independent
+        // That gives the paranoia suite a computationally domain-diverse
         // second round without asking the user for another 512 samples per pool.
         (LockedSensitiveBuffer firstMouse, LockedSensitiveBuffer secondMouse) =
             ExpandAndConsumeMousePoolsDual(PoolDrawBytes, SamplePurposes);
@@ -742,11 +742,10 @@ public static partial class EntropyMixer
                         continue;
                     }
 
-                    // The same block input, expanded through the other hash.
-                    // SHA3-512 is a sponge and SHA-512 is Merkle-Damgard, so
-                    // knowing one output says nothing about the other, and the
-                    // second round gets independent material without a second
-                    // pool having to be collected.
+                    // The same block input, expanded through a computationally domain-diverse hash.
+                    // SHA3-512 is a sponge and SHA-512 is Merkle-Damgard; both are
+                    // domain-diverse expansions of the same pool snapshot (with genuine
+                    // entropy ensured by distinct OS CSPRNG draws for each round's salt).
                     using LockedSensitiveBuffer secondBlock = LockedSensitiveBuffer.Create(Sha512Compat.HashSizeInBytes);
                     int secondWritten = Sha512Compat.HashData(combined.Bytes, secondBlock.Bytes);
                     if (secondWritten != Sha512Compat.HashSizeInBytes)

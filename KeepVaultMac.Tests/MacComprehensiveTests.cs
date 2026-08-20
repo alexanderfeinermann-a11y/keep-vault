@@ -1551,6 +1551,8 @@ internal static partial class MacComprehensiveTests
                     "A changed ZPAQ archive passed dual-manifest verification.").ConfigureAwait(false);
 
                 await TestZpaqTraversalAsync(root).ConfigureAwait(false);
+                await TestZpaqStagingSubstitutionRefusalAsync(root).ConfigureAwait(false);
+                await TestZpaqDecompressionBombLimitsAsync(root).ConfigureAwait(false);
                 await TestMalformedZpaqCorpusAsync(source, root).ConfigureAwait(false);
             }
             finally
@@ -1561,6 +1563,73 @@ internal static partial class MacComprehensiveTests
         finally
         {
             Directory.Delete(root, recursive: true);
+        }
+    }
+
+    private static async Task TestZpaqStagingSubstitutionRefusalAsync(string root)
+    {
+        string destDir = Path.Combine(root, "safe_target_dest");
+        using var staging = new MacExtractionStaging(destDir);
+        string realStaging = staging.StagingPath;
+        string foreignCanaryDir = Path.Combine(root, "canary_directory");
+        Directory.CreateDirectory(foreignCanaryDir);
+        string canaryFile = Path.Combine(foreignCanaryDir, "valuable_user_data.txt");
+        await File.WriteAllTextAsync(canaryFile, "IMPORTANT USER DATA MUST NOT BE DELETED").ConfigureAwait(false);
+
+        string tempBackup = realStaging + ".temp";
+        Directory.Move(realStaging, tempBackup);
+        Directory.Move(foreignCanaryDir, realStaging);
+
+        try
+        {
+            staging.Cleanup();
+
+            Require(Directory.Exists(realStaging), "Staging cleanup deleted a substituted foreign directory!");
+            Require(File.Exists(Path.Combine(realStaging, "valuable_user_data.txt")), "Staging cleanup deleted foreign files inside substituted directory!");
+        }
+        finally
+        {
+            Directory.Delete(realStaging, recursive: true);
+            if (Directory.Exists(tempBackup))
+            {
+                Directory.Delete(tempBackup, recursive: true);
+            }
+        }
+    }
+
+    private static async Task TestZpaqDecompressionBombLimitsAsync(string root)
+    {
+        string bombSource = Path.Combine(root, "bomb_src");
+        Directory.CreateDirectory(bombSource);
+        for (int i = 0; i < 5; i++)
+        {
+            await File.WriteAllTextAsync(Path.Combine(bombSource, $"file_{i}.dat"), new string('A', 1000)).ConfigureAwait(false);
+        }
+
+        string archive = Path.Combine(root, "bomb.zpaq");
+        ProcessResult add = await new ZpaqService().AddAsync(
+            archive,
+            Directory.GetFiles(bombSource),
+            0,
+            null,
+            CancellationToken.None).ConfigureAwait(false);
+        Require(add.Succeeded, "Could not build bomb test archive.");
+
+        string extractTarget = Path.Combine(root, "bomb_extract_target");
+
+        ZpaqService.MaxExtractedFilesOverride = 2;
+        try
+        {
+            await RequireThrowsAsync<Exception>(
+                () => new ZpaqService().ExtractAsync(archive, extractTarget, null, CancellationToken.None),
+                "ZPAQ extracted files beyond configured bomb limit without rejection.").ConfigureAwait(false);
+            Require(!Directory.Exists(extractTarget), "Extraction directory was installed despite exceeding decompression bomb limit.");
+        }
+        finally
+        {
+            ZpaqService.MaxExtractedFilesOverride = -1;
+            ZpaqService.MaxExtractedBytesOverride = -1;
+            ZpaqService.MinFreeDiskSpaceBytesOverride = -1;
         }
     }
 

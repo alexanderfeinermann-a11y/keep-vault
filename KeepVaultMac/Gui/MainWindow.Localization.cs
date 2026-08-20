@@ -262,11 +262,11 @@ public sealed partial class MainWindow
             "analyze" => en ? "Analyze" : "Analysieren",
             "eraseNotAnalyzed" => en ? "No file analyzed yet." : "Noch keine Datei analysiert.",
             "eraseHardwareNotice" => en
-                ? "Per-file hardware erase cannot be guaranteed on SSDs or APFS."
-                : "Per-Datei-Hardwarelöschung kann auf SSDs und APFS nicht garantiert werden.",
+                ? "This invalidates the current local container file only. APFS snapshots, Time Machine backups, cloud copies, and physical SSD flash remanence are not removed."
+                : "Dies macht nur die aktuelle lokale Containerdatei unbrauchbar. APFS-Snapshots, Time-Machine-Backups, Cloud-Versionen und SSD-Flash-Remanenz werden dadurch nicht gelöscht.",
             "eraseConfirm" => en
-                ? "I understand the SSD/APFS boundary and want to delete this encrypted container."
-                : "Ich verstehe die SSD- und APFS-Grenze und möchte diesen verschlüsselten Container löschen.",
+                ? "I understand that APFS snapshots/backups are not erased and want to delete this container."
+                : "Ich verstehe, dass APFS-Snapshots/Backups nicht gelöscht werden, und möchte diesen Container löschen.",
             "eraseButton" => en ? "Cryptographically erase container" : "Container kryptografisch löschen",
             "securityLog" => en ? "Security log" : "Sicherheitsprotokoll",
             "clear" => en ? "Clear" : "Leeren",

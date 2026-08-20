@@ -393,12 +393,12 @@
                 <StackPanel Spacing="9">
                   <TextBlock x:Name="EraseStatusText" Text="Noch keine Datei analysiert." Foreground="#F2BD55" TextWrapping="Wrap" />
                   <TextBlock x:Name="EraseHardwareNoticeText"
-                             Text="Per-Datei-Hardwarelöschung ist auf SSDs und APFS nicht garantiert."
+                             Text="Dies macht nur die aktuelle lokale Containerdatei unbrauchbar. APFS-Snapshots, Time-Machine-Backups, Cloud-Versionen und SSD-Flash-Remanenz werden dadurch nicht gelöscht."
                              Foreground="#F29AA6" TextWrapping="Wrap" />
                 </StackPanel>
               </Border>
               <CheckBox x:Name="EraseConfirmBox"
-                        Content="Ich verstehe die SSD- und APFS-Grenze und möchte diesen verschlüsselten Container löschen." />
+                        Content="Ich verstehe, dass APFS-Snapshots/Backups nicht gelöscht werden, und möchte diesen Container löschen." />
               <Button x:Name="EraseContainerButton" Content="Container kryptografisch löschen" Classes="danger" HorizontalAlignment="Left" Click="EraseContainer_Click" />
             </StackPanel>
           </ScrollViewer>

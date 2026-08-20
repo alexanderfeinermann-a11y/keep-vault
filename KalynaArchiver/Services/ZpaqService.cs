@@ -171,12 +171,48 @@ public sealed partial class ZpaqService
     {
         using ArchiveIntegrityLease archive = await _archiveIntegrity.AcquireVerifiedAsync(archivePath, cancellationToken).ConfigureAwait(false);
         using TrustedNativeFileLease executable = AcquireExecutable();
+#if KEEPVAULT_MACOS
+        using var staging = new MacExtractionStaging(outputFolder);
+        try
+        {
+            ProcessResult result = await RunTextProcessAsync(
+                executable.Path,
+                new[] { "extract", archive.Path },
+                staging.StagingPath,
+                progress,
+                cancellationToken,
+                monitorStagingDirectory: staging.StagingPath).ConfigureAwait(false);
+            if (result.Succeeded)
+            {
+                ValidateExtractedDirectoryLimits(staging.StagingPath);
+                staging.Install();
+            }
+            else
+            {
+                staging.Cleanup();
+            }
+
+            return result;
+        }
+        catch
+        {
+            staging.Cleanup();
+            throw;
+        }
+#else
         ExtractionTarget target = PrepareExtractionTarget(outputFolder);
         try
         {
-            ProcessResult result = await RunTextProcessAsync(executable.Path, new[] { "extract", archive.Path }, target.StagingPath, progress, cancellationToken).ConfigureAwait(false);
+            ProcessResult result = await RunTextProcessAsync(
+                executable.Path,
+                new[] { "extract", archive.Path },
+                target.StagingPath,
+                progress,
+                cancellationToken,
+                monitorStagingDirectory: target.StagingPath).ConfigureAwait(false);
             if (result.Succeeded)
             {
+                ValidateExtractedDirectoryLimits(target.StagingPath);
                 InstallExtractedDirectory(target);
             }
             else
@@ -191,6 +227,7 @@ public sealed partial class ZpaqService
             CleanupFailedExtractionDirectory(target.StagingPath);
             throw;
         }
+#endif
     }
 
     public async Task<ProcessResult> ListAsync(
@@ -243,12 +280,50 @@ public sealed partial class ZpaqService
     {
         ArgumentNullException.ThrowIfNull(writeArchive);
         using TrustedNativeFileLease executable = AcquireExecutable();
+#if KEEPVAULT_MACOS
+        using var staging = new MacExtractionStaging(outputFolder);
+        try
+        {
+            ProcessResult result = await RunStdinPipeAsync(
+                executable.Path,
+                new[] { "--pipe", "extract", "-" },
+                staging.StagingPath,
+                writeArchive,
+                progress,
+                cancellationToken,
+                monitorStagingDirectory: staging.StagingPath).ConfigureAwait(false);
+            if (result.Succeeded)
+            {
+                ValidateExtractedDirectoryLimits(staging.StagingPath);
+                staging.Install();
+            }
+            else
+            {
+                staging.Cleanup();
+            }
+
+            return result;
+        }
+        catch
+        {
+            staging.Cleanup();
+            throw;
+        }
+#else
         ExtractionTarget target = PrepareExtractionTarget(outputFolder);
         try
         {
-            ProcessResult result = await RunStdinPipeAsync(executable.Path, new[] { "--pipe", "extract", "-" }, target.StagingPath, writeArchive, progress, cancellationToken).ConfigureAwait(false);
+            ProcessResult result = await RunStdinPipeAsync(
+                executable.Path,
+                new[] { "--pipe", "extract", "-" },
+                target.StagingPath,
+                writeArchive,
+                progress,
+                cancellationToken,
+                monitorStagingDirectory: target.StagingPath).ConfigureAwait(false);
             if (result.Succeeded)
             {
+                ValidateExtractedDirectoryLimits(target.StagingPath);
                 InstallExtractedDirectory(target);
             }
             else
@@ -263,6 +338,7 @@ public sealed partial class ZpaqService
             CleanupFailedExtractionDirectory(target.StagingPath);
             throw;
         }
+#endif
     }
 
     public async Task<ProcessResult> ListStreamingAsync(
@@ -511,13 +587,145 @@ public sealed partial class ZpaqService
         return string.Equals(Path.GetFullPath(first), Path.GetFullPath(second), FileSystemPathComparison);
     }
 
+    public const long DefaultMaxExtractedBytes = 500L * 1024 * 1024 * 1024; // 500 GiB
+    public const int DefaultMaxExtractedFiles = 500_000;
+    public const long DefaultMinFreeDiskSpaceBytes = 256L * 1024 * 1024; // 256 MiB
+
+    internal static long MaxExtractedBytesOverride = -1;
+    internal static int MaxExtractedFilesOverride = -1;
+    internal static long MinFreeDiskSpaceBytesOverride = -1;
+
+    internal static void ValidateExtractedDirectoryLimits(string stagingDirectory)
+    {
+        if (!Directory.Exists(stagingDirectory))
+        {
+            return;
+        }
+
+        long maxBytes = MaxExtractedBytesOverride > 0 ? MaxExtractedBytesOverride : DefaultMaxExtractedBytes;
+        int maxFiles = MaxExtractedFilesOverride > 0 ? MaxExtractedFilesOverride : DefaultMaxExtractedFiles;
+        long minFreeSpace = MinFreeDiskSpaceBytesOverride > 0 ? MinFreeDiskSpaceBytesOverride : DefaultMinFreeDiskSpaceBytes;
+
+        long totalBytes = 0;
+        int fileCount = 0;
+
+        foreach (string file in Directory.EnumerateFiles(stagingDirectory, "*", SearchOption.AllDirectories))
+        {
+            fileCount++;
+            var info = new FileInfo(file);
+            totalBytes += info.Length;
+
+            if (fileCount > maxFiles)
+            {
+                throw new InvalidDataException($"ZPAQ-Extraktionsgrenze für Dateianzahl überschritten ({maxFiles}). Mögliche Decompression-Bomb abgelehnt.");
+            }
+
+            if (totalBytes > maxBytes)
+            {
+                throw new InvalidDataException($"ZPAQ-Extraktionsgrenze für Gesamtgröße überschritten ({maxBytes} Bytes). Mögliche Decompression-Bomb abgelehnt.");
+            }
+        }
+
+#if KEEPVAULT_MACOS
+        long freeSpace = MacSafeFileSystem.GetFreeDiskSpaceBytes(stagingDirectory);
+        if (freeSpace >= 0 && freeSpace < minFreeSpace)
+        {
+            throw new IOException($"ZPAQ-Extraktion abgebrochen: Unzureichender freier Speicherplatz auf dem Ziellaufwerk ({freeSpace} Bytes verbleibend).");
+        }
+#endif
+    }
+
+    private static async Task MonitorExtractionLimitsAsync(
+        string stagingDirectory,
+        Process process,
+        CancellationTokenSource linkedCts,
+        CancellationToken cancellationToken)
+    {
+        long maxBytes = MaxExtractedBytesOverride > 0 ? MaxExtractedBytesOverride : DefaultMaxExtractedBytes;
+        int maxFiles = MaxExtractedFilesOverride > 0 ? MaxExtractedFilesOverride : DefaultMaxExtractedFiles;
+        long minFreeSpace = MinFreeDiskSpaceBytesOverride > 0 ? MinFreeDiskSpaceBytesOverride : DefaultMinFreeDiskSpaceBytes;
+
+        while (!process.HasExited && !cancellationToken.IsCancellationRequested)
+        {
+            try
+            {
+                await Task.Delay(100, cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                break;
+            }
+
+            if (process.HasExited)
+            {
+                break;
+            }
+
+            if (!Directory.Exists(stagingDirectory))
+            {
+                continue;
+            }
+
+            long totalBytes = 0;
+            int fileCount = 0;
+
+            try
+            {
+                foreach (string file in Directory.EnumerateFiles(stagingDirectory, "*", SearchOption.AllDirectories))
+                {
+                    fileCount++;
+                    var info = new FileInfo(file);
+                    totalBytes += info.Length;
+
+                    if (fileCount > maxFiles)
+                    {
+                        linkedCts.Cancel();
+                        try { process.Kill(entireProcessTree: true); } catch { }
+                        throw new InvalidDataException($"ZPAQ-Extraktionsgrenze für Dateianzahl überschritten ({maxFiles}). Mögliche Decompression-Bomb abgelehnt.");
+                    }
+
+                    if (totalBytes > maxBytes)
+                    {
+                        linkedCts.Cancel();
+                        try { process.Kill(entireProcessTree: true); } catch { }
+                        throw new InvalidDataException($"ZPAQ-Extraktionsgrenze für Gesamtgröße überschritten ({maxBytes} Bytes). Mögliche Decompression-Bomb abgelehnt.");
+                    }
+                }
+
+#if KEEPVAULT_MACOS
+                long freeSpace = MacSafeFileSystem.GetFreeDiskSpaceBytes(stagingDirectory);
+                if (freeSpace >= 0 && freeSpace < minFreeSpace)
+                {
+                    linkedCts.Cancel();
+                    try { process.Kill(entireProcessTree: true); } catch { }
+                    throw new IOException($"ZPAQ-Extraktion abgebrochen: Unzureichender freier Speicherplatz auf dem Ziellaufwerk ({freeSpace} Bytes verbleibend).");
+                }
+#endif
+            }
+            catch (InvalidDataException)
+            {
+                throw;
+            }
+            catch (IOException ioEx) when (ioEx.Message.Contains("Unzureichender freier Speicherplatz", StringComparison.Ordinal))
+            {
+                throw;
+            }
+            catch
+            {
+                // Transient sharing locks while files are actively written; continue monitoring
+            }
+        }
+    }
+
     internal static async Task<ProcessResult> RunTextProcessAsync(
         string executable,
         IEnumerable<string> arguments,
         string workingDirectory,
         IProgress<string>? progress,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? monitorStagingDirectory = null)
     {
+        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         using var process = CreateProcess(executable, arguments, workingDirectory);
         process.StartInfo.UseShellExecute = false;
         process.StartInfo.RedirectStandardOutput = true;
@@ -527,16 +735,20 @@ public sealed partial class ZpaqService
 
         if (!process.Start())
         {
-            throw new InvalidOperationException("zpaq.exe konnte nicht gestartet werden.");
+            throw new InvalidOperationException("zpaq konnte nicht gestartet werden.");
         }
 
-        Task outputTask = ReadLinesAsync(process.StandardOutput, output, progress, cancellationToken);
-        Task errorTask = ReadLinesAsync(process.StandardError, errors, progress, cancellationToken);
-        await AwaitProcessTasksFailFastAsync(
-            process,
-            process.WaitForExitAsync(cancellationToken),
-            outputTask,
-            errorTask).ConfigureAwait(false);
+        Task outputTask = ReadLinesAsync(process.StandardOutput, output, progress, linkedCts.Token);
+        Task errorTask = ReadLinesAsync(process.StandardError, errors, progress, linkedCts.Token);
+        Task? monitorTask = monitorStagingDirectory != null
+            ? MonitorExtractionLimitsAsync(monitorStagingDirectory, process, linkedCts, linkedCts.Token)
+            : null;
+
+        var tasks = monitorTask != null
+            ? new[] { process.WaitForExitAsync(linkedCts.Token), outputTask, errorTask, monitorTask }
+            : new[] { process.WaitForExitAsync(linkedCts.Token), outputTask, errorTask };
+
+        await AwaitProcessTasksFailFastAsync(process, tasks).ConfigureAwait(false);
 
         return new ProcessResult(process.ExitCode, output.ToString(), errors.ToString());
     }
@@ -557,7 +769,7 @@ public sealed partial class ZpaqService
 
         if (!process.Start())
         {
-            throw new InvalidOperationException("zpaq.exe konnte nicht gestartet werden.");
+            throw new InvalidOperationException("zpaq konnte nicht gestartet werden.");
         }
 
         Task consumeTask = consumeArchive(process.StandardOutput.BaseStream, cancellationToken);
@@ -578,8 +790,10 @@ public sealed partial class ZpaqService
         string workingDirectory,
         Func<Stream, CancellationToken, Task> writeArchive,
         IProgress<string>? progress,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? monitorStagingDirectory = null)
     {
+        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         using var process = CreateProcess(executable, arguments, workingDirectory);
         process.StartInfo.RedirectStandardInput = true;
         process.StartInfo.RedirectStandardOutput = true;
@@ -590,19 +804,21 @@ public sealed partial class ZpaqService
 
         if (!process.Start())
         {
-            throw new InvalidOperationException("zpaq.exe konnte nicht gestartet werden.");
+            throw new InvalidOperationException("zpaq konnte nicht gestartet werden.");
         }
 
-        Task inputTask = WriteInputAndCloseAsync(process.StandardInput, writeArchive, cancellationToken);
-        Task outputTask = ReadLinesAsync(process.StandardOutput, output, progress, cancellationToken);
-        Task errorTask = ReadLinesAsync(process.StandardError, errors, progress, cancellationToken);
+        Task inputTask = WriteInputAndCloseAsync(process.StandardInput, writeArchive, linkedCts.Token);
+        Task outputTask = ReadLinesAsync(process.StandardOutput, output, progress, linkedCts.Token);
+        Task errorTask = ReadLinesAsync(process.StandardError, errors, progress, linkedCts.Token);
+        Task? monitorTask = monitorStagingDirectory != null
+            ? MonitorExtractionLimitsAsync(monitorStagingDirectory, process, linkedCts, linkedCts.Token)
+            : null;
 
-        await AwaitProcessTasksFailFastAsync(
-            process,
-            inputTask,
-            process.WaitForExitAsync(cancellationToken),
-            outputTask,
-            errorTask).ConfigureAwait(false);
+        var tasks = monitorTask != null
+            ? new[] { inputTask, process.WaitForExitAsync(linkedCts.Token), outputTask, errorTask, monitorTask }
+            : new[] { inputTask, process.WaitForExitAsync(linkedCts.Token), outputTask, errorTask };
+
+        await AwaitProcessTasksFailFastAsync(process, tasks).ConfigureAwait(false);
 
         return new ProcessResult(process.ExitCode, output.ToString(), errors.ToString());
     }

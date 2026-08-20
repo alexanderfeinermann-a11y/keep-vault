@@ -4,6 +4,19 @@ using System.Text;
 
 namespace KalynaArchiver.Services;
 
+/// <summary>
+/// Manages unkeyed dual integrity manifests (.sha3 and .skein) for plain ZPAQ archives.
+/// </summary>
+/// <remarks>
+/// IMPORTANT SECURITY NOTICE:
+/// The companion .sha3 (SHA3-512) and .skein (Skein-1024) manifest files provide unkeyed cryptographic
+/// checksums designed to detect storage degradation, transmission corruption, and accidental bit rot.
+/// Because they are unkeyed hashes without digital signatures or secret-key MACs, they do NOT provide
+/// cryptographic origin authenticity or anti-tamper security against an active adversary who has write access
+/// to overwrite both the archive and its companion manifest files.
+/// Full cryptographic tamper rejection and origin authenticity is provided exclusively by authenticated
+/// encrypted v10 containers (.kzpaq) or digital hybrid signatures (.khsig).
+/// </remarks>
 public sealed class ArchiveIntegrityService
 {
     private const int MaxManifestBytes = 4096;
