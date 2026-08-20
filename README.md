@@ -1,18 +1,19 @@
 # Keep Vault
 
 Archiving, extraction and cryptographic erasure of ZPAQ archives for **macOS**.
-Encrypted archives use container format **v9**: a chosen cascade of up to six
-independent ciphers over the compressed stream, keys from Argon2id at a fixed
-1 GiB profile, two separate MACs, and a three-part password made of one you
-choose and two the app generates.
+Encrypted archives use container format **v10**: a chosen cascade of up to six
+independent ciphers over the compressed stream, keys from two Argon2id branches
+whose memory cost is itself derived from your credentials, two separate MACs,
+and a four-part credential made of a passphrase, a PIN, and two 1024-bit factors
+the app generates.
 
 The application is under development. It is not a substitute for an external
 cryptographic audit, an HSM, or operating-system hardening.
 
-> **macOS only.** The Windows source tree has been moved to v9 but the WPF
+> **macOS only.** The Windows source tree has been carried to v10 but the WPF
 > application can only be built on Windows and has never been built or tested
-> against v9. No Windows package is published, and the macOS version is the only
-> one that should be used.
+> against v10. No Windows package is published, and the macOS version is the
+> only one that should be used.
 
 ---
 
@@ -70,12 +71,16 @@ attacker, obtain the verifier and its pins through a separate, trusted channel.
 
 ## Format policy
 
-The app writes and reads container format **version 9 only**. Every other
-version is refused, including version 8; there is no legacy decryption path and
-none is planned. Archives written with v8 cannot be opened with this release.
+The app writes and reads container format **version 10 only**. Every other
+version is refused, including version 9; there is no legacy decryption path and
+none is planned. Archives written with v9 or earlier cannot be opened with this
+release, and the reader says so by name rather than failing as a wrong password.
 
-The key-derivation domain separators also carry `v9`, so a v9 key never
-coincides with a v8 key even for an identical password and identical factors.
+The key-derivation domain separators carry `v10`, and the header carries an
+explicit `KdfMode` string naming the construction. A version number alone turned
+out not to be enough: 4.0.0/4.0.1 and 4.0.2 both wrote `"Version": 9` while
+deriving different Paranoia keys. `KdfMode` exists so that a future correction
+changes a value a reader can see, not only a value a reader has to infer.
 
 ### The ten options
 
@@ -106,10 +111,27 @@ German or English depending on the selected language — for example
 
 ### How a cascade works
 
-Each layer gets its own slice of the Argon2id output as its key and its own
-slice of the nonce. For the standard cascade that is 64 bytes of key and 64
-bytes of nonce for the inner Kalyna layer, 128 and 128 for the outer Threefish
-layer.
+Each layer gets its own key and its own slice of the nonce. For the standard
+cascade that is 64 bytes of key and 64 bytes of nonce for the inner Kalyna
+layer, 128 and 128 for the outer Threefish layer.
+
+v9 cut those keys out of one flat Argon2id output, so a layer's key was a
+function of where it happened to sit in that buffer, and the same cipher in two
+positions could share structure. v10 derives each key separately from a
+canonical context — algorithm, stage index, cipher, purpose and key width — run
+through two PRF families and combined:
+
+```
+U = HKDF-Expand(HMAC-SHA3-512) over the two master halves     128 B
+V = Skein-MAC-1024-1024(key = master, pers = domain, msg = context)
+Z = U XOR V                                                    128 B
+```
+
+Only then is `Z` truncated to the layer's key width. Truncating earlier would
+cap the wide layers at whichever primitive produced them. The XOR is documented
+for what it is: a combiner of two 1024-bit PRF outputs under the assumption that
+both families behave as assumed and the contexts are unique — not a robust
+combiner against arbitrary or maliciously correlated primitives.
 
 The order matters. Breaking only the outer layer yields the inner layer's
 ciphertext — not the plaintext, and not the archive's structure. Every payload
@@ -128,50 +150,110 @@ nonce and the chunk index through SHA3-512. A continuous CTR counter over
 arbitrarily large archives eventually repeats, and a repeated counter block under
 one key leaks the XOR of two plaintexts.
 
-### Two Argon2id rounds for Paranoia
+### The master key derivation
 
-Paranoia needs 568 bytes of key material — 376 for six layers plus 64 and 128
-for the two MAC keys — and one Argon2id call is kept at 384 bytes. It therefore
-runs two rounds and truncates their concatenation. Both rounds use the same
-password and the same two factors; only the salt differs, which is what makes
-the second round independent without asking the user for more entropy: the first
-expansion of the pool snapshot uses SHA3-512, the second SHA-512.
+v10 asks for four credentials, and all four are mandatory: a passphrase of 24 to
+256 characters, a PIN of 6 to 16 digits, and the two 1024-bit factors from the
+printed key sheets. There is no reduced mode and no suite that skips one.
 
-Both salts and both nonces are stored in the header. A v9 archive whose header
-carried only the first round could not be decrypted by anyone, including the
-machine that wrote it.
+Two credential paths are built first, each a different shape of construction:
 
-Versions 4.0.0 and 4.0.1 passed the same mutable 128-byte credential prehash to
-both native Argon2id calls. Because the PHC adapter deliberately clears its
-password input, their second round actually used 128 zero bytes. Version 4.0.2
-keeps one locked master prehash and gives each call a fresh locked copy. This
-correction leaves the v9 header, parameters and salts unchanged, but it changes
-the derived Paranoia key: old Paranoia containers and corrected Paranoia
-containers are not mutually readable. There is no fallback to the known-bad
-derivation. Single-round suites are unaffected.
+```
+Q_S = SHA3-512(LP(domain_A, pass, pin, A)) || SHA3-512(LP(domain_B, pass, pin, B))
+Q_K = Skein-MAC-1024-1024(key = A || B, pers = domain, msg = LP(pass, pin))
+```
+
+`LP` is length-prefixed framing, not concatenation: without it a passphrase of
+`"ab"` with PIN `"1"` and a passphrase of `"a"` with PIN `"b1"` would hash the
+same bytes and derive the same key.
+
+Both are fed to Argon2id, in sequence, with separate salts and separate
+associated data:
+
+```
+L = Argon2id(P = Q_S, S = salt_sha3,  X = "...SHA3-Branch/Round-1",  m, 4, 4, 64)
+R = Argon2id(P = Q_K, S = salt_skein, X = "...Skein-Branch/Round-1", m, 4, 4, 64)
+M = interleave(L, R)                                                      128 B
+```
+
+The branches run strictly one after the other and each matrix is released before
+the next allocates, so peak memory stays at one matrix rather than two. The
+interleave is a permutation, not mixing: it exists so no single 512-bit Argon2id
+output becomes the width of the master, and the actual mixing happens afterwards
+in the role key schedule.
+
+Two things this does *not* claim. The two branches share Argon2's BLAKE2b core,
+so they differ in what they are fed and in their domains, not in their
+foundation. And the interleave adds no entropy.
+
+#### The memory cost is derived, not stored
+
+`m` is not a constant and is not written down. It comes from the credentials:
+
+```
+PMI = BE16(SHA3-512(LP(domain, Q_S, Q_K, [M1,] salt_sha3, salt_skein))[0..1])
+m   = 1 GiB + 16 * PMI KiB          -- 1,048,576 to 2,097,136 KiB
+```
+
+An attacker who does not know the credentials does not know which of the 65,536
+memory profiles to allocate. PMI adds no entropy — it is a deterministic
+function of the credentials — and a process watching this one can still estimate
+it from resident set size or elapsed time. It is off disk, not invisible.
+
+The header's `Argon2MemoryKiB` is therefore `0`, and the reader rejects any
+container that fills it in. KPAR2 does not carry it either.
+
+#### Paranoia runs the whole thing twice
+
+The Paranoia cascade runs a second round whose Argon2id **secret** input is the
+first round's complete 1024-bit master:
+
+```
+M2 = round(Q_S, Q_K, salt_sha3_2, salt_skein_2, secret = M1, m2)
+```
+
+Round two cannot be started without finishing round one — four sequential
+Argon2id calls of at least a gibibyte each, not four that can be run in
+parallel. The credentials sit in the same position in both rounds; only the
+secret and the salts change.
+
+This replaces the v9 arrangement, where both rounds shared one 128-byte
+credential prehash. Because the PHC adapter clears the password it is given,
+4.0.0 and 4.0.1 ran their second round over 128 zero bytes. v10 does not share a
+buffer between rounds at all, and the regression is checked by changing one bit
+of round one and observing round two change with it — not by a round-trip, which
+would pass while both sides were equally wrong.
+
+All four salts are stored in the header, as two 1024-bit pairs. An archive whose
+header carried only the first round could not be decrypted by anyone, including
+the machine that wrote it.
 
 ### The container
 
 - Magic `KZPAQ1\0`, UTF-8 JSON header, 64-byte HMAC-SHA3-512 tag, 128-byte
   Skein-1024 MAC tag, then ciphertext
-- Password mode `UserPassword+GeneratedHex512x2`
-- KDF mode `SHA3-512-LP(UserPassword,FactorA)||SHA3-512-LP(UserPassword,FactorB)`
-- 64-byte salt; Argon2id 0x13 at the fixed production profile `m=1 GiB`, `t=4`,
-  `p=4`
+- Password mode `UserPassword24to256+PIN6to16+GeneratedHex1024x2`
+- KDF input mode `DualBranch-v10: DualSHA3-512-1024 || KeyedSkeinMAC-1024-1024`
+- KDF mode `DualArgon2id-SHA3+Skein1024-Sequential-Master1024`
+- One 1024-bit salt pair per round; Argon2id 0x13 with `t=4`, `p=4` and a memory
+  cost derived from the credentials — `Argon2MemoryKiB` is stored as `0`
+- 1024-bit master, from which every role key is derived separately
 - Encrypt-then-MAC with two separate keys, both tags mandatory
 
-The authenticated header binds version, suite, block size, salt, nonce, tweak,
-KDF mode, Argon2id profile, output length and password model. Both MACs cover
-the same magic, header length, header and the entire ciphertext, and both tags
-are compared in full and without short-circuiting before any plaintext reaches
-the ZPAQ pipe.
+The authenticated header binds version, suite, block size, both salt pairs,
+nonce, tweak, KDF mode, KDF input mode, master width and password model. Both
+MACs cover the same magic, header length, header and the entire ciphertext, and
+both tags are compared in full and without short-circuiting before any plaintext
+reaches the ZPAQ pipe.
 
-The v9 reader accepts only the fixed production profile. Deviating header values
-are rejected before the KDF, so a manipulated archive can force neither weaker
-nor higher Argon2 cost. The native adapter enforces the same profile a second
-time, independently, and requires that the entire Argon2 matrix be locked
-against paging; if that lock fails the KDF aborts rather than accepting swappable
-memory. After the KDF the matrix is zeroed before it is unlocked and freed.
+The v10 reader accepts only `t=4`, `p=4` and a zero memory field. Deviating
+header values are rejected before the KDF, so a manipulated archive can force
+neither weaker nor higher Argon2 cost — and because the cost is not in the header
+at all, there is no field to manipulate. The native adapter enforces its own
+bounds a second time, independently, and requires that the entire Argon2 matrix
+be locked against paging; if that lock fails the KDF aborts rather than accepting
+swappable memory. After the KDF the matrix is zeroed before it is unlocked and
+freed.
 
 ---
 
@@ -184,13 +266,28 @@ encryption and pick an option. Suggested archive and output names always get at
 least a `(1)`. Before encrypting, the current combination of archive path, suite
 and both factors must be printed or deliberately exported as a test PDF.
 
+**Delete original files** — optional, and gated on proof. The archive is
+extracted again into a private directory and compared with the originals byte for
+byte, in both directions: every original must appear in the archive, and the
+archive must contain nothing else. Immediately before anything is deleted, two
+things are re-checked. The archive is identified again by length and SHA-512, so
+a swap between verification and deletion is caught. And every original is read
+again and compared against what was verified — same set, same lengths, same
+modification times, same digests, and no file that has appeared since. Any
+difference at all and nothing is deleted.
+
+Deletion then names each verified file individually. It is deliberately not
+`Directory.Delete(recursive: true)`: that call deletes whatever it finds, which
+is not necessarily what was verified, and the difference would be a file that was
+never archived. Folders are removed afterwards only if they are empty.
+
 **Extract** — drop a `.zpaq` or `.kzpaq`. The suite is shown from the not-yet
 authenticated header first and is authenticated by both MACs before any
 plaintext is written. Extraction only ever goes into a new or empty folder. A
 `.kzpaq` with neither a valid container header nor usable KPAR2 data is refused
 outright and never handed to the native parser as plain ZPAQ.
 
-**Cryptographic erase** — analyse a valid encrypted v9 container, then destroy
+**Cryptographic erase** — analyse a valid encrypted v10 container, then destroy
 the reconstructable recovery sidecar first and afterwards corrupt and delete the
 container itself, through the same exclusive file handle. The button refuses
 until the SSD/APFS limitation is explicitly acknowledged.
@@ -236,27 +333,38 @@ The estimate caps the assumed alphabet and penalises repetition, sequences,
 keyboard patterns and known words. It is a pessimistic policy, not a proof of
 entropy for human passwords.
 
-### Dual SHA3-512 and Argon2id
+### The four credentials
 
-Each suite has separate domains for A and B. `LP` means domain, UTF-8 user
-password and normalised ASCII hex factor each get an explicit 32-bit length
-field:
+Each suite has separate domains for A and B. `LP` means every field — domain,
+UTF-8 passphrase, ASCII PIN and normalised ASCII hex factor — gets an explicit
+32-bit length prefix:
 
 ```text
-H_A = SHA3-512(LP(domain_A, userPassword, factorA))
-H_B = SHA3-512(LP(domain_B, userPassword, factorB))
-argonPassword = H_A || H_B                     # 128 bytes / 1024 bits
+Q_S = SHA3-512(LP(domain_A, pass, pin, A)) || SHA3-512(LP(domain_B, pass, pin, B))
+Q_K = Skein-MAC-1024-1024(key = A || B, pers = domain, msg = LP(pass, pin))
 ```
 
-`argonPassword` and the 64-byte salt go into Argon2id untruncated. The app
-compiles the unmodified PHC Argon2 reference sources; tests compare the native
-adapter against the PHC CLI and the exact 128-byte v9 path additionally against
-Bouncy Castle's independent Argon2id implementation.
+The two paths use the credentials differently on purpose. In `Q_S` the factors
+are hashed alongside the passphrase and PIN; in `Q_K` they *are* the MAC key and
+the passphrase and PIN are the message. Neither path can be computed from the
+other's output.
 
-Every intermediate buffer — the encoding targets, the length frames, both SHA3
-hashes and the assembled `argonPassword` — is locked against paging before its
-first write and zeroed while still locked. The cipher and MAC keys split out of
-the locked Argon2 output are copied only into previously locked buffers.
+`Q_S` and `Q_K` go into their own Argon2id branch untruncated, each with its own
+512-bit salt. The app compiles the unmodified PHC Argon2 reference sources; tests
+compare the native adapter against the PHC CLI, and the v10 branch additionally
+against Bouncy Castle's independent Argon2id implementation.
+
+Every intermediate buffer — the encoding targets, the length frames, both
+credential hashes, every one-call Argon2id copy and both round masters — is
+locked against paging before its first write and zeroed while still locked. Each
+Argon2id call receives a fresh copy, because the native side clears what it is
+given; this is what v9 got wrong.
+
+The Skein-MAC is Bouncy Castle's `SkeinMac` with Skein's own key and
+personalisation parameters, not `Skein1024(key || message)`. HKDF-Expand is
+Bouncy Castle's `HkdfBytesGenerator` with `SkipExtractParameters`, not a
+hand-rolled HMAC chain. Both were verified against independent second
+implementations before being used for anything.
 
 A salt prevents precomputed tables for identical password material. It does not
 make a weak user password strong on its own; the two independent factors and the
@@ -266,10 +374,15 @@ memory-hard KDF are what carry the protection here.
 
 ## Randomness, salt, nonce and tweak
 
-Six separate pools collect mouse samples: factor A, factor B, salt, and three
-nonce parts. Each pool needs at least **1024 samples** before archive entropy can
-be produced; with round-robin distribution that is at least 6144 mouse events per
-epoch, and the six counters differ by at most one.
+Nine separate pools collect mouse samples: A1, A2, B1, B2, the SHA3 salt, the
+Skein salt, and three nonce parts. A 1024-bit factor is drawn from two pools laid
+end to end — A = A1 ‖ A2 — which is defence in depth, not a claim that either
+pool holds 512 bits of real entropy. Each pool needs at least **1024 samples**
+before archive entropy can be produced; with round-robin distribution that is at
+least 9216 mouse events per epoch, and the nine counters differ by at most one.
+
+The interface shows all nine counters. It groups A1/A2 and B1/B2 visually, but
+there are two user factors, not four.
 
 That count is not a claim of 512 bits of physical mouse entropy. Security may
 already rest on the operating-system CSPRNG alone; the mouse data is additional
@@ -388,13 +501,18 @@ validated the locator's suite id against a hard-coded range that admitted only
 the first two, which meant most suites produced an archive the app would encrypt
 and then refuse to protect.
 
-KPAR2 v2 has one v9-specific exception: its fixed bootstrap stores only the
-first 64-byte Argon2id salt. For Paranoia it therefore derives the recovery MAC
-parents with one Argon2id round rather than reconstructing the container's full
-two-round key. Adding the second salt or changing that derivation would make
-existing v2 sidecars unreadable, so 4.0.2 retains the v2 behavior and treats its
-lower Paranoia recovery-metadata work factor as a residual risk. KPAR2 v3 must
-store the complete bootstrap and use exactly the container KDF.
+KPAR2 is now at **v3**, and its bootstrap is the container's. v2 stored a single
+64-byte salt and derived the recovery MAC parents with one Argon2id round even
+for Paranoia — so anyone holding both key-sheet factors had a cheaper offline
+oracle for the passphrase through the recovery file than through the container it
+protects. v3 stores every salt pair the container uses, one per round, and runs
+exactly the same derivation the container runs, both Paranoia rounds included.
+The certification keys are still not the container's keys: they come from their
+own role purposes in the same schedule. They now simply cost the same to attack.
+
+The Argon2id cost fields are gone from the v3 locator and manifest, and are
+rejected if present. A v10 memory cost is derived from the credentials, and
+publishing it beside the salt would undo that.
 
 For **unencrypted archives** the same SHA3 and Skein values are explicitly
 unkeyed error-detection values. A repair is therefore always written to a new,
@@ -402,7 +520,7 @@ conflict-free file name and the damaged original is left untouched.
 
 The separate **emergency mode** skips KPAR2 metadata authentication, always
 writes a new file and never modifies the original. For an encrypted archive all
-three password factors are still required and the finished candidate must pass
+all four credentials are still required and the finished candidate must pass
 the container's own two MACs. There is no automatic fallback from the normal
 mode into emergency mode.
 
@@ -543,12 +661,13 @@ SHA3, Skein, Kalyna and Threefish reference vectors; ML-DSA-87 interoperability
 against the compiled reference adapter in both directions; randomised
 differential testing against every reference library; the fixed Argon2id profile
 against PHC and Bouncy Castle; ZPAQ levels, streaming, traversal and a malformed
-corpus; v9 round-trips and manipulation rejection; that the outer cascade layer
+corpus; v10 round-trips and manipulation rejection; that the outer cascade layer
 alone reveals nothing; two-round derivation from one pool consumption; per-chunk
 nonces across a multi-chunk archive; salt and nonce for every single-round suite;
 MARS and SHACAL-2 published vectors; KPAR2 repair, authentication,
 transplantation rejection and coverage of every catalogued suite; cryptographic
-erase ordering and hard-link refusal; verified original deletion; and the GUI
+erase ordering and hard-link refusal; verified original deletion including
+the pre-deletion re-check of the originals; and the GUI
 driven through Avalonia's headless backend.
 
 ---

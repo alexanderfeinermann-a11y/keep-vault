@@ -539,7 +539,8 @@ public sealed partial class MainWindow : Window, IDisposable
                 prepared = _generatedEntropy is { HasPendingEncryptionParameters: true } entropy ? entropy : null;
                 if (prepared is null)
                 {
-                    EnsureEntropyReady(EntropyPurpose.Salt);
+                    EnsureEntropyReady(EntropyPurpose.SaltSha3);
+                    EnsureEntropyReady(EntropyPurpose.SaltSkein);
                     EnsureEntropyReady(EntropyPurpose.NonceFirst);
                     EnsureEntropyReady(EntropyPurpose.NonceSecond);
                     EnsureEntropyReady(EntropyPurpose.NonceThird);
@@ -564,6 +565,7 @@ public sealed partial class MainWindow : Window, IDisposable
                             zpaqStream,
                             archivePath,
                             CreatePasswordBox.Text ?? string.Empty,
+                            CreatePinBox.Text ?? string.Empty,
                             GeneratedPasswordFirstBox.Text ?? string.Empty,
                             GeneratedPasswordSecondBox.Text ?? string.Empty,
                             suite,
@@ -577,6 +579,7 @@ public sealed partial class MainWindow : Window, IDisposable
                             zpaqStream,
                             archivePath,
                             CreatePasswordBox.Text ?? string.Empty,
+                            CreatePinBox.Text ?? string.Empty,
                             GeneratedPasswordFirstBox.Text ?? string.Empty,
                             GeneratedPasswordSecondBox.Text ?? string.Empty,
                             suite,
@@ -618,6 +621,7 @@ public sealed partial class MainWindow : Window, IDisposable
                 await _recovery.CreateAuthenticatedAsync(
                     archivePath,
                     CreatePasswordBox.Text ?? string.Empty,
+                    CreatePinBox.Text ?? string.Empty,
                     GeneratedPasswordFirstBox.Text ?? string.Empty,
                     GeneratedPasswordSecondBox.Text ?? string.Empty,
                     Progress(),
@@ -723,6 +727,7 @@ public sealed partial class MainWindow : Window, IDisposable
                         (zpaqInput, token) => _containers.DecryptToStreamAsync(
                             effectivePath,
                             ExtractPasswordBox.Text ?? string.Empty,
+                            ExtractPinBox.Text ?? string.Empty,
                             ExtractGeneratedPasswordFirstBox.Text ?? string.Empty,
                             ExtractGeneratedPasswordSecondBox.Text ?? string.Empty,
                             zpaqInput,
@@ -804,6 +809,7 @@ public sealed partial class MainWindow : Window, IDisposable
                         (zpaqInput, token) => _containers.DecryptToStreamAsync(
                             effectivePath,
                             ExtractPasswordBox.Text ?? string.Empty,
+                            ExtractPinBox.Text ?? string.Empty,
                             ExtractGeneratedPasswordFirstBox.Text ?? string.Empty,
                             ExtractGeneratedPasswordSecondBox.Text ?? string.Empty,
                             zpaqInput,
@@ -889,6 +895,7 @@ public sealed partial class MainWindow : Window, IDisposable
                 result = await _recovery.RecoverToNewFileAuthenticatedAsync(
                     archive,
                     ExtractPasswordBox.Text ?? string.Empty,
+                    ExtractPinBox.Text ?? string.Empty,
                     ExtractGeneratedPasswordFirstBox.Text ?? string.Empty,
                     ExtractGeneratedPasswordSecondBox.Text ?? string.Empty,
                     Progress(),
@@ -1113,7 +1120,7 @@ public sealed partial class MainWindow : Window, IDisposable
                     verifyRoot,
                     Progress(),
                     _lifetime.Token);
-            if (!verification.Verified)
+            if (!verification.Verified || verification.Originals is null)
             {
                 Log($"{T("verifyMismatch")} — {verification.Failure}");
                 await ErrorAsync(T("verifyMismatch"));
@@ -1129,7 +1136,8 @@ public sealed partial class MainWindow : Window, IDisposable
             IReadOnlyList<string> failures = MacOriginalDeletionService.DeleteOriginals(
                 inputs,
                 archivePath,
-                verifiedArchive);
+                verifiedArchive,
+                verification.Originals);
             if (failures.Count > 0)
             {
                 Log($"{T("deleteOriginalsFailed")} — {string.Join("; ", failures)}");
@@ -1176,6 +1184,7 @@ public sealed partial class MainWindow : Window, IDisposable
             (zpaqStream, cancellationToken) => _containers.DecryptToStreamAsync(
                 archivePath,
                 CreatePasswordBox.Text ?? string.Empty,
+                CreatePinBox.Text ?? string.Empty,
                 GeneratedPasswordFirstBox.Text ?? string.Empty,
                 GeneratedPasswordSecondBox.Text ?? string.Empty,
                 zpaqStream,
@@ -1379,6 +1388,21 @@ public sealed partial class MainWindow : Window, IDisposable
             throw new InvalidOperationException(T("passwordLength"));
         }
 
+        try
+        {
+            V10KeyDerivation.ValidatePin(ExtractPinBox.Text ?? string.Empty);
+        }
+        catch (ArgumentException exception)
+        {
+            throw new InvalidOperationException(
+                string.Format(
+                    CultureInfo.CurrentCulture,
+                    T("pinInvalid"),
+                    V10KeyDerivation.MinPinLength,
+                    V10KeyDerivation.MaxPinLength),
+                exception);
+        }
+
         EnsureGeneratedPassword(ExtractGeneratedPasswordFirstBox.Text ?? string.Empty);
         EnsureGeneratedPassword(ExtractGeneratedPasswordSecondBox.Text ?? string.Empty);
     }
@@ -1435,9 +1459,12 @@ public sealed partial class MainWindow : Window, IDisposable
             CultureInfo.CurrentCulture,
             T(key),
             status.Total,
-            status.GeneratedPasswordFirst,
-            status.GeneratedPasswordSecond,
-            status.Salt,
+            status.FactorA1,
+            status.FactorA2,
+            status.FactorB1,
+            status.FactorB2,
+            status.SaltSha3,
+            status.SaltSkein,
             status.NonceFirst,
             status.NonceSecond,
             status.NonceThird,
@@ -1467,6 +1494,43 @@ public sealed partial class MainWindow : Window, IDisposable
             ? T("passwordAccepted")
             : string.Join(Environment.NewLine, analysis.Violations.Select(PasswordViolationText));
         PasswordPolicyStatusText.Foreground = Brush.Parse(analysis.IsAccepted ? "#7EE2B8" : "#F29AA6");
+        UpdatePinPolicyStatus();
+    }
+
+    /// <summary>
+    /// Reports whether the PIN is usable, in the same place and the same way as
+    /// the passphrase.
+    /// </summary>
+    /// <remarks>
+    /// The PIN is a full credential in v10, not a convenience: an archive
+    /// cannot be opened without it. Showing its state only when archiving fails
+    /// would be the wrong moment to find out.
+    /// </remarks>
+    private void UpdatePinPolicyStatus()
+    {
+        string pin = CreatePinBox.Text ?? string.Empty;
+        string confirm = CreatePinConfirmBox.Text ?? string.Empty;
+        string? failure = null;
+        try
+        {
+            V10KeyDerivation.ValidatePin(pin);
+        }
+        catch (ArgumentException)
+        {
+            failure = string.Format(
+                CultureInfo.CurrentCulture,
+                T("pinInvalid"),
+                V10KeyDerivation.MinPinLength,
+                V10KeyDerivation.MaxPinLength);
+        }
+
+        if (failure is null && !string.Equals(pin, confirm, StringComparison.Ordinal))
+        {
+            failure = T("pinMismatch");
+        }
+
+        PinPolicyStatusText.Text = failure ?? T("pinAccepted");
+        PinPolicyStatusText.Foreground = Brush.Parse(failure is null ? "#7EE2B8" : "#F29AA6");
     }
 
     private string PasswordViolationText(PasswordPolicyViolation violation) => violation switch
@@ -1596,6 +1660,7 @@ public sealed partial class MainWindow : Window, IDisposable
             repair = await _recovery.VerifyAndRepairAuthenticatedAsync(
                 archive,
                 ExtractPasswordBox.Text ?? string.Empty,
+                ExtractPinBox.Text ?? string.Empty,
                 ExtractGeneratedPasswordFirstBox.Text ?? string.Empty,
                 ExtractGeneratedPasswordSecondBox.Text ?? string.Empty,
                 Progress(),
@@ -1628,6 +1693,7 @@ public sealed partial class MainWindow : Window, IDisposable
             RecoveryRepairResult repair = await _recovery.VerifyAndRepairAuthenticatedAsync(
                 archive,
                 ExtractPasswordBox.Text ?? string.Empty,
+                ExtractPinBox.Text ?? string.Empty,
                 ExtractGeneratedPasswordFirstBox.Text ?? string.Empty,
                 ExtractGeneratedPasswordSecondBox.Text ?? string.Empty,
                 Progress(),
@@ -1656,6 +1722,7 @@ public sealed partial class MainWindow : Window, IDisposable
             RecoveryRepairResult repair = await _recovery.VerifyAndRepairAuthenticatedAsync(
                 archive,
                 ExtractPasswordBox.Text ?? string.Empty,
+                ExtractPinBox.Text ?? string.Empty,
                 ExtractGeneratedPasswordFirstBox.Text ?? string.Empty,
                 ExtractGeneratedPasswordSecondBox.Text ?? string.Empty,
                 Progress(),

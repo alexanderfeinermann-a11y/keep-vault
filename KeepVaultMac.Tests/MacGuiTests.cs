@@ -356,6 +356,58 @@ internal static class MacGuiTests
 
         PasswordPolicyAnalysis accepted = PasswordKeyService.AnalyzeUserPassword(strong, string.Empty, string.Empty);
         MacComprehensiveTests.Require(accepted.IsAccepted, "The reference-strength password was rejected by the policy.");
+
+        TestPinPolicyFeedback(window);
+    }
+
+    /// <summary>
+    /// The PIN readout has to behave like the password readout: it is a
+    /// credential of equal standing in v10, and an archive cannot be opened
+    /// without it.
+    /// </summary>
+    private static void TestPinPolicyFeedback(MainWindow window)
+    {
+        TextBox pin = Control<TextBox>(window, "CreatePinBox");
+        TextBox confirm = Control<TextBox>(window, "CreatePinConfirmBox");
+        TextBlock readout = Control<TextBlock>(window, "PinPolicyStatusText");
+
+        pin.Text = "123";
+        confirm.Text = "123";
+        Dispatcher.UIThread.RunJobs();
+        string tooShort = readout.Text ?? string.Empty;
+        MacComprehensiveTests.Require(
+            tooShort.Length > 0,
+            "The PIN readout stayed empty for a PIN that is too short.");
+
+        pin.Text = "428317";
+        confirm.Text = "428318";
+        Dispatcher.UIThread.RunJobs();
+        string mismatched = readout.Text ?? string.Empty;
+        MacComprehensiveTests.Require(
+            !string.Equals(mismatched, tooShort, StringComparison.Ordinal),
+            "The PIN readout did not react to two differing PIN entries.");
+
+        pin.Text = "428317";
+        confirm.Text = "428317";
+        Dispatcher.UIThread.RunJobs();
+        string acceptedText = readout.Text ?? string.Empty;
+        MacComprehensiveTests.Require(
+            !string.Equals(acceptedText, mismatched, StringComparison.Ordinal)
+                && !string.Equals(acceptedText, tooShort, StringComparison.Ordinal),
+            "The PIN readout did not accept a valid, matching PIN.");
+
+        // A letter is not a digit, and the derivation refuses it -- the readout
+        // has to say so here rather than at the end of an archive run.
+        pin.Text = "42831A";
+        confirm.Text = "42831A";
+        Dispatcher.UIThread.RunJobs();
+        MacComprehensiveTests.Require(
+            !string.Equals(readout.Text ?? string.Empty, acceptedText, StringComparison.Ordinal),
+            "The PIN readout accepted a non-digit PIN.");
+
+        pin.Text = string.Empty;
+        confirm.Text = string.Empty;
+        Dispatcher.UIThread.RunJobs();
     }
 
     /// <summary>
@@ -418,10 +470,13 @@ internal static class MacGuiTests
         string[] referenceControls =
         [
             "EncryptBox", "CipherSuiteBox", "CompressionBox", "ArchivePathBox", "InputList",
-            "CreatePasswordBox", "CreatePasswordConfirmBox", "GeneratedPasswordFirstBox",
+            "CreatePasswordBox", "CreatePasswordConfirmBox",
+            "CreatePinBox", "CreatePinConfirmBox", "PinPolicyStatusText",
+            "GeneratedPasswordFirstBox",
             "GeneratedPasswordSecondBox", "GeneratePasswordButton", "EntropyStatusText",
             "DeleteOriginalsBox", "DeleteOriginalsHint",
             "ExtractArchiveBox", "OutputFolderBox", "ExtractPasswordBox",
+            "ExtractPinBox",
             "ExtractGeneratedPasswordFirstBox", "ExtractGeneratedPasswordSecondBox",
             "ErasePathBox", "LogBox", "ClearLogButton", "LanguageBox",
         ];

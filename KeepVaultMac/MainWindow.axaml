@@ -227,24 +227,32 @@
                 <StackPanel Spacing="10">
                   <TextBlock x:Name="CreatePasswordSetupTitle" Text="Dreiteiliges Passwort" FontSize="17" FontWeight="SemiBold" />
                   <TextBlock x:Name="CreatePasswordSetupHelpText"
-                             Text="Zum Entpacken werden Userpasswort, Faktor A und Faktor B benötigt."
+                             Text="Zum Entpacken werden Userpasswort, PIN, Faktor A und Faktor B benötigt."
                              Classes="muted" FontSize="12" TextWrapping="Wrap" />
 
                   <TextBlock x:Name="CreatePasswordLabel" Text="Userpasswort" Classes="label" Margin="0" />
-                  <TextBox x:Name="CreatePasswordBox" MaxLength="128" PasswordChar="●" TextChanged="CreatePasswordBox_TextChanged" />
+                  <TextBox x:Name="CreatePasswordBox" MaxLength="256" PasswordChar="●" TextChanged="CreatePasswordBox_TextChanged" />
                   <TextBlock x:Name="CreatePasswordConfirmLabel" Text="Userpasswort wiederholen" Classes="label" Margin="0" />
-                  <TextBox x:Name="CreatePasswordConfirmBox" MaxLength="128" PasswordChar="●" TextChanged="CreatePasswordBox_TextChanged" />
+                  <TextBox x:Name="CreatePasswordConfirmBox" MaxLength="256" PasswordChar="●" TextChanged="CreatePasswordBox_TextChanged" />
+                  <TextBlock x:Name="CreatePinLabel" Text="PIN" Classes="label" Margin="0" />
+                  <TextBox x:Name="CreatePinBox" MaxLength="16" PasswordChar="●" TextChanged="CreatePasswordBox_TextChanged" />
+                  <TextBlock x:Name="CreatePinConfirmLabel" Text="PIN wiederholen" Classes="label" Margin="0" />
+                  <TextBox x:Name="CreatePinConfirmBox" MaxLength="16" PasswordChar="●" TextChanged="CreatePasswordBox_TextChanged" />
+                  <TextBlock x:Name="PinHelpText"
+                             Text="6 bis 16 Ziffern. Die PIN ist ein eigener Faktor und wird zusammen mit dem Passwort benötigt."
+                             Classes="muted" FontSize="12" TextWrapping="Wrap" />
+                  <TextBlock x:Name="PinPolicyStatusText" Text="PIN noch nicht vollständig." Foreground="#F29AA6" FontSize="12" TextWrapping="Wrap" />
                   <TextBlock x:Name="PasswordHelpText"
-                             Text="24 bis 128 Zeichen und mindestens 128 Bit konservative Bewertung."
+                             Text="24 bis 256 Zeichen und mindestens 128 Bit konservative Bewertung."
                              Classes="muted" FontSize="12" TextWrapping="Wrap" />
                   <TextBlock x:Name="PasswordEntropyStatusText" Text="Konservative Entropie: 0 / 128 Bit" Foreground="#F2BD55" FontSize="12" TextWrapping="Wrap" />
                   <TextBlock x:Name="PasswordPolicyStatusText" Text="Passwortanforderungen noch nicht erfüllt." Foreground="#F29AA6" FontSize="12" TextWrapping="Wrap" />
 
                   <Border Classes="card" Padding="13">
                     <StackPanel Spacing="8">
-                      <TextBlock x:Name="PasswordGeneratorTitle" Text="Zwei unabhängige 512-Bit-Faktoren" FontWeight="SemiBold" />
+                      <TextBlock x:Name="PasswordGeneratorTitle" Text="Zwei unabhängige 1024-Bit-Faktoren" FontWeight="SemiBold" />
                       <TextBlock x:Name="PasswordGeneratorHelpText"
-                                 Text="Fünf getrennte Entropiepools benötigen je 512 Maus-Samples."
+                                 Text="Neun getrennte Entropiepools benötigen je 512 Maus-Samples."
                                  Classes="muted" FontSize="12" TextWrapping="Wrap" />
                       <ProgressBar x:Name="EntropyProgress" Minimum="0" Height="7" Foreground="#5DE4EC" />
                       <TextBlock x:Name="EntropyStatusText" Text="Entropie wird gesammelt …" Foreground="#5DE4EC" FontSize="12" TextWrapping="Wrap" />
@@ -339,11 +347,13 @@
                     <TextBlock x:Name="ExtractHintText" Text="Noch kein Containerhinweis geladen." Foreground="#F2BD55" FontSize="12" TextWrapping="Wrap" />
                   </Border>
                   <TextBlock x:Name="ExtractPasswordLabel" Text="Userpasswort" Classes="label" Margin="0" />
-                  <TextBox x:Name="ExtractPasswordBox" MaxLength="128" PasswordChar="●" />
+                  <TextBox x:Name="ExtractPasswordBox" MaxLength="256" PasswordChar="●" />
+                  <TextBlock x:Name="ExtractPinLabel" Text="PIN" Classes="label" Margin="0" />
+                  <TextBox x:Name="ExtractPinBox" MaxLength="16" PasswordChar="●" />
                   <TextBlock x:Name="ExtractGeneratedPasswordFirstLabel" Text="Faktor A vom Schlüsselzettel" Classes="label" Margin="0" />
-                  <TextBox x:Name="ExtractGeneratedPasswordFirstBox" MaxLength="160" AcceptsReturn="True" TextWrapping="Wrap" FontFamily="Menlo" MinHeight="62" />
+                  <TextBox x:Name="ExtractGeneratedPasswordFirstBox" MaxLength="320" AcceptsReturn="True" TextWrapping="Wrap" FontFamily="Menlo" MinHeight="62" />
                   <TextBlock x:Name="ExtractGeneratedPasswordSecondLabel" Text="Faktor B vom Schlüsselzettel" Classes="label" Margin="0" />
-                  <TextBox x:Name="ExtractGeneratedPasswordSecondBox" MaxLength="160" AcceptsReturn="True" TextWrapping="Wrap" FontFamily="Menlo" MinHeight="62" />
+                  <TextBox x:Name="ExtractGeneratedPasswordSecondBox" MaxLength="320" AcceptsReturn="True" TextWrapping="Wrap" FontFamily="Menlo" MinHeight="62" />
                 </StackPanel>
               </Border>
             </Grid>

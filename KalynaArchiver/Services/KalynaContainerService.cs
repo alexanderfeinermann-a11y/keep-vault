@@ -16,7 +16,14 @@ public sealed partial class KalynaContainerService
     // There is deliberately no reader for v7: a format this app writes once and
     // reads years later is safer with one shape than with a compatibility path
     // that is exercised rarely and audited less.
-    private const int CurrentVersion = 9;
+    private const int CurrentVersion = 10;
+
+    /// <summary>
+    /// The width of the v10 master key. Every role key is cut from a value of
+    /// this width, so it is what the header records instead of a per-suite
+    /// Argon2id output length.
+    /// </summary>
+    private const int MasterKeyBits = 1024;
     private const int BufferSize = 16 * 1024 * 1024;
     private const int Sha3TagSize = 64;
     private const int SkeinTagSize = 128;
@@ -34,6 +41,7 @@ public sealed partial class KalynaContainerService
         Stream plainZpaqStream,
         string encryptedPath,
         string userPassword,
+        string pin,
         string firstGeneratedPassword,
         string secondGeneratedPassword,
         string? hint,
@@ -44,6 +52,7 @@ public sealed partial class KalynaContainerService
             plainZpaqStream,
             encryptedPath,
             userPassword,
+            pin,
             firstGeneratedPassword,
             secondGeneratedPassword,
             EncryptionSuite.Kalyna512_512,
@@ -56,6 +65,7 @@ public sealed partial class KalynaContainerService
         Stream plainZpaqStream,
         string encryptedPath,
         string userPassword,
+        string pin,
         string firstGeneratedPassword,
         string secondGeneratedPassword,
         EncryptionSuite suite,
@@ -69,6 +79,7 @@ public sealed partial class KalynaContainerService
             plainZpaqStream,
             encryptedPath,
             userPassword,
+            pin,
             firstGeneratedPassword,
             secondGeneratedPassword,
             suite,
@@ -83,6 +94,7 @@ public sealed partial class KalynaContainerService
         Stream plainZpaqStream,
         string encryptedPath,
         string userPassword,
+        string pin,
         string firstGeneratedPassword,
         string secondGeneratedPassword,
         EncryptionSuite suite,
@@ -94,6 +106,7 @@ public sealed partial class KalynaContainerService
             plainZpaqStream,
             encryptedPath,
             userPassword,
+            pin,
             firstGeneratedPassword,
             secondGeneratedPassword,
             suite,
@@ -107,6 +120,7 @@ public sealed partial class KalynaContainerService
         Stream plainZpaqStream,
         string encryptedPath,
         string userPassword,
+        string pin,
         string firstGeneratedPassword,
         string secondGeneratedPassword,
         Argon2Profile argon2Profile,
@@ -118,6 +132,7 @@ public sealed partial class KalynaContainerService
             plainZpaqStream,
             encryptedPath,
             userPassword,
+            pin,
             firstGeneratedPassword,
             secondGeneratedPassword,
             EncryptionSuite.Kalyna512_512,
@@ -131,6 +146,7 @@ public sealed partial class KalynaContainerService
         Stream plainZpaqStream,
         string encryptedPath,
         string userPassword,
+        string pin,
         string firstGeneratedPassword,
         string secondGeneratedPassword,
         EncryptionSuite suite,
@@ -144,6 +160,9 @@ public sealed partial class KalynaContainerService
         EncryptionSuiteParameters parameters = EncryptionSuiteCatalog.Get(suite);
         EnsureNativeAvailable(suite);
         PasswordKeyService.ValidateUserPasswordForCreation(userPassword, firstGeneratedPassword, secondGeneratedPassword);
+        // Checked before any work starts. The derivation would refuse it too,
+        // but only after the archive has been compressed and streamed.
+        V10KeyDerivation.ValidatePin(pin);
         PasswordKeyService.ValidateArgon2Profile(argon2Profile);
         ValidateHintForCreation(hint);
 
@@ -206,26 +225,17 @@ public sealed partial class KalynaContainerService
             kdfSecondSalt = secondSalt.Length == 0 ? [] : (byte[])secondSalt.Clone();
             try
             {
-                using DerivedKey key = parameters.UsesTwoKdfRounds
-                    ? await _passwords.DeriveTwoRoundAsync(
-                        userPassword,
-                        firstGeneratedPassword,
-                        secondGeneratedPassword,
-                        kdfSalt,
-                        kdfSecondSalt,
-                        suite,
-                        argon2Profile,
-                        cancellationToken).ConfigureAwait(false)
-                    : await _passwords.DeriveAsync(
-                        userPassword,
-                        firstGeneratedPassword,
-                        secondGeneratedPassword,
-                        kdfSalt,
-                        suite,
-                        argon2Profile,
-                        cancellationToken).ConfigureAwait(false);
-                keyMaterial = SuiteKeyMaterial.Create(key.Bytes, parameters);
-                effectiveProfile = key.Profile;
+                keyMaterial = await DeriveV10KeyMaterialAsync(
+                    parameters,
+                    userPassword,
+                    pin,
+                    firstGeneratedPassword,
+                    secondGeneratedPassword,
+                    kdfSalt,
+                    kdfSecondSalt,
+                    progress,
+                    cancellationToken).ConfigureAwait(false);
+                effectiveProfile = argon2Profile;
             }
             finally
             {
@@ -251,7 +261,7 @@ public sealed partial class KalynaContainerService
                 Sha3TagSize * 8,
                 parameters.SkeinMacKeyBytes * 8,
                 SkeinTagSize * 8,
-                PasswordKeyService.SaltSize * 8,
+                EntropyMixer.SaltPairBytes * 8,
                 Convert.ToBase64String(salt),
                 parameters.NonceBytes * 8,
                 Convert.ToBase64String(nonce),
@@ -259,15 +269,20 @@ public sealed partial class KalynaContainerService
                 parameters.TweakBytes > 0 ? EncryptionSuiteCatalog.ThreefishTweakMode : "None",
                 tweak.Length == 0 ? null : Convert.ToBase64String(tweak),
                 hint,
-                effectiveProfile.MemoryKiB,
+                // Zero on purpose. v10 derives the Argon2id memory cost from
+                // the credentials, so writing it here would publish the one
+                // parameter the derivation keeps secret. Iterations and
+                // parallelism are fixed constants and reveal nothing.
+                0,
                 effectiveProfile.Iterations,
                 effectiveProfile.Parallelism,
-                parameters.DerivedKeyBytes * 8,
-                "UserPassword+GeneratedHex512x2",
-                EncryptionSuiteCatalog.KdfInputMode,
+                MasterKeyBits,
+                V10MasterKdf.PasswordMode,
+                V10MasterKdf.KdfInputMode,
                 1024,
                 2,
-                secondSalt.Length == 0 ? 0 : PasswordKeyService.SaltSize * 8,
+                V10MasterKdf.KdfMode,
+                secondSalt.Length == 0 ? 0 : EntropyMixer.SaltPairBytes * 8,
                 secondSalt.Length == 0 ? null : Convert.ToBase64String(secondSalt),
                 secondNonce.Length == 0 ? 0 : parameters.NonceBytes * 8,
                 secondNonce.Length == 0 ? null : Convert.ToBase64String(secondNonce));
@@ -444,6 +459,7 @@ public sealed partial class KalynaContainerService
     public async Task DecryptToStreamAsync(
         string encryptedPath,
         string userPassword,
+        string pin,
         string firstGeneratedPassword,
         string secondGeneratedPassword,
         Stream plainZpaqDestination,
@@ -512,28 +528,16 @@ public sealed partial class KalynaContainerService
             secondNonce = string.IsNullOrEmpty(header.SecondNonce) ? [] : Convert.FromBase64String(header.SecondNonce);
             chunkNonceBase = BuildChunkNonceBase(nonce, secondNonce);
             tweak = string.IsNullOrEmpty(header.Tweak) ? [] : Convert.FromBase64String(header.Tweak);
-            Argon2Profile argon2Profile = GetArgon2Profile(header);
-            using (DerivedKey key = parameters.UsesTwoKdfRounds
-                ? await _passwords.DeriveTwoRoundAsync(
-                    userPassword,
-                    firstGeneratedPassword,
-                    secondGeneratedPassword,
-                    salt,
-                    secondSalt,
-                    parameters.Suite,
-                    argon2Profile,
-                    cancellationToken).ConfigureAwait(false)
-                : await _passwords.DeriveAsync(
-                    userPassword,
-                    firstGeneratedPassword,
-                    secondGeneratedPassword,
-                    salt,
-                    parameters.Suite,
-                    argon2Profile,
-                    cancellationToken).ConfigureAwait(false))
-            {
-                keyMaterial = SuiteKeyMaterial.Create(key.Bytes, parameters);
-            }
+            keyMaterial = await DeriveV10KeyMaterialAsync(
+                parameters,
+                userPassword,
+                pin,
+                firstGeneratedPassword,
+                secondGeneratedPassword,
+                salt,
+                secondSalt,
+                progress,
+                cancellationToken).ConfigureAwait(false);
 
             (actualSha3Tag, actualSkeinTag) = await ComputeCiphertextAuthenticationAsync(
                 input,
@@ -678,6 +682,7 @@ public sealed partial class KalynaContainerService
     internal async Task VerifyAuthenticationAsync(
         Stream input,
         string userPassword,
+        string pin,
         string firstGeneratedPassword,
         string secondGeneratedPassword,
         CancellationToken cancellationToken)
@@ -730,17 +735,25 @@ public sealed partial class KalynaContainerService
             }
 
             salt = Convert.FromBase64String(header.Salt);
-            using (DerivedKey key = await _passwords.DeriveAsync(
-                userPassword,
-                firstGeneratedPassword,
-                secondGeneratedPassword,
-                salt,
-                parameters.Suite,
-                GetArgon2Profile(header),
-                cancellationToken).ConfigureAwait(false))
+            byte[] verifySecondSalt = string.IsNullOrEmpty(header.SecondSalt)
+                ? []
+                : Convert.FromBase64String(header.SecondSalt);
+            try
             {
-                salt = null;
-                keyMaterial = SuiteKeyMaterial.Create(key.Bytes, parameters);
+                keyMaterial = await DeriveV10KeyMaterialAsync(
+                    parameters,
+                    userPassword,
+                    pin,
+                    firstGeneratedPassword,
+                    secondGeneratedPassword,
+                    salt,
+                    verifySecondSalt,
+                    progress: null,
+                    cancellationToken).ConfigureAwait(false);
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(verifySecondSalt);
             }
 
             (actualSha3Tag, actualSkeinTag) = await ComputeCiphertextAuthenticationAsync(
@@ -880,12 +893,32 @@ public sealed partial class KalynaContainerService
             }
 
             EncryptionSuiteParameters parameters = EncryptionSuiteCatalog.FromAlgorithm(header.Algorithm);
-            salt = Convert.FromBase64String(header.Salt);
+            // Every salt pair the container's own derivation uses, in order.
+            // KPAR2 has to reproduce the same key schedule, and for the
+            // two-round suite that means both rounds — running one round there
+            // would give recovery a cheaper credential oracle than the
+            // container itself offers.
+            byte[] firstPair = Convert.FromBase64String(header.Salt);
+            byte[] secondPair = string.IsNullOrEmpty(header.SecondSalt)
+                ? []
+                : Convert.FromBase64String(header.SecondSalt);
+            salt = new byte[firstPair.Length + secondPair.Length];
+            try
+            {
+                firstPair.CopyTo(salt, 0);
+                secondPair.CopyTo(salt, firstPair.Length);
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(firstPair);
+                CryptographicOperations.ZeroMemory(secondPair);
+            }
+
             var result = new ContainerRecoveryKdfInfo(
                 parameters.Suite,
                 header.Algorithm,
                 salt,
-                GetArgon2Profile(header));
+                Argon2Profile.Default);
             salt = null;
             return result;
         }
@@ -919,7 +952,12 @@ public sealed partial class KalynaContainerService
 
             if (header.Version != CurrentVersion)
             {
-                throw new InvalidDataException($"Only encrypted container version {CurrentVersion} is supported.");
+                throw new InvalidDataException(
+                    header.Version < CurrentVersion
+                        ? $"This archive uses container version {header.Version}. Keep Vault {CurrentVersion} "
+                          + "derives its keys from four credentials including a PIN and cannot open it. "
+                          + "Open it with the version that wrote it and create a new archive."
+                        : $"Only encrypted container version {CurrentVersion} is supported.");
             }
 
             ValidateHeader(header);
@@ -1474,23 +1512,24 @@ public sealed partial class KalynaContainerService
             || header.Sha3TagBits != Sha3TagSize * 8
             || header.SkeinMacKeyBits != parameters.SkeinMacKeyBytes * 8
             || header.SkeinTagBits != SkeinTagSize * 8
-            || header.SaltBits != PasswordKeyService.SaltSize * 8
+            || header.SaltBits != EntropyMixer.SaltPairBytes * 8
             || header.NonceBits != parameters.NonceBytes * 8
             || header.TweakBits != parameters.TweakBytes * 8
             || !string.Equals(
                 header.TweakMode,
                 parameters.TweakBytes > 0 ? EncryptionSuiteCatalog.ThreefishTweakMode : "None",
                 StringComparison.Ordinal)
-            || header.Argon2OutputBits != parameters.DerivedKeyBytes * 8)
+            || header.Argon2OutputBits != MasterKeyBits)
         {
-            throw new InvalidDataException("Container header contains invalid v9 suite parameters.");
+            throw new InvalidDataException("Container header contains invalid v10 suite parameters.");
         }
 
         ValidatePasswordMode(header);
-        Argon2Profile profile = GetArgon2Profile(header);
-        if (profile != Argon2Profile.Default)
+        if (header.Argon2MemoryKiB != 0
+            || header.Argon2Iterations != (int)V10MasterKdf.Iterations
+            || header.Argon2Parallelism != (int)V10MasterKdf.Parallelism)
         {
-            throw new InvalidDataException("Container header does not use the fixed v9 Argon2id profile.");
+            throw new InvalidDataException("Container header does not use the fixed v10 Argon2id profile.");
         }
 
         if (header.Hint is { Length: > 180 } || header.Hint?.Any(char.IsControl) == true)
@@ -1514,7 +1553,7 @@ public sealed partial class KalynaContainerService
             salt = Convert.FromBase64String(header.Salt);
             nonce = Convert.FromBase64String(header.Nonce);
             tweak = string.IsNullOrEmpty(header.Tweak) ? [] : Convert.FromBase64String(header.Tweak);
-            if (salt.Length != PasswordKeyService.SaltSize
+            if (salt.Length != EntropyMixer.SaltPairBytes
                 || nonce.Length != parameters.NonceBytes
                 || tweak.Length != parameters.TweakBytes)
             {
@@ -1578,7 +1617,7 @@ public sealed partial class KalynaContainerService
                 "Container header is missing the second Argon2id round's salt or nonce.");
         }
 
-        if (header.SecondSaltBits != PasswordKeyService.SaltSize * 8
+        if (header.SecondSaltBits != EntropyMixer.SaltPairBytes * 8
             || header.SecondNonceBits != parameters.NonceBytes * 8)
         {
             throw new InvalidDataException("Container header contains invalid second-round parameter lengths.");
@@ -1593,7 +1632,7 @@ public sealed partial class KalynaContainerService
             secondNonce = Convert.FromBase64String(header.SecondNonce);
             firstSalt = Convert.FromBase64String(header.Salt!);
 
-            if (secondSalt.Length != PasswordKeyService.SaltSize
+            if (secondSalt.Length != EntropyMixer.SaltPairBytes
                 || secondNonce.Length != parameters.NonceBytes)
             {
                 throw new InvalidDataException("Container header contains invalid second-round lengths.");
@@ -1620,10 +1659,11 @@ public sealed partial class KalynaContainerService
     {
         if (header.GeneratedPasswordFactorCount != 2
             || header.GeneratedPasswordBits != 1024
-            || !string.Equals(header.PasswordMode, "UserPassword+GeneratedHex512x2", StringComparison.Ordinal)
-            || !string.Equals(header.KdfInputMode, EncryptionSuiteCatalog.KdfInputMode, StringComparison.Ordinal))
+            || !string.Equals(header.PasswordMode, V10MasterKdf.PasswordMode, StringComparison.Ordinal)
+            || !string.Equals(header.KdfInputMode, V10MasterKdf.KdfInputMode, StringComparison.Ordinal)
+            || !string.Equals(header.KdfMode, V10MasterKdf.KdfMode, StringComparison.Ordinal))
         {
-            throw new InvalidDataException("Container header contains no valid v9 dual-factor KDF model.");
+            throw new InvalidDataException("Container header contains no valid v10 four-credential KDF model.");
         }
     }
 
@@ -1641,6 +1681,83 @@ public sealed partial class KalynaContainerService
         {
             CryptographicOperations.ZeroMemory(value);
         }
+    }
+
+    /// <summary>
+    /// Turns the header's salt pairs and the four credentials into the suite's
+    /// keys.
+    /// </summary>
+    /// <remarks>
+    /// A v10 salt field is a pair — the SHA3 branch's 512-bit salt followed by
+    /// the Skein branch's — because every path that carries one carries the
+    /// other. Splitting them here, at the one place that talks to the KDF,
+    /// keeps the container plumbing to a single salt per round.
+    ///
+    /// The work runs on a worker thread: two or four Argon2id calls of at least
+    /// a gibibyte each would otherwise block whichever thread called in, which
+    /// on the desktop is the interface thread.
+    /// </remarks>
+    private static Task<SuiteKeyMaterial> DeriveV10KeyMaterialAsync(
+        EncryptionSuiteParameters parameters,
+        string userPassword,
+        string pin,
+        string firstGeneratedPassword,
+        string secondGeneratedPassword,
+        byte[] salt,
+        byte[] secondSalt,
+        IProgress<string>? progress,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(salt);
+        V10Salts salts = SplitSaltPairs(salt, secondSalt, parameters.UsesTwoKdfRounds);
+        return Task.Run(
+            () =>
+            {
+                using RoleKeyMaterial roles = V10KeyDerivation.DeriveSuiteKeys(
+                    parameters,
+                    userPassword,
+                    pin,
+                    firstGeneratedPassword,
+                    secondGeneratedPassword,
+                    salts,
+                    progress,
+                    cancellationToken);
+                return SuiteKeyMaterial.FromRoleKeys(roles, parameters);
+            },
+            cancellationToken);
+    }
+
+    private static V10Salts SplitSaltPairs(byte[] salt, byte[]? secondSalt, bool paranoia)
+    {
+        if (salt.Length != EntropyMixer.SaltPairBytes)
+        {
+            throw new InvalidDataException(
+                $"A v10 salt field must be {EntropyMixer.SaltPairBytes} bytes.");
+        }
+
+        byte[] sha3Round1 = salt[..V10Salts.SaltBytes];
+        byte[] skeinRound1 = salt[V10Salts.SaltBytes..];
+        byte[]? sha3Round2 = null;
+        byte[]? skeinRound2 = null;
+        if (paranoia)
+        {
+            if (secondSalt is null || secondSalt.Length != EntropyMixer.SaltPairBytes)
+            {
+                throw new InvalidDataException(
+                    "The two-round suite is missing its second v10 salt pair.");
+            }
+
+            sha3Round2 = secondSalt[..V10Salts.SaltBytes];
+            skeinRound2 = secondSalt[V10Salts.SaltBytes..];
+        }
+        else if (secondSalt is { Length: > 0 })
+        {
+            throw new InvalidDataException("A single-round suite must not carry a second salt pair.");
+        }
+
+        var salts = new V10Salts(sha3Round1, skeinRound1, sha3Round2, skeinRound2);
+        salts.Validate(paranoia);
+        return salts;
     }
 
     private sealed class SuiteKeyMaterial : IDisposable
@@ -1662,6 +1779,42 @@ public sealed partial class KalynaContainerService
         public byte[] Sha3MacKey { get; }
 
         public byte[] SkeinMacKey { get; }
+
+        /// <summary>
+        /// Takes over the keys the v10 role schedule derived.
+        /// </summary>
+        /// <remarks>
+        /// v10 derives each role from its own domain-separated context rather
+        /// than slicing one flat Argon2id output, so there is nothing to slice
+        /// here — only three finished keys to copy into locked storage.
+        /// </remarks>
+        public static SuiteKeyMaterial FromRoleKeys(RoleKeyMaterial roles, EncryptionSuiteParameters parameters)
+        {
+            ArgumentNullException.ThrowIfNull(roles);
+            if (roles.EncryptionKey.Bytes.Length != parameters.EncryptionKeyBytes
+                || roles.Sha3MacKey.Bytes.Length != parameters.Sha3MacKeyBytes
+                || roles.SkeinMacKey.Bytes.Length != parameters.SkeinMacKeyBytes)
+            {
+                throw new CryptographicException("The v10 role schedule returned an invalid key length.");
+            }
+
+            var material = new SuiteKeyMaterial(parameters);
+            try
+            {
+                material._encryptionKeyLock = SecureMemory.TryLock(material.EncryptionKey);
+                material._sha3MacKeyLock = SecureMemory.TryLock(material.Sha3MacKey);
+                material._skeinMacKeyLock = SecureMemory.TryLock(material.SkeinMacKey);
+                roles.EncryptionKey.Bytes.CopyTo(material.EncryptionKey, 0);
+                roles.Sha3MacKey.Bytes.CopyTo(material.Sha3MacKey, 0);
+                roles.SkeinMacKey.Bytes.CopyTo(material.SkeinMacKey, 0);
+                return material;
+            }
+            catch
+            {
+                material.Dispose();
+                throw;
+            }
+        }
 
         public static SuiteKeyMaterial Create(ReadOnlySpan<byte> derivedKey, EncryptionSuiteParameters parameters)
         {
@@ -1734,6 +1887,11 @@ public sealed partial class KalynaContainerService
         string? KdfInputMode,
         int GeneratedPasswordBits,
         int GeneratedPasswordFactorCount = 0,
+
+        // How the master is built. Named separately from KdfInputMode because
+        // the two answer different questions: the input mode says what goes
+        // into Argon2id, this says what happens around it.
+        string? KdfMode = null,
 
         // The second Argon2id round, present only for suites that run one.
         //

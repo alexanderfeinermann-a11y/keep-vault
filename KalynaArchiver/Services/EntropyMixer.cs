@@ -18,7 +18,7 @@ public static partial class EntropyMixer
     // 64 bytes for Kalyna and 128 for Threefish. Deriving the second nonce from
     // the first would make one layer's keystream a function of the other's, and
     // the whole point of the cascade is that the two are independent.
-    private const int PurposeCount = 6;
+    private const int PurposeCount = 9;
     /// <summary>
     /// Mouse samples each pool needs before factors can be generated.
     /// </summary>
@@ -31,9 +31,12 @@ public static partial class EntropyMixer
     private static readonly object Gate = new();
     private static readonly EntropyPurpose[] SamplePurposes =
     [
-        EntropyPurpose.GeneratedPasswordFirst,
-        EntropyPurpose.GeneratedPasswordSecond,
-        EntropyPurpose.Salt,
+        EntropyPurpose.FactorA1,
+        EntropyPurpose.FactorA2,
+        EntropyPurpose.FactorB1,
+        EntropyPurpose.FactorB2,
+        EntropyPurpose.SaltSha3,
+        EntropyPurpose.SaltSkein,
         EntropyPurpose.NonceFirst,
         EntropyPurpose.NonceSecond,
         EntropyPurpose.NonceThird,
@@ -47,9 +50,12 @@ public static partial class EntropyMixer
     private static int _nextPurposeIndex;
 
     public static long SampleCount => GetPoolStatus().Total;
-    public static long FirstGeneratedPasswordSampleCount => GetSampleCount(EntropyPurpose.GeneratedPasswordFirst);
-    public static long SecondGeneratedPasswordSampleCount => GetSampleCount(EntropyPurpose.GeneratedPasswordSecond);
-    public static long SaltSampleCount => GetSampleCount(EntropyPurpose.Salt);
+    public static long FirstGeneratedPasswordSampleCount => Math.Min(
+        GetSampleCount(EntropyPurpose.FactorA1), GetSampleCount(EntropyPurpose.FactorA2));
+    public static long SecondGeneratedPasswordSampleCount => Math.Min(
+        GetSampleCount(EntropyPurpose.FactorB1), GetSampleCount(EntropyPurpose.FactorB2));
+    public static long SaltSampleCount => Math.Min(
+        GetSampleCount(EntropyPurpose.SaltSha3), GetSampleCount(EntropyPurpose.SaltSkein));
     public static long NonceFirstSampleCount => GetSampleCount(EntropyPurpose.NonceFirst);
     public static long NonceSecondSampleCount => GetSampleCount(EntropyPurpose.NonceSecond);
     public static long NonceThirdSampleCount => GetSampleCount(EntropyPurpose.NonceThird);
@@ -70,9 +76,12 @@ public static partial class EntropyMixer
 
             return new EntropyPoolStatus(
                 total,
-                PurposeSampleCounts[(int)EntropyPurpose.GeneratedPasswordFirst],
-                PurposeSampleCounts[(int)EntropyPurpose.GeneratedPasswordSecond],
-                PurposeSampleCounts[(int)EntropyPurpose.Salt],
+                PurposeSampleCounts[(int)EntropyPurpose.FactorA1],
+                PurposeSampleCounts[(int)EntropyPurpose.FactorA2],
+                PurposeSampleCounts[(int)EntropyPurpose.FactorB1],
+                PurposeSampleCounts[(int)EntropyPurpose.FactorB2],
+                PurposeSampleCounts[(int)EntropyPurpose.SaltSha3],
+                PurposeSampleCounts[(int)EntropyPurpose.SaltSkein],
                 PurposeSampleCounts[(int)EntropyPurpose.NonceFirst],
                 PurposeSampleCounts[(int)EntropyPurpose.NonceSecond],
                 PurposeSampleCounts[(int)EntropyPurpose.NonceThird]);
@@ -224,6 +233,12 @@ public static partial class EntropyMixer
     /// expansion takes one size for all of them, and the extra bytes in the
     /// password and salt pools are simply not used.
     /// </remarks>
+    /// <summary>
+    /// One v10 salt pair: the SHA3 branch's 512-bit salt followed by the Skein
+    /// branch's.
+    /// </summary>
+    internal const int SaltPairBytes = 2 * 64;
+
     private static readonly int PoolDrawBytes = Math.Max(
         Sha3_512Compat.HashSizeInBytes,
         (EncryptionSuiteCatalog.MaxNonceBytes + 2) / 3);
@@ -236,7 +251,7 @@ public static partial class EntropyMixer
         // second round without asking the user for another 512 samples per pool.
         (LockedSensitiveBuffer firstMouse, LockedSensitiveBuffer secondMouse) =
             ExpandAndConsumeMousePoolsDual(PoolDrawBytes, SamplePurposes);
-        using LockedSensitiveBuffer passwordBytes = LockedSensitiveBuffer.Create(2 * Sha3_512Compat.HashSizeInBytes);
+        using LockedSensitiveBuffer passwordBytes = LockedSensitiveBuffer.Create(4 * Sha3_512Compat.HashSizeInBytes);
         LockedSensitiveBuffer? salt = null;
         LockedSensitiveBuffer? fullNonce = null;
         LockedSensitiveBuffer? secondSalt = null;
@@ -244,24 +259,28 @@ public static partial class EntropyMixer
         try
         {
             FillSystemRandom(passwordBytes.Bytes);
-            // Each password factor takes one digest from the front of its own
-            // pool's draw. They come from the first expansion only: the two
-            // factors must stay identical across both rounds, which is what
-            // makes the second round a second key rather than a second archive.
-            XorInPlace(
-                passwordBytes.Bytes.AsSpan(0, Sha3_512Compat.HashSizeInBytes),
-                firstMouse.Bytes.AsSpan(0, Sha3_512Compat.HashSizeInBytes));
-            XorInPlace(
-                passwordBytes.Bytes.AsSpan(Sha3_512Compat.HashSizeInBytes, Sha3_512Compat.HashSizeInBytes),
-                firstMouse.Bytes.AsSpan(PoolDrawBytes, Sha3_512Compat.HashSizeInBytes));
+            // A v10 factor is 1024 bits and comes from two pools laid end to
+            // end: A = A1 || A2, B = B1 || B2. Splitting a factor across two
+            // pools is defence in depth, not a claim that either pool holds 512
+            // bits of real entropy; the system CSPRNG XORed in below stays the
+            // primary source.
+            //
+            // Both factors come from the first expansion only. They have to be
+            // identical across both Paranoia rounds -- that is what makes round
+            // two a second key rather than a second archive.
+            const int Half = 64;
+            for (int half = 0; half < 4; half++)
+            {
+                XorInPlace(
+                    passwordBytes.Bytes.AsSpan(half * Half, Half),
+                    firstMouse.Bytes.AsSpan(half * PoolDrawBytes, Half));
+            }
 
             (salt, fullNonce) = SplitPreparedSaltAndNonce(firstMouse);
             (secondSalt, secondFullNonce) = SplitPreparedSaltAndNonce(secondMouse);
 
-            string firstPassword = Convert.ToHexString(
-                passwordBytes.Bytes.AsSpan(0, Sha3_512Compat.HashSizeInBytes));
-            string secondPassword = Convert.ToHexString(
-                passwordBytes.Bytes.AsSpan(Sha3_512Compat.HashSizeInBytes, Sha3_512Compat.HashSizeInBytes));
+            string firstPassword = Convert.ToHexString(passwordBytes.Bytes.AsSpan(0, 128));
+            string secondPassword = Convert.ToHexString(passwordBytes.Bytes.AsSpan(128, 128));
             if (string.Equals(firstPassword, secondPassword, StringComparison.Ordinal))
             {
                 throw new CryptographicException("The independently generated password factors unexpectedly match.");
@@ -292,8 +311,13 @@ public static partial class EntropyMixer
     }
 
     /// <summary>
-    /// Takes a full-width salt and nonce out of one expanded pool block.
+    /// Takes a full-width salt pair and nonce out of one expanded pool block.
     /// </summary>
+    /// <remarks>
+    /// The salt buffer is the v10 pair: the SHA3 branch's salt followed by the
+    /// Skein branch's, each from its own pool. They travel together because
+    /// every path that handles a salt handles both of them.
+    /// </remarks>
     private static (LockedSensitiveBuffer Salt, LockedSensitiveBuffer Nonce) SplitPreparedSaltAndNonce(
         LockedSensitiveBuffer mouseBytes)
     {
@@ -301,17 +325,20 @@ public static partial class EntropyMixer
         LockedSensitiveBuffer? nonce = null;
         try
         {
-            salt = LockedSensitiveBuffer.Create(Sha3_512Compat.HashSizeInBytes);
+            salt = LockedSensitiveBuffer.Create(SaltPairBytes);
             FillSystemRandom(salt.Bytes);
             XorInPlace(
-                salt.Bytes,
-                mouseBytes.Bytes.AsSpan(2 * PoolDrawBytes, Sha3_512Compat.HashSizeInBytes));
+                salt.Bytes.AsSpan(0, Sha3_512Compat.HashSizeInBytes),
+                mouseBytes.Bytes.AsSpan(4 * PoolDrawBytes, Sha3_512Compat.HashSizeInBytes));
+            XorInPlace(
+                salt.Bytes.AsSpan(Sha3_512Compat.HashSizeInBytes, Sha3_512Compat.HashSizeInBytes),
+                mouseBytes.Bytes.AsSpan(5 * PoolDrawBytes, Sha3_512Compat.HashSizeInBytes));
 
             nonce = LockedSensitiveBuffer.Create(EncryptionSuiteCatalog.MaxNonceBytes);
             FillSystemRandom(nonce.Bytes);
             XorInPlace(
                 nonce.Bytes,
-                mouseBytes.Bytes.AsSpan(3 * PoolDrawBytes, EncryptionSuiteCatalog.MaxNonceBytes));
+                mouseBytes.Bytes.AsSpan(6 * PoolDrawBytes, EncryptionSuiteCatalog.MaxNonceBytes));
 
             (LockedSensitiveBuffer Salt, LockedSensitiveBuffer Nonce) result = (salt, nonce);
             salt = null;
@@ -354,7 +381,8 @@ public static partial class EntropyMixer
         (LockedSensitiveBuffer firstMouse, LockedSensitiveBuffer secondMouse) = ExpandAndConsumeMousePoolsDual(
             PoolDrawBytes,
             [
-                EntropyPurpose.Salt,
+                EntropyPurpose.SaltSha3,
+                EntropyPurpose.SaltSkein,
                 EntropyPurpose.NonceFirst,
                 EntropyPurpose.NonceSecond,
                 EntropyPurpose.NonceThird,
@@ -409,9 +437,14 @@ public static partial class EntropyMixer
         LockedSensitiveBuffer? selectedNonce = null;
         try
         {
-            salt = LockedSensitiveBuffer.Create(Sha3_512Compat.HashSizeInBytes);
+            salt = LockedSensitiveBuffer.Create(SaltPairBytes);
             FillSystemRandom(salt.Bytes);
-            XorInPlace(salt.Bytes, mouseBytes.Bytes.AsSpan(0, Sha3_512Compat.HashSizeInBytes));
+            XorInPlace(
+                salt.Bytes.AsSpan(0, Sha3_512Compat.HashSizeInBytes),
+                mouseBytes.Bytes.AsSpan(0, Sha3_512Compat.HashSizeInBytes));
+            XorInPlace(
+                salt.Bytes.AsSpan(Sha3_512Compat.HashSizeInBytes, Sha3_512Compat.HashSizeInBytes),
+                mouseBytes.Bytes.AsSpan(PoolDrawBytes, Sha3_512Compat.HashSizeInBytes));
 
             // Sized from the catalogue, not from three digests: the six-layer
             // cascade needs 268 nonce bytes and the old fixed 192 would have
@@ -420,7 +453,7 @@ public static partial class EntropyMixer
             FillSystemRandom(fullNonce.Bytes);
             XorInPlace(
                 fullNonce.Bytes,
-                mouseBytes.Bytes.AsSpan(PoolDrawBytes, EncryptionSuiteCatalog.MaxNonceBytes));
+                mouseBytes.Bytes.AsSpan(2 * PoolDrawBytes, EncryptionSuiteCatalog.MaxNonceBytes));
 
             int nonceBytes = EncryptionSuiteCatalog.Get(suite).NonceBytes;
             if (nonceBytes == fullNonce.Bytes.Length)
@@ -457,7 +490,8 @@ public static partial class EntropyMixer
         using LockedSensitiveBuffer mouseBytes = ExpandAndConsumeMousePools(
             PoolDrawBytes,
             [
-                EntropyPurpose.Salt,
+                EntropyPurpose.SaltSha3,
+                EntropyPurpose.SaltSkein,
                 EntropyPurpose.NonceFirst,
                 EntropyPurpose.NonceSecond,
                 EntropyPurpose.NonceThird,
@@ -467,11 +501,14 @@ public static partial class EntropyMixer
         LockedSensitiveBuffer? selectedNonce = null;
         try
         {
-            salt = LockedSensitiveBuffer.Create(Sha3_512Compat.HashSizeInBytes);
+            salt = LockedSensitiveBuffer.Create(SaltPairBytes);
             FillSystemRandom(salt.Bytes);
             XorInPlace(
-                salt.Bytes,
+                salt.Bytes.AsSpan(0, Sha3_512Compat.HashSizeInBytes),
                 mouseBytes.Bytes.AsSpan(0, Sha3_512Compat.HashSizeInBytes));
+            XorInPlace(
+                salt.Bytes.AsSpan(Sha3_512Compat.HashSizeInBytes, Sha3_512Compat.HashSizeInBytes),
+                mouseBytes.Bytes.AsSpan(PoolDrawBytes, Sha3_512Compat.HashSizeInBytes));
 
             // Sized from the catalogue rather than from three digests. The
             // widest single-round nonce happens to be exactly 192 bytes today,
@@ -482,7 +519,7 @@ public static partial class EntropyMixer
             FillSystemRandom(fullNonce.Bytes);
             XorInPlace(
                 fullNonce.Bytes,
-                mouseBytes.Bytes.AsSpan(PoolDrawBytes, EncryptionSuiteCatalog.MaxNonceBytes));
+                mouseBytes.Bytes.AsSpan(2 * PoolDrawBytes, EncryptionSuiteCatalog.MaxNonceBytes));
 
             int nonceBytes = EncryptionSuiteCatalog.Get(suite).NonceBytes;
             if (nonceBytes == fullNonce.Bytes.Length)
@@ -798,24 +835,40 @@ public static partial class EntropyMixer
     private static partial int SecRandomCopyBytes(nint random, nuint count, [Out] byte[] bytes);
 }
 
+/// <summary>
+/// How full each of the nine v10 pools is.
+/// </summary>
+/// <remarks>
+/// A1/A2 and B1/B2 are reported separately because they are separate pools, but
+/// the interface must not present them as four user factors: the user has two,
+/// each 1024 bits wide.
+/// </remarks>
 public readonly record struct EntropyPoolStatus(
     long Total,
-    long GeneratedPasswordFirst,
-    long GeneratedPasswordSecond,
-    long Salt,
+    long FactorA1,
+    long FactorA2,
+    long FactorB1,
+    long FactorB2,
+    long SaltSha3,
+    long SaltSkein,
     long NonceFirst,
     long NonceSecond,
     long NonceThird)
 {
-    public long Minimum => Math.Min(
-        Math.Min(GeneratedPasswordFirst, GeneratedPasswordSecond),
-        Math.Min(Salt, Math.Min(NonceFirst, Math.Min(NonceSecond, NonceThird))));
+    private long[] All =>
+        [FactorA1, FactorA2, FactorB1, FactorB2, SaltSha3, SaltSkein, NonceFirst, NonceSecond, NonceThird];
 
-    public long Maximum => Math.Max(
-        Math.Max(GeneratedPasswordFirst, GeneratedPasswordSecond),
-        Math.Max(Salt, Math.Max(NonceFirst, Math.Max(NonceSecond, NonceThird))));
+    public long Minimum => All.Min();
+
+    public long Maximum => All.Max();
 
     public bool IsBalanced => Maximum - Minimum <= 1;
+
+    /// <summary>The lower of the two halves that make up factor A.</summary>
+    public long FactorA => Math.Min(FactorA1, FactorA2);
+
+    /// <summary>The lower of the two halves that make up factor B.</summary>
+    public long FactorB => Math.Min(FactorB1, FactorB2);
 }
 
 /// <summary>
@@ -859,14 +912,29 @@ internal sealed class TwoRoundEncryptionParameters : IDisposable
     }
 }
 
+/// <summary>
+/// The nine independent mouse-entropy pools a v10 archive draws on.
+/// </summary>
+/// <remarks>
+/// A1/A2 and B1/B2 are internal sources, not four user-facing factors: each
+/// pair is concatenated into one 1024-bit factor that the user ever sees. The
+/// two salt purposes are separate because the two Argon2id branches of a round
+/// must not share a salt.
+///
+/// The count of mouse samples is not a proof of entropy. The operating-system
+/// CSPRNG remains the primary source; these pools are defence in depth.
+/// </remarks>
 public enum EntropyPurpose
 {
-    GeneratedPasswordFirst = 0,
-    GeneratedPasswordSecond = 1,
-    Salt = 2,
-    NonceFirst = 3,
-    NonceSecond = 4,
-    NonceThird = 5,
+    FactorA1 = 0,
+    FactorA2 = 1,
+    FactorB1 = 2,
+    FactorB2 = 3,
+    SaltSha3 = 4,
+    SaltSkein = 5,
+    NonceFirst = 6,
+    NonceSecond = 7,
+    NonceThird = 8,
 }
 
 internal sealed class GeneratedArchiveEntropy : IDisposable
@@ -899,8 +967,8 @@ internal sealed class GeneratedArchiveEntropy : IDisposable
         _fullNonce = fullNonce ?? throw new ArgumentNullException(nameof(fullNonce));
         _secondSalt = secondSalt ?? throw new ArgumentNullException(nameof(secondSalt));
         _secondFullNonce = secondFullNonce ?? throw new ArgumentNullException(nameof(secondFullNonce));
-        if (_salt.Bytes.Length != Sha3_512Compat.HashSizeInBytes
-            || _secondSalt.Bytes.Length != Sha3_512Compat.HashSizeInBytes
+        if (_salt.Bytes.Length != EntropyMixer.SaltPairBytes
+            || _secondSalt.Bytes.Length != EntropyMixer.SaltPairBytes
             || _fullNonce.Bytes.Length != EncryptionSuiteCatalog.MaxNonceBytes
             || _secondFullNonce.Bytes.Length != EncryptionSuiteCatalog.MaxNonceBytes)
         {

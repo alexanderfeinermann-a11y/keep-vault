@@ -91,7 +91,7 @@ public sealed class KeySheetService
                         Value(Path.GetFileName(data.ArchivePath)),
                         Label("Storage location"),
                         Value(Path.GetDirectoryName(data.ArchivePath) ?? data.ArchivePath),
-                        Label($"Generated 512-bit hexadecimal password {factorName}"),
+                        Label($"Generated 1024-bit hexadecimal factor {factorName}"),
                         new TextBlock { Text = GroupGeneratedPassword(generatedPassword), FontFamily = new WpfFontFamily("Consolas"), FontSize = 11, TextWrapping = TextWrapping.Wrap, Foreground = WpfBrushes.Black, Margin = new Thickness(0, 4, 0, 18) },
                         Label("User password field (write by hand; do not store it digitally)"),
                         FieldLine(),
@@ -342,17 +342,32 @@ public sealed class KeySheetService
         y += 15;
         formatter.DrawString(Path.GetDirectoryName(data.ArchivePath) ?? data.ArchivePath, normalFont, XBrushes.Black, new XRect(margin, y, 500, 38));
         y += 48;
-        gfx.DrawString($"Generated 512-bit hexadecimal password {factorName}", headingFont, XBrushes.Black, new XPoint(margin, y));
+        gfx.DrawString($"Generated 1024-bit hexadecimal factor {factorName}", headingFont, XBrushes.Black, new XPoint(margin, y));
         y += 15;
-        formatter.DrawString(GroupGeneratedPassword(generatedPassword), monoFont, XBrushes.Black, new XRect(margin, y, 500, 54));
-        y += 74;
+        // A v10 factor is 256 hexadecimal characters in 32 groups, which needs
+        // roughly twice the height the 512-bit factor did. Sized generously
+        // rather than exactly: a factor clipped at the bottom of the page is a
+        // sheet that cannot open its own archive.
+        formatter.DrawString(GroupGeneratedPassword(generatedPassword), monoFont, XBrushes.Black, new XRect(margin, y, 500, 112));
+        y += 128;
         gfx.DrawString("User password field (write by hand; do not store it digitally)", headingFont, XBrushes.Black, new XPoint(margin, y));
         y += 24;
-        for (int i = 0; i < 4; i++)
+        for (int i = 0; i < 3; i++)
         {
             gfx.DrawLine(XPens.Black, margin, y, page.Width.Point - margin, y);
             y += 28;
         }
+
+        y += 4;
+        // Deliberately no field for the PIN. The password field is already a
+        // compromise; a sheet carrying the passphrase, the PIN and a factor
+        // would hold three of the four credentials at once.
+        formatter.DrawString(
+            "The PIN is not written on this sheet. Memorise it; without it this factor cannot open the archive.",
+            warningFont,
+            XBrushes.DarkRed,
+            new XRect(margin, y, 500, 28));
+        y += 26;
 
         y += 12;
         gfx.DrawString($"QR code contains only generated password {factorName}", headingFont, XBrushes.Black, new XPoint(margin, y));

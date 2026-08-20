@@ -9,13 +9,17 @@ namespace KalynaArchiver.Services;
 public sealed class PasswordKeyService
 {
     public const int MinPasswordLength = 24;
-    public const int MaxPasswordLength = 128;
+    public const int MaxPasswordLength = 256;
     public const int MinPasswordCharacterClasses = 3;
     public const int MinDistinctPasswordCharacters = 12;
     public const int MinNonHexPasswordCharacters = 12;
     public const int MaxHexadecimalRunLength = 7;
     public const double MinimumConservativeEntropyBits = 128.0;
-    public const int GeneratedPasswordLength = 128;
+    /// <summary>
+    /// A v10 factor is 1024 bits, written as 256 uppercase hexadecimal
+    /// characters on the key sheet and in the interface.
+    /// </summary>
+    public const int GeneratedPasswordLength = 256;
     public const int SaltSize = 64;
     public const int Argon2PasswordInputSize = 128;
     public const int KalynaDerivedKeySize = 256;

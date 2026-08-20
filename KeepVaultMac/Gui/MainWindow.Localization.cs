@@ -49,6 +49,9 @@ public sealed partial class MainWindow
         CreatePasswordSetupHelpText.Text = T("createPasswordHelp");
         CreatePasswordLabel.Text = T("userPassword");
         CreatePasswordConfirmLabel.Text = T("repeatPassword");
+        CreatePinLabel.Text = T("pin");
+        CreatePinConfirmLabel.Text = T("repeatPin");
+        PinHelpText.Text = T("pinHelp");
         PasswordHelpText.Text = T("passwordHelp");
         PasswordGeneratorTitle.Text = T("generatorTitle");
         PasswordGeneratorHelpText.Text = T("generatorHelp");
@@ -78,6 +81,7 @@ public sealed partial class MainWindow
         ExtractPasswordHelpText.Text = T("extractPasswordHelp");
         ExtractHintLabel.Text = T("extractHintLabel");
         ExtractPasswordLabel.Text = T("userPassword");
+        ExtractPinLabel.Text = T("pin");
         ExtractGeneratedPasswordFirstLabel.Text = T("factorAFromSheet");
         ExtractGeneratedPasswordSecondLabel.Text = T("factorBFromSheet");
         RenderExtractHint();
@@ -150,19 +154,19 @@ public sealed partial class MainWindow
                 ? "The archive is then extracted again and compared byte-for-byte with the original files. Files are deleted only after a complete match."
                 : "Das Archiv wird danach erneut entpackt und bitweise mit den Originalen verglichen. Gelöscht wird erst bei vollständiger Übereinstimmung.",
             "saveArchive" => en ? "Save archive" : "Archiv speichern",
-            "createPasswordTitle" => en ? "Three-part password" : "Dreiteiliges Passwort",
+            "createPasswordTitle" => en ? "Four-part password" : "Vierteiliges Passwort",
             "createPasswordHelp" => en
-                ? "Extraction requires the user password plus independently generated factors A and B."
-                : "Zum Entpacken werden Userpasswort sowie die unabhängig generierten Faktoren A und B benötigt.",
+                ? "Extraction requires the user password, the PIN and both independently generated factors A and B. All four are mandatory."
+                : "Zum Entpacken werden Userpasswort, PIN sowie beide unabhängig generierten Faktoren A und B benötigt. Alle vier sind zwingend.",
             "userPassword" => en ? "User password" : "Userpasswort",
             "repeatPassword" => en ? "Repeat user password" : "Userpasswort wiederholen",
             "passwordHelp" => en
-                ? "24 to 128 characters, at least 3 character groups, 12 distinct and 12 non-hex characters, no hex run of 8+, and at least 128 conservative entropy bits."
-                : "24 bis 128 Zeichen, mindestens 3 Zeichengruppen, 12 verschiedene und 12 Nicht-Hex-Zeichen, keine Hex-Folge ab 8 Zeichen und mindestens 128 Bit konservative Bewertung.",
-            "generatorTitle" => en ? "Two independent 512-bit factors" : "Zwei unabhängige 512-Bit-Faktoren",
+                ? "24 to 256 characters, at least 3 character groups, 12 distinct and 12 non-hex characters, no hex run of 8+, and at least 128 conservative entropy bits."
+                : "24 bis 256 Zeichen, mindestens 3 Zeichengruppen, 12 verschiedene und 12 Nicht-Hex-Zeichen, keine Hex-Folge ab 8 Zeichen und mindestens 128 Bit konservative Bewertung.",
+            "generatorTitle" => en ? "Two independent 1024-bit factors" : "Zwei unabhängige 1024-Bit-Faktoren",
             "generatorHelp" => en
-                ? $"Six separate entropy pools need at least {EntropyMixer.RequiredMouseSamplesPerPurpose} mouse samples each. Generation atomically creates factors A/B, the salt and all three nonce parts, then consumes all source pools."
-                : $"Sechs getrennte Entropiepools benötigen je mindestens {EntropyMixer.RequiredMouseSamplesPerPurpose} Maus-Samples. Generieren erzeugt Faktoren A/B, Salt und alle drei Nonce-Teile atomar und verbraucht danach alle Quellpools.",
+                ? $"Nine separate entropy pools need at least {EntropyMixer.RequiredMouseSamplesPerPurpose} mouse samples each. Generation atomically creates factors A and B, both salts and all three nonce parts, then consumes all source pools."
+                : $"Neun getrennte Entropiepools benötigen je mindestens {EntropyMixer.RequiredMouseSamplesPerPurpose} Maus-Samples. Generieren erzeugt die Faktoren A und B, beide Salts und alle drei Nonce-Teile atomar und verbraucht danach alle Quellpools.",
             "factorA" => en ? "Generated factor A" : "Generierter Faktor A",
             "factorB" => en ? "Generated factor B" : "Generierter Faktor B",
             "printKeySheets" => en ? "Print separately" : "Getrennt drucken",
@@ -174,15 +178,29 @@ public sealed partial class MainWindow
                 : "Wird im öffentlichen Containerkopf gespeichert. Niemals Passwörter oder Geheimnisfragmente eingeben.",
             "generatePassword" => en ? "Generate" : "Generieren",
             "regeneratePassword" => en ? "Regenerate" : "Neu generieren",
+            "pin" => en ? "PIN" : "PIN",
+            "repeatPin" => en ? "Repeat PIN" : "PIN wiederholen",
+            "pinHelp" => en
+                ? "6 to 16 digits. The PIN is a credential of its own and is required together with the passphrase and both factors."
+                : "6 bis 16 Ziffern. Die PIN ist ein eigener Faktor und wird zusammen mit dem Passwort und beiden Faktoren benötigt.",
+            "pinInvalid" => en
+                ? "The PIN must consist of {0} to {1} digits."
+                : "Die PIN muss aus {0} bis {1} Ziffern bestehen.",
+            "pinMismatch" => en
+                ? "Both PIN entries differ."
+                : "Beide PIN-Eingaben unterscheiden sich.",
+            "pinAccepted" => en
+                ? "PIN accepted."
+                : "PIN akzeptiert.",
             "entropyCollecting" => en
-                ? "Collecting: total {0}; A {1}/{7}; B {2}/{7}; salt {3}/{7}; nonce 1 {4}/{7}; nonce 2 {5}/{7}; nonce 3 {6}/{7}"
-                : "Sammlung: gesamt {0}; A {1}/{7}; B {2}/{7}; Salt {3}/{7}; Nonce 1 {4}/{7}; Nonce 2 {5}/{7}; Nonce 3 {6}/{7}",
+                ? "Collecting: total {0}; A {1}+{2}/{10}; B {3}+{4}/{10}; salt-SHA3 {5}/{10}; salt-Skein {6}/{10}; nonce 1 {7}/{10}; nonce 2 {8}/{10}; nonce 3 {9}/{10}"
+                : "Sammlung: gesamt {0}; A {1}+{2}/{10}; B {3}+{4}/{10}; Salt-SHA3 {5}/{10}; Salt-Skein {6}/{10}; Nonce 1 {7}/{10}; Nonce 2 {8}/{10}; Nonce 3 {9}/{10}",
             "entropyPrepared" => en
-                ? "Ready and source pools consumed. Fresh pools: total {0}; A {1}/{7}; B {2}/{7}; salt {3}/{7}; nonce 1 {4}/{7}; nonce 2 {5}/{7}; nonce 3 {6}/{7}"
-                : "Bereit und Quellpools verbraucht. Frische Pools: gesamt {0}; A {1}/{7}; B {2}/{7}; Salt {3}/{7}; Nonce 1 {4}/{7}; Nonce 2 {5}/{7}; Nonce 3 {6}/{7}",
+                ? "Ready and source pools consumed. Fresh pools: total {0}; A {1}+{2}/{10}; B {3}+{4}/{10}; salt-SHA3 {5}/{10}; salt-Skein {6}/{10}; nonce 1 {7}/{10}; nonce 2 {8}/{10}; nonce 3 {9}/{10}"
+                : "Bereit und Quellpools verbraucht. Frische Pools: gesamt {0}; A {1}+{2}/{10}; B {3}+{4}/{10}; Salt-SHA3 {5}/{10}; Salt-Skein {6}/{10}; Nonce 1 {7}/{10}; Nonce 2 {8}/{10}; Nonce 3 {9}/{10}",
             "entropyRetry" => en
-                ? "Factors remain valid; a retry needs fresh salt/nonces: total {0}; A {1}/{7}; B {2}/{7}; salt {3}/{7}; nonce 1 {4}/{7}; nonce 2 {5}/{7}; nonce 3 {6}/{7}"
-                : "Faktoren bleiben gültig; ein Wiederholungsversuch benötigt frischen Salt/Nonces: gesamt {0}; A {1}/{7}; B {2}/{7}; Salt {3}/{7}; Nonce 1 {4}/{7}; Nonce 2 {5}/{7}; Nonce 3 {6}/{7}",
+                ? "Factors remain valid; a retry needs fresh salts and nonces: total {0}; A {1}+{2}/{10}; B {3}+{4}/{10}; salt-SHA3 {5}/{10}; salt-Skein {6}/{10}; nonce 1 {7}/{10}; nonce 2 {8}/{10}; nonce 3 {9}/{10}"
+                : "Faktoren bleiben gültig; ein Wiederholungsversuch benötigt frische Salts und Nonces: gesamt {0}; A {1}+{2}/{10}; B {3}+{4}/{10}; Salt-SHA3 {5}/{10}; Salt-Skein {6}/{10}; Nonce 1 {7}/{10}; Nonce 2 {8}/{10}; Nonce 3 {9}/{10}",
             "passwordEntropy" => en ? "Conservative entropy: {0:0.0} / {1:0} bits" : "Konservative Entropie: {0:0.0} / {1:0} Bit",
             "passwordAccepted" => en ? "All user-password requirements are met." : "Alle Anforderungen an das Userpasswort sind erfüllt.",
             "passwordTooShort" => en ? "Use at least {0} characters." : "Mindestens {0} Zeichen verwenden.",
@@ -218,8 +236,8 @@ public sealed partial class MainWindow
             "emergencyRecovery" => en ? "Emergency recovery" : "Notfallwiederherstellung",
             "extractPasswordTitle" => en ? "Three factors for extraction" : "Drei Faktoren zum Entpacken",
             "extractPasswordHelp" => en
-                ? "Enter the user password and both factors from the separately stored key sheets."
-                : "Userpasswort und beide Faktoren von den getrennt gelagerten Schlüsselzetteln eingeben.",
+                ? "Enter the user password, the PIN and both factors from the separately stored key sheets."
+                : "Userpasswort, PIN und beide Faktoren von den getrennt gelagerten Schlüsselzetteln eingeben.",
             "extractHintLabel" => en ? "Public archive hint" : "Öffentlicher Archivhinweis",
             "factorAFromSheet" => en ? "Factor A from key sheet" : "Faktor A vom Schlüsselzettel",
             "factorBFromSheet" => en ? "Factor B from key sheet" : "Faktor B vom Schlüsselzettel",

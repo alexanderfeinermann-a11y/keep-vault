@@ -23,7 +23,47 @@ public sealed partial class RecoveryService
     private static readonly byte[] Sha3KeyDomain = "Kalyna-ZPAQ/KPAR2/v2/SHA3-Recovery-Key"u8.ToArray();
     private static readonly byte[] SkeinKeyDomain = "Kalyna-ZPAQ/KPAR2/v2/Skein-Recovery-Key"u8.ToArray();
 
-    private const int Version = 2;
+    /// <summary>
+    /// KPAR2 format version. 3 is the container v10 layout: the salt field is
+    /// a 1024-bit pair rather than a single 512-bit salt, and the Argon2id cost
+    /// fields are gone because v10 derives the memory cost from the credentials
+    /// and must not publish it.
+    /// </summary>
+    private const int Version = 3;
+
+    /// <summary>
+    /// One v10 salt pair: the SHA3 branch's salt followed by the Skein
+    /// branch's.
+    /// </summary>
+    private const int SaltPairBytes = 128;
+
+    /// <summary>
+    /// The most salt an encrypted locator can carry: one pair per KDF round,
+    /// and the two-round suite uses two.
+    /// </summary>
+    private const int LocatorSaltBytes = 2 * SaltPairBytes;
+
+    /// <summary>
+    /// Everything in the canonical locator context except the salt: five
+    /// 32-bit fields, four 64-bit fields, three more 32-bit fields and the
+    /// 32-byte archive identifier.
+    /// </summary>
+    private const int LocatorCertificationContextFixedBytes = (5 * 4) + (3 * 8) + 4 + 8 + 4 + 4 + 32;
+
+    /// <summary>
+    /// How many salt bytes a suite's KPAR2 bootstrap needs.
+    /// </summary>
+    /// <remarks>
+    /// Read from the catalogue rather than fixed, so a suite added later gets
+    /// the right answer instead of whichever constant happened to be written
+    /// down when this was first implemented.
+    /// </remarks>
+    private static int ExpectedLocatorSaltBytes(int encryptionSuite) =>
+        !IsKnownLocatorSuite(encryptionSuite)
+            ? 0
+            : EncryptionSuiteCatalog.Get((EncryptionSuite)encryptionSuite).UsesTwoKdfRounds
+                ? 2 * SaltPairBytes
+                : SaltPairBytes;
     private const string RecoveryAlgorithm = "KPAR2-v2-SHA3-512+Skein-1024-RS(20,3)";
     private const int DataShardCount = 20;
     private const int ParityShardCount = 3;
@@ -90,6 +130,7 @@ public sealed partial class RecoveryService
             null,
             null,
             null,
+            null,
             progress,
             cancellationToken);
     }
@@ -97,6 +138,7 @@ public sealed partial class RecoveryService
     public Task<string> CreateAuthenticatedAsync(
         string archivePath,
         string userPassword,
+        string pin,
         string firstGeneratedPassword,
         string secondGeneratedPassword,
         IProgress<string>? progress,
@@ -106,6 +148,7 @@ public sealed partial class RecoveryService
             archivePath,
             RecoveryProtectionMode.DualAuthenticatedEncrypted,
             userPassword,
+            pin,
             firstGeneratedPassword,
             secondGeneratedPassword,
             progress,
@@ -125,6 +168,7 @@ public sealed partial class RecoveryService
             null,
             null,
             null,
+            null,
             progress,
             cancellationToken);
     }
@@ -132,6 +176,7 @@ public sealed partial class RecoveryService
     public Task<RecoveryRepairResult> VerifyAndRepairAuthenticatedAsync(
         string archivePath,
         string userPassword,
+        string pin,
         string firstGeneratedPassword,
         string secondGeneratedPassword,
         IProgress<string>? progress,
@@ -143,6 +188,7 @@ public sealed partial class RecoveryService
             authenticateMetadata: true,
             emergencyMode: false,
             userPassword,
+            pin,
             firstGeneratedPassword,
             secondGeneratedPassword,
             progress,
@@ -162,6 +208,7 @@ public sealed partial class RecoveryService
             null,
             null,
             null,
+            null,
             progress,
             cancellationToken);
     }
@@ -169,6 +216,7 @@ public sealed partial class RecoveryService
     public Task<RecoveryRepairResult> RecoverToNewFileAuthenticatedAsync(
         string archivePath,
         string userPassword,
+        string pin,
         string firstGeneratedPassword,
         string secondGeneratedPassword,
         IProgress<string>? progress,
@@ -180,6 +228,7 @@ public sealed partial class RecoveryService
             authenticateMetadata: false,
             emergencyMode: true,
             userPassword,
+            pin,
             firstGeneratedPassword,
             secondGeneratedPassword,
             progress,
@@ -212,6 +261,7 @@ public sealed partial class RecoveryService
         string archivePath,
         RecoveryProtectionMode protectionMode,
         string? userPassword,
+        string? pin,
         string? firstGeneratedPassword,
         string? secondGeneratedPassword,
         IProgress<string>? progress,
@@ -265,9 +315,9 @@ public sealed partial class RecoveryService
             }
             else
             {
-                if (userPassword is null || firstGeneratedPassword is null || secondGeneratedPassword is null)
+                if (userPassword is null || pin is null || firstGeneratedPassword is null || secondGeneratedPassword is null)
                 {
-                    throw new ArgumentException("All three password factors are required for authenticated recovery metadata.");
+                    throw new ArgumentException("All four credentials are required for authenticated recovery metadata.");
                 }
 
                 kdfInfo = await _containers.ReadRecoveryKdfInfoAsync(archive, cancellationToken).ConfigureAwait(false);
@@ -297,9 +347,12 @@ public sealed partial class RecoveryService
                     EncryptionAlgorithm = kdfInfo?.Algorithm,
                     EncryptionSuite = kdfInfo is null ? -1 : (int)kdfInfo.Suite,
                     Salt = kdfInfo is null ? null : Convert.ToBase64String(kdfInfo.Salt),
-                    Argon2MemoryKiB = kdfInfo?.Argon2Profile.MemoryKiB ?? 0,
-                    Argon2Iterations = kdfInfo?.Argon2Profile.Iterations ?? 0,
-                    Argon2Parallelism = kdfInfo?.Argon2Profile.Parallelism ?? 0,
+                    // Kept at zero in every mode. The fields are v2 leftovers
+                    // and a v10 Argon2id cost is derived from the credentials;
+                    // publishing it beside the salt would undo that.
+                    Argon2MemoryKiB = 0,
+                    Argon2Iterations = 0,
+                    Argon2Parallelism = 0,
                 };
 
                 await using (var recovery = new FileStream(
@@ -379,9 +432,6 @@ public sealed partial class RecoveryService
                             metadataStripeCount,
                             archiveLength,
                             kdfInfo is null ? -1 : (int)kdfInfo.Suite,
-                            kdfInfo?.Argon2Profile.MemoryKiB ?? 0,
-                            kdfInfo?.Argon2Profile.Iterations ?? 0,
-                            kdfInfo?.Argon2Profile.Parallelism ?? 0,
                             (byte[])archiveId.Clone(),
                             kdfInfo?.Salt.ToArray() ?? [],
                             new byte[Sha3_512Compat.HashSizeInBytes],
@@ -391,6 +441,7 @@ public sealed partial class RecoveryService
                         {
                             recoveryKeys = await DeriveRecoveryKeysAsync(
                                 userPassword!,
+                                pin!,
                                 firstGeneratedPassword!,
                                 secondGeneratedPassword!,
                                 locator,
@@ -493,6 +544,7 @@ public sealed partial class RecoveryService
         bool authenticateMetadata,
         bool emergencyMode,
         string? userPassword,
+        string? pin,
         string? firstGeneratedPassword,
         string? secondGeneratedPassword,
         IProgress<string>? progress,
@@ -525,9 +577,9 @@ public sealed partial class RecoveryService
         }
 
         if (expectedMode == RecoveryProtectionMode.DualAuthenticatedEncrypted
-            && (userPassword is null || firstGeneratedPassword is null || secondGeneratedPassword is null))
+            && (userPassword is null || pin is null || firstGeneratedPassword is null || secondGeneratedPassword is null))
         {
-            throw new ArgumentException("All three password factors are required for encrypted KPAR2 recovery.");
+            throw new ArgumentException("All four credentials are required for encrypted KPAR2 recovery.");
         }
 
         string? candidatePath = null;
@@ -549,6 +601,7 @@ public sealed partial class RecoveryService
                 authenticateMetadata,
                 emergencyMode ? null : Path.GetFileName(fullArchivePath),
                 userPassword,
+                pin,
                 firstGeneratedPassword,
                 secondGeneratedPassword,
                 cancellationToken).ConfigureAwait(false);
@@ -680,6 +733,7 @@ public sealed partial class RecoveryService
                     await _containers.VerifyAuthenticationAsync(
                         candidate,
                         userPassword!,
+                        pin!,
                         firstGeneratedPassword!,
                         secondGeneratedPassword!,
                         cancellationToken).ConfigureAwait(false);
@@ -730,6 +784,7 @@ public sealed partial class RecoveryService
         bool authenticateMetadata,
         string? expectedArchiveFileName,
         string? userPassword,
+        string? pin,
         string? firstGeneratedPassword,
         string? secondGeneratedPassword,
         CancellationToken cancellationToken)
@@ -758,6 +813,7 @@ public sealed partial class RecoveryService
                 {
                     recoveryKeys = await DeriveRecoveryKeysAsync(
                         userPassword!,
+                        pin!,
                         firstGeneratedPassword!,
                         secondGeneratedPassword!,
                         locator,
@@ -817,6 +873,7 @@ public sealed partial class RecoveryService
 
     private async Task<RecoveryKeys> DeriveRecoveryKeysAsync(
         string userPassword,
+        string pin,
         string firstGeneratedPassword,
         string secondGeneratedPassword,
         RecoveryLocator locator,
@@ -824,33 +881,61 @@ public sealed partial class RecoveryService
     {
         if (locator.ProtectionMode != RecoveryProtectionMode.DualAuthenticatedEncrypted
             || !IsKnownLocatorSuite(locator.EncryptionSuite)
-            || locator.Salt.Length != PasswordKeyService.SaltSize)
+            || locator.Salt.Length != ExpectedLocatorSaltBytes(locator.EncryptionSuite))
         {
             throw new InvalidDataException("KPAR2 has no valid encrypted KDF bootstrap parameters.");
         }
 
         var suite = (EncryptionSuite)locator.EncryptionSuite;
-        var profile = new Argon2Profile(
-            locator.Argon2MemoryKiB,
-            locator.Argon2Iterations,
-            locator.Argon2Parallelism);
-        byte[] salt = locator.Salt.ToArray();
-        using DerivedKey derived = await _passwords.DeriveAsync(
-            userPassword,
-            firstGeneratedPassword,
-            secondGeneratedPassword,
-            salt,
-            suite,
-            profile,
+        EncryptionSuiteParameters parameters = EncryptionSuiteCatalog.Get(suite);
+
+        // KPAR2 v3 runs the suite's complete key derivation, both rounds
+        // included. KPAR2 v2 ran a single Argon2id round even for the two-round
+        // suite, which handed anyone holding both key-sheet factors a cheaper
+        // offline oracle for the passphrase through the recovery file than
+        // through the container it protects. The certification keys are still
+        // separate from the container's -- they come from their own role
+        // purposes -- but they now cost exactly as much to attack.
+        bool paranoia = parameters.UsesTwoKdfRounds;
+        var salts = new V10Salts(
+            locator.Salt[..V10Salts.SaltBytes],
+            locator.Salt[V10Salts.SaltBytes..SaltPairBytes],
+            paranoia ? locator.Salt[SaltPairBytes..(SaltPairBytes + V10Salts.SaltBytes)] : null,
+            paranoia ? locator.Salt[(SaltPairBytes + V10Salts.SaltBytes)..] : null);
+        salts.Validate(paranoia);
+        V10KeyDerivation.MasterResult master = await Task.Run(
+            () => V10KeyDerivation.DeriveMaster(
+                parameters,
+                userPassword,
+                pin,
+                firstGeneratedPassword,
+                secondGeneratedPassword,
+                salts,
+                progress: null,
+                cancellationToken),
             cancellationToken).ConfigureAwait(false);
 
-        EncryptionSuiteParameters parameters = EncryptionSuiteCatalog.Get(suite);
-        byte[] parentSha3Key = derived.Bytes.Slice(
-            parameters.EncryptionKeyBytes,
-            parameters.Sha3MacKeyBytes).ToArray();
-        byte[] parentSkeinKey = derived.Bytes.Slice(
-            parameters.EncryptionKeyBytes + parameters.Sha3MacKeyBytes,
-            parameters.SkeinMacKeyBytes).ToArray();
+        byte[] parentSha3Key;
+        byte[] parentSkeinKey;
+        try
+        {
+            parentSha3Key = SuiteKeySchedule.DeriveGlobalKey(
+                master.Master,
+                parameters.Algorithm,
+                "KPAR2/HMAC-SHA3-512",
+                KeyRolePurpose.RecoverySha3Certification,
+                parameters.Sha3MacKeyBytes);
+            parentSkeinKey = SuiteKeySchedule.DeriveGlobalKey(
+                master.Master,
+                parameters.Algorithm,
+                "KPAR2/Skein-MAC-1024",
+                KeyRolePurpose.RecoverySkeinCertification,
+                parameters.SkeinMacKeyBytes);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(master.Master);
+        }
         byte[] sha3Message = BuildKeyDerivationMessage(Sha3KeyDomain, locator);
         byte[] skeinMessage = BuildKeyDerivationMessage(SkeinKeyDomain, locator);
         try
@@ -964,7 +1049,9 @@ public sealed partial class RecoveryService
 
     private static byte[] BuildLocatorCertificationContext(RecoveryLocator locator)
     {
-        byte[] result = new byte[224];
+        // Sized from the widest salt a locator may carry, not from a number
+        // that happened to fit when the salt was 512 bits wide.
+        byte[] result = new byte[LocatorCertificationContextFixedBytes + LocatorSaltBytes];
         int offset = 0;
         WriteInt32(result, ref offset, Version);
         WriteInt32(result, ref offset, (int)locator.ProtectionMode);
@@ -977,9 +1064,6 @@ public sealed partial class RecoveryService
         WriteInt32(result, ref offset, locator.MetadataStripeCount);
         WriteInt64(result, ref offset, locator.ArchiveLength);
         WriteInt32(result, ref offset, locator.EncryptionSuite);
-        WriteInt32(result, ref offset, locator.Argon2MemoryKiB);
-        WriteInt32(result, ref offset, locator.Argon2Iterations);
-        WriteInt32(result, ref offset, locator.Argon2Parallelism);
         WriteInt32(result, ref offset, locator.Salt.Length);
         locator.ArchiveId.CopyTo(result, offset);
         offset += 32;
@@ -1567,14 +1651,14 @@ public sealed partial class RecoveryService
             BinaryPrimitives.WriteInt32LittleEndian(block.AsSpan(56), locator.MetadataStripeCount);
             BinaryPrimitives.WriteInt32LittleEndian(block.AsSpan(60), locator.EncryptionSuite);
             BinaryPrimitives.WriteInt64LittleEndian(block.AsSpan(64), locator.ArchiveLength);
-            BinaryPrimitives.WriteInt32LittleEndian(block.AsSpan(72), locator.Argon2MemoryKiB);
-            BinaryPrimitives.WriteInt32LittleEndian(block.AsSpan(76), locator.Argon2Iterations);
-            BinaryPrimitives.WriteInt32LittleEndian(block.AsSpan(80), locator.Argon2Parallelism);
+            // 72..84 stay zero: they carried the Argon2id cost in v2, and a
+            // v10 cost is secret-derived. Writing it here would hand an
+            // attacker the PMI the container itself refuses to store.
             BinaryPrimitives.WriteInt32LittleEndian(block.AsSpan(84), locator.Salt.Length);
             locator.ArchiveId.CopyTo(block, 88);
             locator.Salt.CopyTo(block, 120);
-            locator.EnvelopeSha3.CopyTo(block, 184);
-            locator.EnvelopeSkein.CopyTo(block, 248);
+            locator.EnvelopeSha3.CopyTo(block, 376);
+            locator.EnvelopeSkein.CopyTo(block, 440);
             (sha3, skein) = ComputeDualHash(block.AsSpan(0, LocatorAuthenticatedBytes));
             skein.CopyTo(block, LocatorSkeinOffset);
             sha3.CopyTo(block, LocatorSha3Offset);
@@ -1620,18 +1704,20 @@ public sealed partial class RecoveryService
                 || BinaryPrimitives.ReadInt32LittleEndian(block.AsSpan(20)) != DataShardCount
                 || BinaryPrimitives.ReadInt32LittleEndian(block.AsSpan(24)) != ParityShardCount
                 || BinaryPrimitives.ReadInt32LittleEndian(block.AsSpan(28)) != 0
-                || block.AsSpan(376, LocatorAuthenticatedBytes - 376).IndexOfAnyExcept((byte)0) >= 0)
+                || BinaryPrimitives.ReadInt64LittleEndian(block.AsSpan(72)) != 0
+                || BinaryPrimitives.ReadInt32LittleEndian(block.AsSpan(80)) != 0
+                || block.AsSpan(568, LocatorAuthenticatedBytes - 568).IndexOfAnyExcept((byte)0) >= 0)
             {
                 return false;
             }
 
             int saltLength = BinaryPrimitives.ReadInt32LittleEndian(block.AsSpan(84));
-            if (saltLength is not (0 or PasswordKeyService.SaltSize))
+            if (saltLength is not (0 or SaltPairBytes or LocatorSaltBytes))
             {
                 return false;
             }
 
-            if (block.AsSpan(120 + saltLength, PasswordKeyService.SaltSize - saltLength)
+            if (block.AsSpan(120 + saltLength, LocatorSaltBytes - saltLength)
                 .IndexOfAnyExcept((byte)0) >= 0)
             {
                 return false;
@@ -1645,13 +1731,10 @@ public sealed partial class RecoveryService
                 BinaryPrimitives.ReadInt32LittleEndian(block.AsSpan(56)),
                 BinaryPrimitives.ReadInt64LittleEndian(block.AsSpan(64)),
                 BinaryPrimitives.ReadInt32LittleEndian(block.AsSpan(60)),
-                BinaryPrimitives.ReadInt32LittleEndian(block.AsSpan(72)),
-                BinaryPrimitives.ReadInt32LittleEndian(block.AsSpan(76)),
-                BinaryPrimitives.ReadInt32LittleEndian(block.AsSpan(80)),
                 block.AsSpan(88, 32).ToArray(),
                 block.AsSpan(120, saltLength).ToArray(),
-                block.AsSpan(184, Sha3_512Compat.HashSizeInBytes).ToArray(),
-                block.AsSpan(248, Skein1024Digest.DigestSize).ToArray());
+                block.AsSpan(376, Sha3_512Compat.HashSizeInBytes).ToArray(),
+                block.AsSpan(440, Skein1024Digest.DigestSize).ToArray());
             ValidateLocator(locator, recoveryLength);
             return true;
         }
@@ -1704,27 +1787,15 @@ public sealed partial class RecoveryService
 
         if (locator.ProtectionMode == RecoveryProtectionMode.ErrorCorrectionOnly)
         {
-            if (locator.EncryptionSuite != -1
-                || locator.Salt.Length != 0
-                || locator.Argon2MemoryKiB != 0
-                || locator.Argon2Iterations != 0
-                || locator.Argon2Parallelism != 0)
+            if (locator.EncryptionSuite != -1 || locator.Salt.Length != 0)
             {
                 throw new InvalidDataException("Plain KPAR2 locator unexpectedly contains encrypted KDF parameters.");
             }
         }
-        else
+        else if (!IsKnownLocatorSuite(locator.EncryptionSuite)
+            || locator.Salt.Length != ExpectedLocatorSaltBytes(locator.EncryptionSuite))
         {
-            if (!IsKnownLocatorSuite(locator.EncryptionSuite)
-                || locator.Salt.Length != PasswordKeyService.SaltSize)
-            {
-                throw new InvalidDataException("Encrypted KPAR2 locator has invalid suite or salt parameters.");
-            }
-
-            PasswordKeyService.ValidateArgon2Profile(new Argon2Profile(
-                locator.Argon2MemoryKiB,
-                locator.Argon2Iterations,
-                locator.Argon2Parallelism));
+            throw new InvalidDataException("Encrypted KPAR2 locator has invalid suite or salt parameters.");
         }
     }
 
@@ -1794,7 +1865,8 @@ public sealed partial class RecoveryService
                 || manifest.Salt is not null
                 || manifest.Argon2MemoryKiB != 0
                 || manifest.Argon2Iterations != 0
-                || manifest.Argon2Parallelism != 0)
+                || manifest.Argon2Parallelism != 0
+                || manifest.Salt is not null)
             {
                 throw new InvalidDataException("Plain KPAR2 manifest contains encrypted KDF metadata.");
             }
@@ -1805,13 +1877,10 @@ public sealed partial class RecoveryService
                 (EncryptionSuite)locator.EncryptionSuite);
             if (manifest.EncryptionSuite != locator.EncryptionSuite
                 || !string.Equals(manifest.EncryptionAlgorithm, parameters.Algorithm, StringComparison.Ordinal)
-                || !IsBase64Length(manifest.Salt, PasswordKeyService.SaltSize)
+                || !IsBase64Length(manifest.Salt, ExpectedLocatorSaltBytes(locator.EncryptionSuite))
                 || !CryptographicOperations.FixedTimeEquals(
                     Convert.FromBase64String(manifest.Salt!),
-                    locator.Salt)
-                || manifest.Argon2MemoryKiB != locator.Argon2MemoryKiB
-                || manifest.Argon2Iterations != locator.Argon2Iterations
-                || manifest.Argon2Parallelism != locator.Argon2Parallelism)
+                    locator.Salt))
             {
                 throw new InvalidDataException("Encrypted KPAR2 manifest and locator KDF parameters differ.");
             }
@@ -2809,9 +2878,6 @@ internal sealed record RecoveryLocator(
     int MetadataStripeCount,
     long ArchiveLength,
     int EncryptionSuite,
-    int Argon2MemoryKiB,
-    int Argon2Iterations,
-    int Argon2Parallelism,
     byte[] ArchiveId,
     byte[] Salt,
     byte[] EnvelopeSha3,

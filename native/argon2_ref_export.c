@@ -28,6 +28,19 @@
 #define KZPAQ_ARGON2_ITERATIONS 4U
 #define KZPAQ_ARGON2_PARALLELISM 4U
 
+/* v10 derives the Argon2 memory cost from a secret-dependent 16-bit index, so
+ * m is no longer one fixed value but a bounded, quantised range:
+ *     m = 1,048,576 + 16 * PMI KiB,  PMI in [0, 65535]
+ * The wrapper validates the range and the 16 KiB step so a caller cannot ask
+ * for an arbitrary or degenerate memory cost. */
+#define KZPAQ_ARGON2_V10_MEMORY_MIN_KIB 1048576U
+#define KZPAQ_ARGON2_V10_MEMORY_MAX_KIB 2097136U
+#define KZPAQ_ARGON2_V10_MEMORY_STEP_KIB 16U
+#define KZPAQ_ARGON2_V10_PASSWORD_LEN 128U
+#define KZPAQ_ARGON2_V10_SALT_LEN 64U
+#define KZPAQ_ARGON2_V10_OUTPUT_LEN 64U
+#define KZPAQ_ARGON2_V10_SECRET_LEN 128U
+
 #if defined(_WIN32)
 static SRWLOCK argon2_call_lock = SRWLOCK_INIT;
 static __declspec(thread) DWORD last_memory_lock_error = ERROR_SUCCESS;
@@ -270,6 +283,143 @@ ARGON2_REF_EXPORT int phc_argon2id_hash_raw(
     context.allocate_cbk = locked_allocator;
     context.free_cbk = locked_deallocator;
     context.flags = ARGON2_FLAG_CLEAR_PASSWORD;
+
+    result = argon2id_ctx(&context);
+#if defined(_WIN32)
+    restore_working_set(previous_minimum, previous_maximum, previous_sizes_available);
+    ReleaseSRWLockExclusive(&argon2_call_lock);
+#else
+    (void)pthread_mutex_unlock(&argon2_call_lock);
+#endif
+    return result;
+}
+
+/* The v10 entry point. It differs from the v9 one only by exposing Argon2's
+ * optional secret and associated-data inputs, which the PHC structure has
+ * always supported, and by accepting the bounded PMI-derived memory range.
+ *
+ * Every parameter is validated structurally and the call fails closed: a
+ * wrapper that quietly accepted a shorter salt or a non-quantised memory cost
+ * would let a caller step outside the profile the format promises. The domain
+ * strings themselves are deliberately NOT duplicated here -- the managed side
+ * builds and KAT-pins them, and a second copy in C is a second thing to drift.
+ */
+ARGON2_REF_EXPORT int keepvault_argon2id_v10(
+    uint32_t t_cost,
+    uint32_t m_cost,
+    uint32_t parallelism,
+    uint8_t* password,
+    uint32_t password_len,
+    uint8_t* salt,
+    uint32_t salt_len,
+    uint8_t* secret,
+    uint32_t secret_len,
+    uint8_t* associated_data,
+    uint32_t associated_data_len,
+    uint8_t* output,
+    uint32_t output_len)
+{
+#if defined(_WIN32)
+    SIZE_T previous_minimum = 0;
+    SIZE_T previous_maximum = 0;
+    BOOL previous_sizes_available = FALSE;
+#endif
+    size_t argon2_bytes;
+    int result;
+
+#if defined(_WIN32)
+    last_memory_lock_error = ERROR_SUCCESS;
+#else
+    last_memory_lock_error = 0;
+#endif
+
+    if (password == NULL || salt == NULL || output == NULL ||
+        associated_data == NULL) {
+        return ARGON2_INCORRECT_PARAMETER;
+    }
+
+    if (password_len != KZPAQ_ARGON2_V10_PASSWORD_LEN ||
+        salt_len != KZPAQ_ARGON2_V10_SALT_LEN ||
+        output_len != KZPAQ_ARGON2_V10_OUTPUT_LEN ||
+        associated_data_len == 0U) {
+        return ARGON2_INCORRECT_PARAMETER;
+    }
+
+    /* A secret is either absent entirely or exactly one full master. Anything
+     * between those two is a caller that lost track of its own buffers. */
+    if (secret_len == 0U) {
+        if (secret != NULL) {
+            return ARGON2_INCORRECT_PARAMETER;
+        }
+    } else if (secret_len != KZPAQ_ARGON2_V10_SECRET_LEN || secret == NULL) {
+        return ARGON2_INCORRECT_PARAMETER;
+    }
+
+    if (t_cost != KZPAQ_ARGON2_ITERATIONS ||
+        parallelism != KZPAQ_ARGON2_PARALLELISM) {
+        return ARGON2_INCORRECT_PARAMETER;
+    }
+
+    if (m_cost < KZPAQ_ARGON2_V10_MEMORY_MIN_KIB ||
+        m_cost > KZPAQ_ARGON2_V10_MEMORY_MAX_KIB ||
+        ((m_cost - KZPAQ_ARGON2_V10_MEMORY_MIN_KIB) % KZPAQ_ARGON2_V10_MEMORY_STEP_KIB) != 0U) {
+        return ARGON2_INCORRECT_PARAMETER;
+    }
+
+    if (m_cost > SIZE_MAX / 1024) {
+        return ARGON2_MEMORY_TOO_MUCH;
+    }
+
+    argon2_bytes = (size_t)m_cost * 1024;
+#if defined(_WIN32)
+    AcquireSRWLockExclusive(&argon2_call_lock);
+    if (!prepare_working_set(
+            argon2_bytes,
+            &previous_minimum,
+            &previous_maximum,
+            &previous_sizes_available)) {
+        ReleaseSRWLockExclusive(&argon2_call_lock);
+        return ARGON2_MEMORY_ALLOCATION_ERROR;
+    }
+#else
+    if (pthread_mutex_lock(&argon2_call_lock) != 0) {
+        last_memory_lock_error = (uint32_t)EDEADLK;
+        return ARGON2_MEMORY_ALLOCATION_ERROR;
+    }
+    if (!prepare_working_set(argon2_bytes)) {
+        (void)pthread_mutex_unlock(&argon2_call_lock);
+        return ARGON2_MEMORY_ALLOCATION_ERROR;
+    }
+#endif
+
+    argon2_context context;
+    memset(&context, 0, sizeof(context));
+    context.out = output;
+    context.outlen = output_len;
+    context.pwd = password;
+    context.pwdlen = password_len;
+    context.salt = salt;
+    context.saltlen = salt_len;
+    context.secret = secret;
+    context.secretlen = secret_len;
+    context.ad = associated_data;
+    context.adlen = associated_data_len;
+    context.t_cost = t_cost;
+    context.m_cost = m_cost;
+    context.lanes = parallelism;
+    context.threads = parallelism;
+    context.version = ARGON2_VERSION_NUMBER;
+    context.allocate_cbk = locked_allocator;
+    context.free_cbk = locked_deallocator;
+
+    /* Both clear flags are set deliberately: the caller hands this function
+     * one-call copies, never a buffer it still needs. That ownership rule is
+     * what makes the v9 Paranoia defect -- a shared prehash cleared by the
+     * first call -- structurally impossible here. */
+    context.flags = ARGON2_FLAG_CLEAR_PASSWORD;
+    if (secret_len != 0U) {
+        context.flags |= ARGON2_FLAG_CLEAR_SECRET;
+    }
 
     result = argon2id_ctx(&context);
 #if defined(_WIN32)

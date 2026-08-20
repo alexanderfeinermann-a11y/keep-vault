@@ -26,6 +26,12 @@ internal static partial class MacComprehensiveTests
         ?? throw new InvalidOperationException("The pinned Apple Team ID is not compiled into the app assembly.");
 
     private const string UserPassword = "N!r7$Vq2#Lm8%Tx3&Jd9*Wp4+Kg5=Zu6?Ce";
+
+    /// <summary>
+    /// The fourth v10 credential. Every container call needs it, so it lives
+    /// beside the passphrase rather than being spelled out at each call site.
+    /// </summary>
+    private const string UserPin = "428317";
     private const string WrongPassword = "Q!m8$Ls2#Vx7%Tp4&Jd9*Wr5+Kn6=Zu3?Ce";
 
     /// <summary>
@@ -41,12 +47,14 @@ internal static partial class MacComprehensiveTests
             ("signed native trust and tamper rejection", TestNativeTrustAsync),
             ("every Mach-O in the release bundle carries a hybrid signature", TestBundleMachOClosureAsync),
             ("the companion QR scanner is checked against the pinned keys", TestCompanionScannerAsync),
+            ("v10 primitives against independent second implementations", TestV10PrimitivesAsync),
+            ("v10 master KDF: credential binding, PMI range and round chaining", TestV10MasterKdfAsync),
             ("SHA3, Skein, Kalyna and Threefish reference vectors", TestPrimitiveVectorsAsync),
             ("ML-DSA-87 managed/reference interoperability", TestMldsaInteropAsync),
             ("randomised differential testing against every reference library", TestReferenceDifferentialAsync),
             ("Argon2id fixed 1 GiB profile and independent equivalence", TestArgon2Async),
             ("ZPAQ levels, streaming, traversal and malformed corpus", TestZpaqAsync),
-            ("v9 triple-suite roundtrip and manipulation rejection", TestContainersAsync),
+            ("v10 suite roundtrips and manipulation rejection", TestContainersAsync),
             ("cascade layering: the outer layer alone reveals nothing", TestCascadeLayeringAsync),
             ("v9 two-round key derivation from one pool consumption", TestTwoRoundDerivationAsync),
             ("salt and nonce for every single-round suite without prepared entropy", TestUnpreparedEncryptionParametersAsync),
@@ -524,6 +532,316 @@ internal static partial class MacComprehensiveTests
         return Task.CompletedTask;
     }
 
+    /// <summary>
+    /// Checks the two new v10 primitives against independent implementations
+    /// before anything is built on top of them.
+    /// </summary>
+    /// <remarks>
+    /// The specification forbids assuming an external API's semantics. Both of
+    /// these are easy to get subtly wrong in a way no roundtrip would reveal:
+    /// a Skein MAC that silently truncates, or an HKDF that expands one block
+    /// short, still produces stable keys — just not the specified ones.
+    ///
+    /// HKDF-Expand is therefore recomputed here straight from RFC 5869 using
+    /// the project's own HMAC-SHA3-512, and compared byte for byte against
+    /// Bouncy Castle's generator.
+    /// </remarks>
+    private static Task TestV10PrimitivesAsync()
+    {
+        // --- keyed Skein-MAC-1024-1024 -------------------------------------
+        byte[] key = RandomNumberGenerator.GetBytes(256);
+        byte[] message = RandomNumberGenerator.GetBytes(77);
+        byte[] mac = KeyedSkein1024.Compute(key, "Keep Vault v10 test domain", message);
+        Require(mac.Length == 128, $"Skein-MAC-1024-1024 returned {mac.Length} bytes, not 128.");
+
+        byte[] otherKey = [.. key];
+        otherKey[0] ^= 0xFF;
+        Require(
+            !FixedEqual(mac, KeyedSkein1024.Compute(otherKey, "Keep Vault v10 test domain", message)),
+            "The Skein MAC ignored a change in its key.");
+        Require(
+            !FixedEqual(mac, KeyedSkein1024.Compute(key, "a different domain", message)),
+            "The Skein MAC ignored its personalisation, so role separation would collapse.");
+        Require(
+            !FixedEqual(mac, KeyedSkein1024.Compute(key, "Keep Vault v10 test domain", [.. message, 0x00])),
+            "The Skein MAC ignored a change in its message.");
+
+        // An unkeyed digest over key||message must not coincide with the keyed
+        // MAC -- that is exactly the construction the specification forbids.
+        Require(
+            !FixedEqual(mac, Skein1024Digest.HashData([.. key, .. message])),
+            "The keyed Skein MAC equals an unkeyed hash of key||message.");
+
+        // --- HKDF-Expand with HMAC-SHA3-512 --------------------------------
+        byte[] prk = RandomNumberGenerator.GetBytes(64);
+        byte[] info = RandomNumberGenerator.GetBytes(40);
+        foreach (int length in new[] { 1, 32, 64, 100, 128 })
+        {
+            byte[] fromBouncyCastle = Sha3HkdfExpand.Expand(prk, info, length);
+            byte[] fromRfc = Rfc5869ExpandWithHmacSha3(prk, info, length);
+            try
+            {
+                Require(
+                    FixedEqual(fromBouncyCastle, fromRfc),
+                    $"HKDF-Expand disagrees with RFC 5869 at {length} bytes.");
+            }
+            finally
+            {
+                Zero(fromBouncyCastle, fromRfc);
+            }
+        }
+
+        // --- interleaving is a permutation ---------------------------------
+        byte[] left = RandomNumberGenerator.GetBytes(64);
+        byte[] right = RandomNumberGenerator.GetBytes(64);
+        byte[] master = MasterInterleave.Interleave(left, right);
+        Require(master.Length == 128, "The interleaved master is not 128 bytes.");
+        for (int i = 0; i < 64; i++)
+        {
+            Require(master[2 * i] == left[i] && master[(2 * i) + 1] == right[i],
+                "Interleaving did not place the branch bytes where the specification says.");
+        }
+
+        // A permutation loses nothing: both inputs come back out.
+        var recoveredLeft = new byte[64];
+        var recoveredRight = new byte[64];
+        for (int i = 0; i < 64; i++)
+        {
+            recoveredLeft[i] = master[2 * i];
+            recoveredRight[i] = master[(2 * i) + 1];
+        }
+
+        Require(
+            FixedEqual(left, recoveredLeft) && FixedEqual(right, recoveredRight),
+            "Interleaving is not lossless.");
+
+        // --- role contexts are distinct ------------------------------------
+        var contexts = new List<string>();
+        foreach (int stage in new[] { 0, 1, 2 })
+        {
+            foreach (KeyRolePurpose purpose in Enum.GetValues<KeyRolePurpose>())
+            {
+                foreach (int bits in new[] { 256, 512, 1024 })
+                {
+                    contexts.Add(Convert.ToHexString(
+                        SuiteKeySchedule.RoleContext("Suite-A", stage, "Threefish-1024", purpose, bits)));
+                }
+            }
+        }
+
+        Require(
+            contexts.Count == contexts.Distinct(StringComparer.Ordinal).Count(),
+            "Two different key roles share a canonical context.");
+
+        // Different widths must not be prefixes of one another, which is what
+        // truncating a single shared context would produce.
+        byte[] master2 = RandomNumberGenerator.GetBytes(128);
+        byte[] narrow = SuiteKeySchedule.DeriveRoleKey(
+            master2, "Suite-A", 0, "AES-256", KeyRolePurpose.Encryption, 32);
+        byte[] wide = SuiteKeySchedule.DeriveRoleKey(
+            master2, "Suite-A", 0, "AES-256", KeyRolePurpose.Encryption, 64);
+        Require(
+            !narrow.SequenceEqual(wide[..32]),
+            "A narrow role key is a prefix of a wider one from the same role.");
+
+        Zero(key, message, mac, otherKey, prk, info, left, right, master, master2, narrow, wide);
+        return Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// Exercises the v10 master derivation: that every credential reaches both
+    /// paths, that PMI stays inside its quantised range, and that Paranoia's
+    /// second round genuinely depends on the first.
+    /// </summary>
+    /// <remarks>
+    /// The credential and PMI checks are cheap. The Argon2id branches are not —
+    /// each is at least a gibibyte — so the expensive part runs the smallest
+    /// number of real rounds that can still distinguish a correct chaining from
+    /// the v9 defect.
+    /// </remarks>
+    private static async Task TestV10MasterKdfAsync()
+    {
+        const string Algorithm = "Test-Suite-v10";
+        const string Password = "N!r7$Vq2#Lm8%Tx3&Jd9*Wp4+Kg5=Zu6?Ce";
+        const string Pin = "0428193";
+        byte[] factorA = RandomNumberGenerator.GetBytes(128);
+        byte[] factorB = RandomNumberGenerator.GetBytes(128);
+
+        // --- credential paths ----------------------------------------------
+        byte[] qs = V10MasterKdf.DeriveSha3CredentialHash(Algorithm, Password, Pin, factorA, factorB);
+        byte[] qk = V10MasterKdf.DeriveSkeinCredentialHash(Algorithm, Password, Pin, factorA, factorB);
+        Require(qs.Length == 128 && qk.Length == 128, "A v10 credential hash is not 1024 bits.");
+        Require(!FixedEqual(qs, qk), "Both credential paths produced the same value.");
+
+        // Each of the four secrets has to reach each path. A path that ignores
+        // one of them would still round-trip perfectly.
+        byte[] otherA = [.. factorA]; otherA[0] ^= 0xFF;
+        byte[] otherB = [.. factorB]; otherB[127] ^= 0xFF;
+        foreach ((string label, byte[] changedQs, byte[] changedQk) in new[]
+        {
+            ("user password", V10MasterKdf.DeriveSha3CredentialHash(Algorithm, Password + "x", Pin, factorA, factorB),
+                              V10MasterKdf.DeriveSkeinCredentialHash(Algorithm, Password + "x", Pin, factorA, factorB)),
+            ("PIN",           V10MasterKdf.DeriveSha3CredentialHash(Algorithm, Password, "0428194", factorA, factorB),
+                              V10MasterKdf.DeriveSkeinCredentialHash(Algorithm, Password, "0428194", factorA, factorB)),
+            ("factor A",      V10MasterKdf.DeriveSha3CredentialHash(Algorithm, Password, Pin, otherA, factorB),
+                              V10MasterKdf.DeriveSkeinCredentialHash(Algorithm, Password, Pin, otherA, factorB)),
+            ("factor B",      V10MasterKdf.DeriveSha3CredentialHash(Algorithm, Password, Pin, factorA, otherB),
+                              V10MasterKdf.DeriveSkeinCredentialHash(Algorithm, Password, Pin, factorA, otherB)),
+        })
+        {
+            Require(!FixedEqual(qs, changedQs), $"The SHA3 credential path ignores the {label}.");
+            Require(!FixedEqual(qk, changedQk), $"The Skein credential path ignores the {label}.");
+        }
+
+        // A leading zero in the PIN has to be significant.
+        Require(
+            !FixedEqual(qs, V10MasterKdf.DeriveSha3CredentialHash(Algorithm, Password, "428193", factorA, factorB)),
+            "A leading zero in the PIN was discarded.");
+
+        // --- PMI ------------------------------------------------------------
+        byte[] saltSha3 = RandomNumberGenerator.GetBytes(64);
+        byte[] saltSkein = RandomNumberGenerator.GetBytes(64);
+        (ushort pmi, uint memory) = V10MasterKdf.DerivePmi(
+            Algorithm, 1, qs, qk, [], saltSha3, saltSkein);
+        Require(
+            memory >= V10MasterKdf.MemoryMinKiB && memory <= V10MasterKdf.MemoryMaxKiB,
+            $"The derived memory cost {memory} KiB is outside 1 GiB..2 GiB-16 KiB.");
+        Require(
+            (memory - V10MasterKdf.MemoryMinKiB) % V10MasterKdf.MemoryStepKiB == 0,
+            "The derived memory cost is not on the 16 KiB grid.");
+        Require(
+            memory == V10MasterKdf.MemoryMinKiB + (16u * pmi),
+            "The memory cost does not follow m = 1 GiB + 16*PMI.");
+        (ushort pmiAgain, _) = V10MasterKdf.DerivePmi(Algorithm, 1, qs, qk, [], saltSha3, saltSkein);
+        Require(pmi == pmiAgain, "PMI is not deterministic.");
+        (ushort pmiOtherSalt, _) = V10MasterKdf.DerivePmi(
+            Algorithm, 1, qs, qk, [], saltSha3, RandomNumberGenerator.GetBytes(64));
+        (ushort pmiRound2, _) = V10MasterKdf.DerivePmi(
+            Algorithm, 2, qs, qk, [], saltSha3, saltSkein);
+        Require(
+            pmi != pmiOtherSalt || pmi != pmiRound2,
+            "PMI ignored both the second salt and the round number.");
+
+        // Both salts of a round must reach the PMI.
+        Require(
+            V10MasterKdf.DerivePmi(Algorithm, 1, qs, qk, [], RandomNumberGenerator.GetBytes(64), saltSkein).Pmi != pmi
+            || V10MasterKdf.DerivePmi(Algorithm, 1, qs, qk, [], saltSha3, RandomNumberGenerator.GetBytes(64)).Pmi != pmi,
+            "PMI ignores its salts.");
+
+        // --- salt separation is enforced ------------------------------------
+        RequireThrows<CryptographicException>(
+            () => new V10Salts(saltSha3, [.. saltSha3], null, null).Validate(paranoia: false),
+            "Two identical salts were accepted.");
+        RequireThrows<CryptographicException>(
+            () => new V10Salts(saltSha3, saltSkein, saltSha3, saltSkein).Validate(paranoia: true),
+            "Paranoia accepted repeated salts across its two rounds.");
+        new V10Salts(saltSha3, saltSkein, null, null).Validate(paranoia: false);
+
+        // --- associated data separates the branches --------------------------
+        Require(
+            !V10MasterKdf.AssociatedData(Algorithm, true, 1)
+                .SequenceEqual(V10MasterKdf.AssociatedData(Algorithm, false, 1)),
+            "Both Argon2 branches of a round share associated data.");
+        Require(
+            !V10MasterKdf.AssociatedData(Algorithm, true, 1)
+                .SequenceEqual(V10MasterKdf.AssociatedData(Algorithm, true, 2)),
+            "Both Paranoia rounds share associated data on the same branch.");
+
+        // --- the real rounds -------------------------------------------------
+        // Round 1 with no secret, exactly as a normal suite runs it.
+        byte[] round1 = V10MasterKdf.DeriveRoundMaster(
+            Algorithm, 1, qs, qk, saltSha3, saltSkein, secret: null, memory);
+        Require(round1.Length == 128, "The round master is not 1024 bits.");
+        Require(
+            !round1.AsSpan(0, 64).SequenceEqual(round1.AsSpan(64, 64)),
+            "Both halves of the master are identical, so the two branches agreed.");
+
+        // Deterministic for identical inputs.
+        byte[] round1Again = V10MasterKdf.DeriveRoundMaster(
+            Algorithm, 1, qs, qk, saltSha3, saltSkein, secret: null, memory);
+        Require(FixedEqual(round1, round1Again), "The round master is not deterministic.");
+
+        // Paranoia round 2 takes round 1's whole master as the Argon2 secret.
+        byte[] saltSha3Round2 = RandomNumberGenerator.GetBytes(64);
+        byte[] saltSkeinRound2 = RandomNumberGenerator.GetBytes(64);
+        (_, uint memory2) = V10MasterKdf.DerivePmi(
+            Algorithm, 2, qs, qk, round1, saltSha3Round2, saltSkeinRound2);
+        byte[] round2 = V10MasterKdf.DeriveRoundMaster(
+            Algorithm, 2, qs, qk, saltSha3Round2, saltSkeinRound2, secret: round1, memory2);
+
+        // This is the v9 regression, stated the only way that actually proves
+        // anything: the same round 2 computed with a different secret, and with
+        // no secret at all, must both differ. v9's defect made round 2
+        // independent of what came before it.
+        byte[] wrongSecret = [.. round1];
+        wrongSecret[0] ^= 0xFF;
+        byte[] round2WrongSecret = V10MasterKdf.DeriveRoundMaster(
+            Algorithm, 2, qs, qk, saltSha3Round2, saltSkeinRound2, secret: wrongSecret, memory2);
+        Require(
+            !FixedEqual(round2, round2WrongSecret),
+            "Paranoia round 2 ignored a one-bit change in round 1's master.");
+
+        byte[] round2NoSecret = V10MasterKdf.DeriveRoundMaster(
+            Algorithm, 2, qs, qk, saltSha3Round2, saltSkeinRound2, secret: null, memory2);
+        Require(
+            !FixedEqual(round2, round2NoSecret),
+            "Paranoia round 2 produced the same master with and without the round-1 secret.");
+
+        // The master buffers survive the native calls that clear their copies.
+        byte[] round1AfterUse = V10MasterKdf.DeriveRoundMaster(
+            Algorithm, 1, qs, qk, saltSha3, saltSkein, secret: null, memory);
+        Require(
+            FixedEqual(round1, round1AfterUse),
+            "A credential master changed after being used for an Argon2 call.");
+
+        // --- role keys off the final master ----------------------------------
+        byte[] encryptionKey = SuiteKeySchedule.DeriveRoleKey(
+            round2, Algorithm, 0, "AES-256", KeyRolePurpose.Encryption, 32);
+        byte[] macKey = SuiteKeySchedule.DeriveGlobalKey(
+            round2, Algorithm, "HMAC-SHA3-512", KeyRolePurpose.Sha3Mac, 64);
+        Require(encryptionKey.Length == 32 && macKey.Length == 64, "A role key has the wrong width.");
+        Require(
+            !encryptionKey.SequenceEqual(macKey[..32]),
+            "An encryption key and a MAC key share material.");
+        Require(
+            !SuiteKeySchedule.DeriveRoleKey(round2, Algorithm, 0, "AES-256", KeyRolePurpose.Encryption, 32)
+                .SequenceEqual(SuiteKeySchedule.DeriveRoleKey(round2, Algorithm, 1, "AES-256", KeyRolePurpose.Encryption, 32)),
+            "The same cipher in two cascade stages received the same key.");
+
+        await Task.CompletedTask.ConfigureAwait(false);
+        Zero(factorA, factorB, qs, qk, otherA, otherB, saltSha3, saltSkein,
+            round1, round1Again, round2, wrongSecret, round2WrongSecret, round2NoSecret,
+            round1AfterUse, saltSha3Round2, saltSkeinRound2, encryptionKey, macKey);
+    }
+
+    /// <summary>
+    /// RFC 5869 section 2.3 expand, written out directly against the project's
+    /// own HMAC-SHA3-512 so it shares no code with the implementation it checks.
+    /// </summary>
+    private static byte[] Rfc5869ExpandWithHmacSha3(byte[] prk, byte[] info, int length)
+    {
+        const int HashLength = 64;
+        int blocks = (length + HashLength - 1) / HashLength;
+        Require(blocks <= 255, "RFC 5869 allows at most 255 blocks.");
+        byte[] output = new byte[length];
+        byte[] previous = [];
+        int written = 0;
+        for (int counter = 1; counter <= blocks; counter++)
+        {
+            using var hmac = new HmacSha3_512(prk);
+            hmac.AppendData(previous);
+            hmac.AppendData(info);
+            hmac.AppendData([(byte)counter]);
+            previous = hmac.GetHashAndReset();
+            int take = Math.Min(HashLength, length - written);
+            previous.AsSpan(0, take).CopyTo(output.AsSpan(written));
+            written += take;
+        }
+
+        CryptographicOperations.ZeroMemory(previous);
+        return output;
+    }
+
     private static Task TestPrimitiveVectorsAsync()
     {
         RequireHex(
@@ -844,6 +1162,8 @@ internal static partial class MacComprehensiveTests
 
             // Every original must still be present: no failure path deletes.
             Require(File.Exists(inputs[0]) && File.Exists(inputs[1]), "A rejected comparison removed an original.");
+
+            await TestOriginalDriftBlocksDeletionAsync(root).ConfigureAwait(false);
 
             Zero(first, second, altered);
         }
@@ -1221,6 +1541,77 @@ internal static partial class MacComprehensiveTests
         Require(process.ExitCode is >= 0 and <= 255, $"Malformed ZPAQ input ended abnormally: {process.ExitCode}");
     }
 
+    /// <summary>
+    /// The originals are re-checked immediately before deletion, and any change
+    /// since the comparison stops the whole deletion.
+    /// </summary>
+    /// <remarks>
+    /// Verification proves the archive reproduced the inputs. Between that proof
+    /// and the deletion, another program can overwrite a file or drop a new one
+    /// into a folder that was already walked — and the new file was never
+    /// archived. Each case below is checked separately, and each has to leave
+    /// every original standing, not just the one that changed.
+    /// </remarks>
+    private static async Task TestOriginalDriftBlocksDeletionAsync(string parent)
+    {
+        string root = Path.Combine(parent, "drift");
+        string folder = Path.Combine(root, "folder");
+        string extracted = Path.Combine(root, "extracted");
+        Directory.CreateDirectory(folder);
+        Directory.CreateDirectory(extracted);
+
+        byte[] payload = RandomNumberGenerator.GetBytes(8192);
+        string inside = Path.Combine(folder, "inside.bin");
+        await File.WriteAllBytesAsync(inside, payload).ConfigureAwait(false);
+        string[] inputs = [folder];
+
+        Directory.CreateDirectory(Path.Combine(extracted, "folder"));
+        await File.WriteAllBytesAsync(Path.Combine(extracted, "folder", "inside.bin"), payload)
+            .ConfigureAwait(false);
+
+        string archive = Path.Combine(root, "archive.kzpaq");
+        await File.WriteAllBytesAsync(archive, RandomNumberGenerator.GetBytes(4096)).ConfigureAwait(false);
+        MacOriginalDeletionService.ArchiveIdentity identity =
+            MacOriginalDeletionService.CaptureArchiveIdentity(archive);
+
+        MacOriginalDeletionService.VerificationResult verified =
+            await MacOriginalDeletionService.VerifyExtractionAsync(inputs, extracted, null, CancellationToken.None)
+                .ConfigureAwait(false);
+        Require(verified.Verified && verified.Originals is not null, "The drift fixture did not verify.");
+
+        // A file that appeared after the comparison is not in the archive.
+        string appeared = Path.Combine(folder, "appeared.bin");
+        await File.WriteAllBytesAsync(appeared, RandomNumberGenerator.GetBytes(64)).ConfigureAwait(false);
+        IReadOnlyList<string> withExtra = MacOriginalDeletionService.DeleteOriginals(
+            inputs, archive, identity, verified.Originals!);
+        Require(withExtra.Count > 0, "A file that appeared after verification did not block deletion.");
+        Require(
+            File.Exists(inside) && File.Exists(appeared),
+            "A blocked deletion removed files anyway.");
+
+        // A file changed after the comparison.
+        File.Delete(appeared);
+        byte[] changed = payload.ToArray();
+        changed[0] ^= 0xFF;
+        await File.WriteAllBytesAsync(inside, changed).ConfigureAwait(false);
+        IReadOnlyList<string> withChange = MacOriginalDeletionService.DeleteOriginals(
+            inputs, archive, identity, verified.Originals!);
+        Require(withChange.Count > 0, "A file changed after verification did not block deletion.");
+        Require(File.Exists(inside), "A blocked deletion removed the changed original.");
+
+        // A verified file that vanished.
+        await File.WriteAllBytesAsync(inside, payload).ConfigureAwait(false);
+        File.SetLastWriteTimeUtc(inside, new DateTime(verified.Originals!.Files[inside].ModifiedUtcTicks, DateTimeKind.Utc));
+        string vanished = Path.Combine(folder, "second.bin");
+        IReadOnlyList<string> clean = MacOriginalDeletionService.DeleteOriginals(
+            inputs, archive, identity, verified.Originals!);
+        Require(clean.Count == 0, $"An unchanged original set was refused: {string.Join("; ", clean)}");
+        Require(!File.Exists(inside) && !Directory.Exists(folder), "The verified originals were not deleted.");
+        Require(!File.Exists(vanished), "The deletion invented a file.");
+
+        Zero(payload, changed);
+    }
+
     private static async Task TestContainersAsync()
     {
         string root = CreateTempRoot("keep-vault-container-full-");
@@ -1273,6 +1664,7 @@ internal static partial class MacComprehensiveTests
                 source,
                 path,
                 UserPassword,
+                UserPin,
                 factorA,
                 factorB,
                 suite,
@@ -1285,10 +1677,10 @@ internal static partial class MacComprehensiveTests
         Require(!entropy.HasPendingEncryptionParameters, $"{suite} did not consume prepared entropy exactly once.");
         ValidateContainerHeader(path, suite);
         KalynaContainerInfo info = await containers.ReadContainerInfoAsync(path, CancellationToken.None).ConfigureAwait(false);
-        Require(info.Version == 9 && info.Suite == suite && info.GeneratedPasswordFactorCount == 2 && info.GeneratedPasswordBits == 1024, $"{suite} v9 header metadata mismatch.");
+        Require(info.Version == 10 && info.Suite == suite && info.GeneratedPasswordFactorCount == 2 && info.GeneratedPasswordBits == 1024, $"{suite} v10 header metadata mismatch.");
 
         using var output = new MemoryStream();
-        await containers.DecryptToStreamAsync(path, UserPassword, factorA, factorB, output, null, CancellationToken.None).ConfigureAwait(false);
+        await containers.DecryptToStreamAsync(path, UserPassword, UserPin, factorA, factorB, output, null, CancellationToken.None).ConfigureAwait(false);
         byte[] decrypted = output.ToArray();
         try
         {
@@ -1303,6 +1695,7 @@ internal static partial class MacComprehensiveTests
             containers,
             path,
             WrongPassword,
+            UserPin,
             factorA,
             factorB,
             $"{suite} wrong user password").ConfigureAwait(false);
@@ -1310,6 +1703,7 @@ internal static partial class MacComprehensiveTests
             containers,
             path,
             UserPassword,
+            UserPin,
             GeneratedFactor('C'),
             factorB,
             $"{suite} wrong factor A").ConfigureAwait(false);
@@ -1317,6 +1711,7 @@ internal static partial class MacComprehensiveTests
             containers,
             path,
             UserPassword,
+            UserPin,
             factorA,
             GeneratedFactor('D'),
             $"{suite} wrong factor B").ConfigureAwait(false);
@@ -1327,13 +1722,13 @@ internal static partial class MacComprehensiveTests
             () => containers.ReadContainerInfoAsync(nonCanonical, CancellationToken.None),
             $"{suite} accepted noncanonical header JSON.").ConfigureAwait(false);
 
-        // v9 is a clean break. A container claiming any other version must be
+        // v10 is a clean break. A container claiming any other version must be
         // refused outright rather than read on a compatibility path, and the
         // refusal must not depend on the MACs noticing the edit afterwards.
-        foreach (int rejected in new[] { 7, 8, 10 })
+        foreach (int rejected in new[] { 8, 9, 11 })
         {
             string downgraded = CopyContainer(path, root, $"{suite}-version-{rejected}.kzpaq");
-            ReplaceHeaderToken(downgraded, "\"Version\":9", $"\"Version\":{rejected}");
+            ReplaceHeaderToken(downgraded, "\"Version\":10", $"\"Version\":{rejected}");
             await RequireThrowsAsync<InvalidDataException>(
                 () => containers.ReadContainerInfoAsync(downgraded, CancellationToken.None),
                 $"{suite} accepted a container claiming version {rejected}.").ConfigureAwait(false);
@@ -1341,6 +1736,7 @@ internal static partial class MacComprehensiveTests
                 containers,
                 downgraded,
                 UserPassword,
+                UserPin,
                 factorA,
                 factorB,
                 typeof(InvalidDataException),
@@ -1367,6 +1763,7 @@ internal static partial class MacComprehensiveTests
                 containers,
                 candidate,
                 UserPassword,
+                UserPin,
                 factorA,
                 factorB,
                 expected,
@@ -1388,6 +1785,7 @@ internal static partial class MacComprehensiveTests
                         tiny,
                         existing,
                         UserPassword,
+                        UserPin,
                         rejectedEntropy.FirstPassword,
                         rejectedEntropy.SecondPassword,
                         suite,
@@ -1446,6 +1844,7 @@ internal static partial class MacComprehensiveTests
                         input,
                         encrypted,
                         UserPassword,
+                        UserPin,
                         factorA,
                         factorB,
                         suite,
@@ -1459,6 +1858,7 @@ internal static partial class MacComprehensiveTests
                 string sidecar = await recovery.CreateAuthenticatedAsync(
                     encrypted,
                     UserPassword,
+                    UserPin,
                     factorA,
                     factorB,
                     null,
@@ -1472,6 +1872,7 @@ internal static partial class MacComprehensiveTests
                 RecoveryRepairResult verified = await recovery.VerifyAndRepairAuthenticatedAsync(
                     encrypted,
                     UserPassword,
+                    UserPin,
                     factorA,
                     factorB,
                     null,
@@ -1484,6 +1885,7 @@ internal static partial class MacComprehensiveTests
                     () => recovery.VerifyAndRepairAuthenticatedAsync(
                         encrypted,
                         WrongPassword,
+                        UserPin,
                         factorA,
                         factorB,
                         null,
@@ -1493,6 +1895,7 @@ internal static partial class MacComprehensiveTests
                     () => recovery.VerifyAndRepairAuthenticatedAsync(
                         encrypted,
                         UserPassword,
+                        UserPin,
                         GeneratedFactor('C'),
                         factorB,
                         null,
@@ -1502,6 +1905,7 @@ internal static partial class MacComprehensiveTests
                     () => recovery.VerifyAndRepairAuthenticatedAsync(
                         encrypted,
                         UserPassword,
+                        UserPin,
                         factorA,
                         GeneratedFactor('D'),
                         null,
@@ -1559,6 +1963,7 @@ internal static partial class MacComprehensiveTests
                     input,
                     encrypted,
                     UserPassword,
+                    UserPin,
                     factorA,
                     factorB,
                     EncryptionSuite.Threefish1024,
@@ -1572,6 +1977,7 @@ internal static partial class MacComprehensiveTests
             string authenticatedSidecar = await recovery.CreateAuthenticatedAsync(
                 encrypted,
                 UserPassword,
+                UserPin,
                 factorA,
                 factorB,
                 null,
@@ -1584,7 +1990,7 @@ internal static partial class MacComprehensiveTests
             byte[] transplantHash = Sha3_512Compat.HashData(transplantBytes);
             File.Copy(authenticatedSidecar, RecoveryService.GetRecoveryPath(transplant));
             await RequireThrowsAsync<InvalidDataException>(
-                () => recovery.VerifyAndRepairAuthenticatedAsync(transplant, UserPassword, factorA, factorB, null, CancellationToken.None),
+                () => recovery.VerifyAndRepairAuthenticatedAsync(transplant, UserPassword, UserPin, factorA, factorB, null, CancellationToken.None),
                 "Authenticated KPAR2 sidecar transplantation was accepted.").ConfigureAwait(false);
             byte[] transplantAfter = await HashFileAsync(transplant).ConfigureAwait(false);
             Require(FixedEqual(transplantHash, transplantAfter), "Rejected KPAR2 transplant modified its target.");
@@ -1592,7 +1998,7 @@ internal static partial class MacComprehensiveTests
             FlipRange(encrypted, 0, 4096);
             byte[] damagedEncryptedHash = await HashFileAsync(encrypted).ConfigureAwait(false);
             await RequireThrowsAsync<CryptographicException>(
-                () => recovery.VerifyAndRepairAuthenticatedAsync(encrypted, WrongPassword, factorA, factorB, null, CancellationToken.None),
+                () => recovery.VerifyAndRepairAuthenticatedAsync(encrypted, WrongPassword, UserPin, factorA, factorB, null, CancellationToken.None),
                 "Wrong password authenticated KPAR2 metadata.").ConfigureAwait(false);
             byte[] afterWrongPassword = await HashFileAsync(encrypted).ConfigureAwait(false);
             Require(FixedEqual(damagedEncryptedHash, afterWrongPassword), "Wrong-password KPAR2 attempt modified the original.");
@@ -1600,6 +2006,7 @@ internal static partial class MacComprehensiveTests
             RecoveryRepairResult authenticatedRepair = await recovery.VerifyAndRepairAuthenticatedAsync(
                 encrypted,
                 UserPassword,
+                UserPin,
                 factorA,
                 factorB,
                 null,
@@ -1608,7 +2015,7 @@ internal static partial class MacComprehensiveTests
             byte[] authenticatedHash = await HashFileAsync(authenticatedRepair.OutputPath!).ConfigureAwait(false);
             Require(FixedEqual(encryptedHash, authenticatedHash), "Authenticated KPAR2 did not restore exact container bytes.");
             using var decrypted = new MemoryStream();
-            await containers.DecryptToStreamAsync(authenticatedRepair.OutputPath!, UserPassword, factorA, factorB, decrypted, null, CancellationToken.None).ConfigureAwait(false);
+            await containers.DecryptToStreamAsync(authenticatedRepair.OutputPath!, UserPassword, UserPin, factorA, factorB, decrypted, null, CancellationToken.None).ConfigureAwait(false);
             byte[] recoveredPayload = decrypted.ToArray();
             Require(FixedEqual(payload, recoveredPayload), "KPAR2-recovered container failed dual-MAC decryption.");
 
@@ -1637,6 +2044,7 @@ internal static partial class MacComprehensiveTests
                     input,
                     container,
                     UserPassword,
+                    UserPin,
                     factorA,
                     factorB,
                     EncryptionSuite.Threefish1024,
@@ -1649,6 +2057,7 @@ internal static partial class MacComprehensiveTests
             string sidecar = await new RecoveryService().CreateAuthenticatedAsync(
                 container,
                 UserPassword,
+                UserPin,
                 factorA,
                 factorB,
                 null,
@@ -1826,7 +2235,7 @@ internal static partial class MacComprehensiveTests
             using JsonDocument document = JsonDocument.Parse(headerBytes);
             JsonElement header = document.RootElement;
             EncryptionSuiteParameters parameters = EncryptionSuiteCatalog.Get(suite);
-            Require(header.GetProperty("Version").GetInt32() == 9, "Container version is not v9.");
+            Require(header.GetProperty("Version").GetInt32() == 10, "Container version is not v10.");
 
             // The second-round fields are always present. Present-and-null is
             // not cosmetic: the reader compares the header against its own
@@ -1845,7 +2254,7 @@ internal static partial class MacComprehensiveTests
                     && secondNonce.ValueKind == JsonValueKind.String,
                     "Container header omits second-round material for a two-round suite.");
                 Require(
-                    header.GetProperty("SecondSaltBits").GetInt32() == PasswordKeyService.SaltSize * 8
+                    header.GetProperty("SecondSaltBits").GetInt32() == 2 * PasswordKeyService.SaltSize * 8
                     && header.GetProperty("SecondNonceBits").GetInt32() == parameters.NonceBytes * 8,
                     "Container header declares wrong second-round sizes.");
                 Require(
@@ -1874,7 +2283,12 @@ internal static partial class MacComprehensiveTests
             }
             Require(header.GetProperty("Algorithm").GetString() == parameters.Algorithm, "Container algorithm label mismatch.");
             Require(header.GetProperty("CounterEndian").GetString() == EncryptionSuiteCatalog.CounterEndian, "Container counter endian mismatch.");
-            Require(header.GetProperty("Argon2MemoryKiB").GetInt32() == Argon2Profile.DefaultMemoryKiB, "Container Argon2 memory is not 1 GiB.");
+            // Zero, and asserted as zero. v10 derives the memory cost from the
+            // credentials; a header that published it would give away the one
+            // KDF parameter that is deliberately secret.
+            Require(header.GetProperty("Argon2MemoryKiB").GetInt32() == 0, "Container header published the Argon2id memory cost.");
+            Require(header.GetProperty("SaltBits").GetInt32() == 2 * PasswordKeyService.SaltSize * 8, "Container salt is not a 1024-bit pair.");
+            Require(header.GetProperty("KdfMode").GetString() == "DualArgon2id-SHA3+Skein1024-Sequential-Master1024", "Container KDF mode mismatch.");
             Require(header.GetProperty("Argon2Iterations").GetInt32() == Argon2Profile.DefaultIterations, "Container Argon2 iterations mismatch.");
             Require(header.GetProperty("Argon2Parallelism").GetInt32() == Argon2Profile.DefaultParallelism, "Container Argon2 parallelism mismatch.");
             Require(header.GetProperty("GeneratedPasswordFactorCount").GetInt32() == 2, "Container factor count mismatch.");
@@ -1886,8 +2300,8 @@ internal static partial class MacComprehensiveTests
                 header.GetProperty("NonceBits").GetInt32() == parameters.NonceBytes * 8,
                 "Container nonce size mismatch.");
             Require(
-                header.GetProperty("Argon2OutputBits").GetInt32() == parameters.DerivedKeyBytes * 8,
-                "Container Argon2 output size mismatch.");
+                header.GetProperty("Argon2OutputBits").GetInt32() == 1024,
+                "Container master key size mismatch.");
             if (suite == EncryptionSuite.ThreefishOverKalyna)
             {
                 // The split the whole construction rests on, asserted against
@@ -1897,17 +2311,18 @@ internal static partial class MacComprehensiveTests
                 // 192 cipher-key bytes plus the two MAC keys.
                 Require(header.GetProperty("EncryptionKeyBits").GetInt32() == 192 * 8, "Cascade key is not 192 bytes.");
                 Require(header.GetProperty("NonceBits").GetInt32() == 192 * 8, "Cascade nonce is not 192 bytes.");
-                Require(header.GetProperty("Argon2OutputBits").GetInt32() == 384 * 8, "Cascade Argon2 output is not 384 bytes.");
+                Require(header.GetProperty("Argon2OutputBits").GetInt32() == 1024, "Cascade master is not 1024 bits.");
             }
 
             if (suite == EncryptionSuite.ParanoiaCascade)
             {
                 // Six layers: 32+56+64+64+128+32 key bytes and 16+16+32+64+128+12
-                // nonce bytes, with 376 cipher-key bytes plus the two MAC keys
-                // covered by two Argon2id rounds.
+                // nonce bytes. In v10 the key length no longer follows from an
+                // Argon2id output length: every stage key is cut from its own
+                // 1024-bit role value, so the cascade could be any width.
                 Require(header.GetProperty("EncryptionKeyBits").GetInt32() == 376 * 8, "Paranoia key is not 376 bytes.");
                 Require(header.GetProperty("NonceBits").GetInt32() == 268 * 8, "Paranoia nonce is not 268 bytes.");
-                Require(header.GetProperty("Argon2OutputBits").GetInt32() == 568 * 8, "Paranoia Argon2 output is not 568 bytes.");
+                Require(header.GetProperty("Argon2OutputBits").GetInt32() == 1024, "Paranoia master is not 1024 bits.");
             }
             Require(input.Length - input.Position > 64 + 128, "Container lacks two tags and ciphertext.");
         }
@@ -1921,6 +2336,7 @@ internal static partial class MacComprehensiveTests
         KalynaContainerService service,
         string path,
         string password,
+        string pin,
         string factorA,
         string factorB,
         string label)
@@ -1929,6 +2345,7 @@ internal static partial class MacComprehensiveTests
             service,
             path,
             password,
+            pin,
             factorA,
             factorB,
             typeof(CryptographicException),
@@ -1939,6 +2356,7 @@ internal static partial class MacComprehensiveTests
         KalynaContainerService service,
         string path,
         string password,
+        string pin,
         string factorA,
         string factorB,
         Type expectedException,
@@ -1949,7 +2367,7 @@ internal static partial class MacComprehensiveTests
         output.Write(sentinel);
         try
         {
-            await service.DecryptToStreamAsync(path, password, factorA, factorB, output, null, CancellationToken.None).ConfigureAwait(false);
+            await service.DecryptToStreamAsync(path, password, pin, factorA, factorB, output, null, CancellationToken.None).ConfigureAwait(false);
             throw new InvalidOperationException($"{label} unexpectedly decrypted.");
         }
         catch (Exception ex) when (ex.GetType() == expectedException)
@@ -2427,6 +2845,7 @@ internal static partial class MacComprehensiveTests
                         input,
                         archive,
                         UserPassword,
+                        UserPin,
                         entropy.FirstPassword,
                         entropy.SecondPassword,
                         suite,
@@ -2460,6 +2879,7 @@ internal static partial class MacComprehensiveTests
                 await containers.DecryptToStreamAsync(
                     archive,
                     UserPassword,
+                    UserPin,
                     entropy.FirstPassword,
                     entropy.SecondPassword,
                     output,
@@ -2555,119 +2975,14 @@ internal static partial class MacComprehensiveTests
         }
 
         Require(
-            !EntropyMixer.HasRequiredSamples(EntropyPurpose.Salt),
+            !EntropyMixer.HasRequiredSamples(EntropyPurpose.SaltSha3),
             "The two-round derivation did not consume the salt pool exactly once.");
 
-        await TestParanoiaCredentialPreHashSurvivesRoundOneAsync().ConfigureAwait(false);
-    }
-
-    /// <summary>
-    /// Regression test for the v9 bug where the first PHC Argon2id call cleared
-    /// the shared 128-byte prehash and made round two run over zero bytes.
-    /// </summary>
-    /// <remarks>
-    /// The expected prehash uses the compiled FIPS 202 reference adapter and the
-    /// expected Argon2id output uses Bouncy Castle. Production uses the separate
-    /// Bouncy Castle SHA3 path followed by the native PHC Argon2 adapter, so the
-    /// assertion does not reproduce the implementation under test. Comparing
-    /// explicitly against Argon2id(0^1024, salt2, ...) makes a normal
-    /// encrypt/decrypt roundtrip's blind spot impossible here.
-    /// </remarks>
-    private static async Task TestParanoiaCredentialPreHashSurvivesRoundOneAsync()
-    {
-        const EncryptionSuite suite = EncryptionSuite.ParanoiaCascade;
-        string factorA = GeneratedFactor('A');
-        string factorB = GeneratedFactor('B');
-        byte[] firstSalt = Enumerable.Range(0, PasswordKeyService.SaltSize)
-            .Select(index => (byte)(index + 1))
-            .ToArray();
-        byte[] secondSalt = Enumerable.Range(0, PasswordKeyService.SaltSize)
-            .Select(index => (byte)(0xA5 ^ (index * 29)))
-            .ToArray();
-        byte[] credentialPreHash = BuildIndependentParanoiaPreHash(UserPassword, factorA, factorB);
-        byte[] zeroPreHash = new byte[PasswordKeyService.Argon2PasswordInputSize];
-        byte[] expectedRoundTwo = [];
-        byte[] zeroInputRoundTwo = [];
-        long lockedBaseline = SecureMemory.LockedBytesForTests;
-        try
-        {
-            expectedRoundTwo = BouncyArgon2(
-                credentialPreHash,
-                secondSalt,
-                PasswordKeyService.CascadeDerivedKeySize);
-            zeroInputRoundTwo = BouncyArgon2(
-                zeroPreHash,
-                secondSalt,
-                PasswordKeyService.CascadeDerivedKeySize);
-
-            int roundTwoBytesUsed = EncryptionSuiteCatalog.Get(suite).DerivedKeyBytes
-                - PasswordKeyService.CascadeDerivedKeySize;
-            Require(roundTwoBytesUsed > 0, "The paranoia suite no longer consumes round-two key bytes.");
-            Require(
-                !expectedRoundTwo.AsSpan(0, roundTwoBytesUsed)
-                    .SequenceEqual(zeroInputRoundTwo.AsSpan(0, roundTwoBytesUsed)),
-                "The independent true-input and zero-input Argon2id controls unexpectedly match.");
-
-            using (DerivedKey actual = await new PasswordKeyService().DeriveTwoRoundAsync(
-                UserPassword,
-                factorA,
-                factorB,
-                firstSalt.ToArray(),
-                secondSalt.ToArray(),
-                suite,
-                Argon2Profile.Default,
-                CancellationToken.None).ConfigureAwait(false))
-            {
-                ReadOnlySpan<byte> actualRoundTwo = actual.Bytes.Slice(
-                    PasswordKeyService.CascadeDerivedKeySize,
-                    roundTwoBytesUsed);
-                Require(
-                    actualRoundTwo.SequenceEqual(expectedRoundTwo.AsSpan(0, roundTwoBytesUsed)),
-                    "Paranoia round two does not match independent Argon2id over the credential prehash.");
-                Require(
-                    !actualRoundTwo.SequenceEqual(zeroInputRoundTwo.AsSpan(0, roundTwoBytesUsed)),
-                    "Paranoia round two still matches Argon2id over a zeroed 1024-bit prehash.");
-            }
-
-            Require(
-                SecureMemory.LockedBytesForTests == lockedBaseline,
-                "The two-round regression KAT left a locked one-call or master buffer behind.");
-        }
-        finally
-        {
-            Zero(firstSalt, secondSalt, credentialPreHash, zeroPreHash, expectedRoundTwo, zeroInputRoundTwo);
-        }
-    }
-
-    private static byte[] BuildIndependentParanoiaPreHash(
-        string userPassword,
-        string factorA,
-        string factorB)
-    {
-        const string algorithm =
-            "ChaCha20-Poly1305(Threefish-1024-CTR(Kalyna-512/512-CTR(SHACAL-2-512-CTR("
-            + "MARS-448-CTR(AES-256-CTR)))))+HMAC-SHA3-512+Skein-MAC-1024";
-        byte[] userPasswordBytes = Encoding.UTF8.GetBytes(userPassword);
-        byte[] factorABytes = Encoding.ASCII.GetBytes(PasswordKeyService.NormalizeGeneratedPassword(factorA));
-        byte[] factorBBytes = Encoding.ASCII.GetBytes(PasswordKeyService.NormalizeGeneratedPassword(factorB));
-        byte[] domainA = Encoding.ASCII.GetBytes($"Kalyna-ZPAQ/v9/{algorithm}/SHA3-512/User+Factor-A");
-        byte[] domainB = Encoding.ASCII.GetBytes($"Kalyna-ZPAQ/v9/{algorithm}/SHA3-512/User+Factor-B");
-        byte[] messageA = BuildLengthPrefixedMessage(domainA, userPasswordBytes, factorABytes);
-        byte[] messageB = BuildLengthPrefixedMessage(domainB, userPasswordBytes, factorBBytes);
-        string sha3ReferencePath = Environment.GetEnvironmentVariable("KEEPVAULT_SHA3_REFERENCE")
-            ?? Path.Combine(AppContext.BaseDirectory, "Native", "libsha3_ref.dylib");
-        Require(File.Exists(sha3ReferencePath), $"SHA3-512 reference adapter is missing: {sha3ReferencePath}");
-        using var sha3 = new KeepVaultMac.Tests.Sha3Reference(sha3ReferencePath);
-        byte[] hashA = sha3.Hash(messageA);
-        byte[] hashB = sha3.Hash(messageB);
-        try
-        {
-            return [.. hashA, .. hashB];
-        }
-        finally
-        {
-            Zero(userPasswordBytes, factorABytes, factorBBytes, domainA, domainB, messageA, messageB, hashA, hashB);
-        }
+        // The v9 regression test that lived here proved round two no longer ran
+        // over a zeroed prehash. v10 does not share a prehash between rounds at
+        // all: round two takes round one's complete master as Argon2id's secret
+        // input, which the v10 master-KDF group verifies directly by changing a
+        // single bit of round one and observing round two change with it.
     }
 
     private static byte[] BuildLengthPrefixedMessage(params byte[][] values)
@@ -2688,12 +3003,9 @@ internal static partial class MacComprehensiveTests
     private static void AddMouseSamplesUntilReady()
     {
         int index = 0;
-        while (!EntropyMixer.HasRequiredSamples(EntropyPurpose.GeneratedPasswordFirst)
-            || !EntropyMixer.HasRequiredSamples(EntropyPurpose.GeneratedPasswordSecond)
-            || !EntropyMixer.HasRequiredSamples(EntropyPurpose.Salt)
-            || !EntropyMixer.HasRequiredSamples(EntropyPurpose.NonceFirst)
-            || !EntropyMixer.HasRequiredSamples(EntropyPurpose.NonceSecond)
-            || !EntropyMixer.HasRequiredSamples(EntropyPurpose.NonceThird))
+        // Every purpose, read from the enumeration. Listing them by hand is how
+        // a pool added later quietly stops being filled.
+        while (Enum.GetValues<EntropyPurpose>().Any(purpose => !EntropyMixer.HasRequiredSamples(purpose)))
         {
             EntropyMixer.AddMouseSample(
                 100.125 + (index * 0.003),

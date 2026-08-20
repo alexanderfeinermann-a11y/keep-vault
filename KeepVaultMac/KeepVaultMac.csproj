@@ -85,6 +85,10 @@
     <Compile Include="../KalynaArchiver/Services/RecoveryService.cs" Link="Services/RecoveryService.cs" />
     <Compile Include="../KalynaArchiver/Services/SecureMemory.cs" Link="Services/SecureMemory.cs" />
     <Compile Include="../KalynaArchiver/Services/Skein1024Service.cs" Link="Services/Skein1024Service.cs" />
+    <Compile Include="../KalynaArchiver/Services/V10Primitives.cs" Link="Services/V10Primitives.cs" />
+    <Compile Include="../KalynaArchiver/Services/SuiteKeySchedule.cs" Link="Services/SuiteKeySchedule.cs" />
+    <Compile Include="../KalynaArchiver/Services/V10MasterKdf.cs" Link="Services/V10MasterKdf.cs" />
+    <Compile Include="../KalynaArchiver/Services/V10KeyDerivation.cs" Link="Services/V10KeyDerivation.cs" />
     <Compile Include="../KalynaArchiver/Services/ZpaqService.cs" Link="Services/ZpaqService.cs" />
     <Compile Include="../KalynaArchiver/Services/SigningTrustPolicy.cs" Link="Services/SigningTrustPolicy.cs" />
     <Compile Include="../KalynaArchiver.Signing/HybridSignatureService.cs" Link="Signing/HybridSignatureService.cs" />

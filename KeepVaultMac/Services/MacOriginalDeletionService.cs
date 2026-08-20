@@ -26,7 +26,23 @@ internal sealed class MacOriginalDeletionService
         bool Verified,
         int FilesCompared,
         long BytesCompared,
-        string? Failure);
+        string? Failure,
+        OriginalSnapshot? Originals = null);
+
+    /// <summary>
+    /// One original file as it stood when it was compared against the archive.
+    /// </summary>
+    /// <remarks>
+    /// The digest is what actually decides; length and modification time are
+    /// carried alongside so a mismatch can say what changed. The digest comes
+    /// from the comparison pass itself, so recording it costs no extra reads.
+    /// </remarks>
+    internal readonly record struct OriginalFileState(long Length, long ModifiedUtcTicks, string Digest);
+
+    /// <summary>
+    /// Every original file the verification covered, keyed by full path.
+    /// </summary>
+    internal sealed record OriginalSnapshot(IReadOnlyDictionary<string, OriginalFileState> Files);
 
     /// <summary>
     /// Compares every file below <paramref name="extractedRoot"/> with its
@@ -83,6 +99,7 @@ internal sealed class MacOriginalDeletionService
         }
 
         var seen = new HashSet<string>(StringComparer.Ordinal);
+        var states = new Dictionary<string, OriginalFileState>(StringComparer.Ordinal);
         int compared = 0;
         long bytes = 0;
         foreach (string extracted in Directory.EnumerateFiles(extractedRoot, "*", SearchOption.AllDirectories))
@@ -96,13 +113,18 @@ internal sealed class MacOriginalDeletionService
             }
 
             progress?.Report(relative);
-            long length = await CompareAsync(original, extracted, cancellationToken).ConfigureAwait(false);
-            if (length < 0)
+            (long length, string? digest) = await CompareAsync(original, extracted, cancellationToken)
+                .ConfigureAwait(false);
+            if (length < 0 || digest is null)
             {
                 return new VerificationResult(false, compared, bytes,
                     $"Der bitweise Vergleich schlug fehl: {relative}");
             }
 
+            states[original] = new OriginalFileState(
+                length,
+                File.GetLastWriteTimeUtc(original).Ticks,
+                digest);
             seen.Add(relative);
             compared++;
             bytes += length;
@@ -115,7 +137,7 @@ internal sealed class MacOriginalDeletionService
                 $"Das Archiv enthält eine Originaldatei nicht: {missing}");
         }
 
-        return new VerificationResult(true, compared, bytes, null);
+        return new VerificationResult(true, compared, bytes, null, new OriginalSnapshot(states));
     }
 
     /// <summary>
@@ -127,7 +149,7 @@ internal sealed class MacOriginalDeletionService
     /// removes the question entirely and costs nothing here: both files are
     /// being read from disk regardless.
     /// </remarks>
-    private static async Task<long> CompareAsync(
+    private static async Task<(long Length, string? Digest)> CompareAsync(
         string original,
         string extracted,
         CancellationToken cancellationToken)
@@ -136,11 +158,14 @@ internal sealed class MacOriginalDeletionService
         using FileStream right = MacSafeFileSystem.OpenReadNoSymlinks(extracted);
         if (left.Length != right.Length)
         {
-            return -1;
+            return (-1, null);
         }
 
         byte[] leftBuffer = new byte[CompareBufferBytes];
         byte[] rightBuffer = new byte[CompareBufferBytes];
+        // The original's digest falls out of the bytes already being read, and
+        // it is what the pre-deletion re-check compares against.
+        using var digest = IncrementalHash.CreateHash(HashAlgorithmName.SHA512);
         try
         {
             while (true)
@@ -155,11 +180,13 @@ internal sealed class MacOriginalDeletionService
                 await right.ReadExactlyAsync(rightBuffer.AsMemory(0, leftRead), cancellationToken).ConfigureAwait(false);
                 if (!leftBuffer.AsSpan(0, leftRead).SequenceEqual(rightBuffer.AsSpan(0, leftRead)))
                 {
-                    return -1;
+                    return (-1, null);
                 }
+
+                digest.AppendData(leftBuffer.AsSpan(0, leftRead));
             }
 
-            return left.Length;
+            return (left.Length, Convert.ToHexString(digest.GetHashAndReset()));
         }
         finally
         {
@@ -212,9 +239,11 @@ internal sealed class MacOriginalDeletionService
     internal static IReadOnlyList<string> DeleteOriginals(
         IReadOnlyList<string> originals,
         string archivePath,
-        ArchiveIdentity verified)
+        ArchiveIdentity verified,
+        OriginalSnapshot originalsVerified)
     {
         ArgumentNullException.ThrowIfNull(originals);
+        ArgumentNullException.ThrowIfNull(originalsVerified);
         ArchiveIdentity current;
         try
         {
@@ -236,26 +265,160 @@ internal sealed class MacOriginalDeletionService
             ];
         }
 
-        return DeleteOriginals(originals);
+        string? drift = FindOriginalDrift(originals, originalsVerified);
+        if (drift is not null)
+        {
+            return [drift];
+        }
+
+        return DeleteVerifiedFiles(originals, originalsVerified);
     }
 
-    private static IReadOnlyList<string> DeleteOriginals(IReadOnlyList<string> originals)
+    /// <summary>
+    /// Re-reads every original and reports the first difference from what was
+    /// verified, or null if the set is unchanged.
+    /// </summary>
+    /// <remarks>
+    /// The archive check proves the archive is still the one that was verified.
+    /// It says nothing about the originals, and those are what is about to be
+    /// destroyed. Between the comparison and the deletion another program can
+    /// overwrite a file, or drop a new one into a folder that was already
+    /// walked — and that new file was never archived.
+    ///
+    /// So the whole set is read again here, in both directions: every verified
+    /// file must still be present with the same length, modification time and
+    /// digest, and no file may have appeared that the verification never saw.
+    /// Any difference at all and nothing is deleted; the user can archive again
+    /// and delete then. The cost is one more full read of the inputs, which is
+    /// the correct price for the only irreversible action in this program.
+    /// </remarks>
+    private static string? FindOriginalDrift(
+        IReadOnlyList<string> originals,
+        OriginalSnapshot verified)
     {
-        ArgumentNullException.ThrowIfNull(originals);
-        var failures = new List<string>();
+        var present = new HashSet<string>(StringComparer.Ordinal);
         foreach (string original in originals)
         {
             string full = Path.GetFullPath(original);
+            if (File.Exists(full))
+            {
+                string? mismatch = DescribeFileDrift(full, verified);
+                if (mismatch is not null)
+                {
+                    return mismatch;
+                }
+
+                present.Add(full);
+                continue;
+            }
+
+            if (!Directory.Exists(full))
+            {
+                return $"Die Eingabe existiert nicht mehr: {full}. Es wurde nichts gelöscht.";
+            }
+
+            foreach (string file in Directory.EnumerateFiles(full, "*", SearchOption.AllDirectories))
+            {
+                if (new FileInfo(file).LinkTarget is not null)
+                {
+                    return $"Im Eingabeordner ist ein symbolischer Link aufgetaucht: {file}. "
+                        + "Es wurde nichts gelöscht.";
+                }
+
+                string? mismatch = DescribeFileDrift(file, verified);
+                if (mismatch is not null)
+                {
+                    return mismatch;
+                }
+
+                present.Add(file);
+            }
+        }
+
+        if (present.Count != verified.Files.Count)
+        {
+            string missing = verified.Files.Keys.Except(present, StringComparer.Ordinal).First();
+            return $"Eine geprüfte Originaldatei fehlt inzwischen: {missing}. Es wurde nichts gelöscht.";
+        }
+
+        return null;
+    }
+
+    private static string? DescribeFileDrift(string path, OriginalSnapshot verified)
+    {
+        if (!verified.Files.TryGetValue(path, out OriginalFileState expected))
+        {
+            return $"Seit der Prüfung ist eine neue Datei hinzugekommen: {path}. "
+                + "Sie ist nicht im Archiv. Es wurde nichts gelöscht.";
+        }
+
+        try
+        {
+            using FileStream stream = MacSafeFileSystem.OpenReadNoSymlinks(path);
+            if (stream.Length != expected.Length)
+            {
+                return $"Eine Originaldatei hat sich seit der Prüfung geändert: {path}. "
+                    + "Es wurde nichts gelöscht.";
+            }
+
+            string digest = Convert.ToHexString(SHA512.HashData(stream));
+            if (!CryptographicOperations.FixedTimeEquals(
+                    Convert.FromHexString(digest),
+                    Convert.FromHexString(expected.Digest))
+                || File.GetLastWriteTimeUtc(path).Ticks != expected.ModifiedUtcTicks)
+            {
+                return $"Eine Originaldatei hat sich seit der Prüfung geändert: {path}. "
+                    + "Es wurde nichts gelöscht.";
+            }
+
+            return null;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            return $"Eine Originaldatei konnte vor dem Löschen nicht erneut geprüft werden: "
+                + $"{path} ({exception.Message}). Es wurde nichts gelöscht.";
+        }
+    }
+
+    /// <summary>
+    /// Deletes exactly the files that were verified, then removes the folders
+    /// they came from if those folders are empty.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately not <c>Directory.Delete(recursive: true)</c>. That call
+    /// deletes whatever it finds, which is not necessarily what was verified —
+    /// and the difference is a file that was never archived. Naming each file
+    /// makes the deletion exactly as wide as the proof behind it, and a folder
+    /// that turns out not to be empty is left standing rather than emptied.
+    /// </remarks>
+    private static IReadOnlyList<string> DeleteVerifiedFiles(
+        IReadOnlyList<string> originals,
+        OriginalSnapshot verified)
+    {
+        var failures = new List<string>();
+        foreach (string path in verified.Files.Keys)
+        {
             try
             {
-                if (File.Exists(full))
-                {
-                    File.Delete(full);
-                }
-                else if (Directory.Exists(full))
-                {
-                    Directory.Delete(full, recursive: true);
-                }
+                File.Delete(path);
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+                failures.Add($"{Path.GetFileName(path)}: {exception.Message}");
+            }
+        }
+
+        foreach (string original in originals)
+        {
+            string full = Path.GetFullPath(original);
+            if (!Directory.Exists(full))
+            {
+                continue;
+            }
+
+            try
+            {
+                RemoveEmptyDirectories(full);
             }
             catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
             {
@@ -264,5 +427,18 @@ internal sealed class MacOriginalDeletionService
         }
 
         return failures;
+    }
+
+    private static void RemoveEmptyDirectories(string directory)
+    {
+        foreach (string child in Directory.EnumerateDirectories(directory))
+        {
+            RemoveEmptyDirectories(child);
+        }
+
+        if (!Directory.EnumerateFileSystemEntries(directory).Any())
+        {
+            Directory.Delete(directory);
+        }
     }
 }
