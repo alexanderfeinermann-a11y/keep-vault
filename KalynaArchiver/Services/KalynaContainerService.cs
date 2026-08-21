@@ -972,7 +972,8 @@ public sealed partial class KalynaContainerService
                 parameters.Suite,
                 header.Algorithm,
                 salt,
-                Argon2Profile.Default);
+                Argon2Profile.Default,
+                header.Version);
             salt = null;
             return result;
         }
@@ -2072,12 +2073,14 @@ internal sealed class ContainerRecoveryKdfInfo : IDisposable
         EncryptionSuite suite,
         string algorithm,
         byte[] salt,
-        Argon2Profile argon2Profile)
+        Argon2Profile argon2Profile,
+        int containerVersion)
     {
         Suite = suite;
         Algorithm = algorithm;
         Salt = salt;
         Argon2Profile = argon2Profile;
+        ContainerVersion = containerVersion;
     }
 
     public EncryptionSuite Suite { get; }
@@ -2087,6 +2090,8 @@ internal sealed class ContainerRecoveryKdfInfo : IDisposable
     public byte[] Salt { get; }
 
     public Argon2Profile Argon2Profile { get; }
+
+    public int ContainerVersion { get; }
 
     public void Dispose()
     {

@@ -481,20 +481,61 @@ public sealed partial class ZpaqService
                     map[rel] = filePath;
                 }
 #else
-                foreach (string file in Directory.EnumerateFiles(full, "*", SearchOption.AllDirectories))
+                var files = EnumerateDirectoryTreeNoFollowWindows(full);
+                foreach (string filePath in files)
                 {
-                    if (new FileInfo(file).LinkTarget is not null)
-                    {
-                        throw new IOException($"Die Eingabe enthält einen symbolischen Link: {file}");
-                    }
-                    string rel = Path.GetRelativePath(workingDirectory, file);
-                    map[rel] = file;
+                    string rel = Path.GetRelativePath(workingDirectory, filePath);
+                    map[rel] = filePath;
                 }
 #endif
             }
         }
 
         return map;
+    }
+
+    internal static List<string> EnumerateDirectoryTreeNoFollowWindows(string rootDirectory)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(rootDirectory);
+        string fullRoot = Path.TrimEndingDirectorySeparator(Path.GetFullPath(rootDirectory));
+        if (!Directory.Exists(fullRoot))
+        {
+            throw new DirectoryNotFoundException($"Directory not found: {fullRoot}");
+        }
+
+        FileAttributes rootAttr = File.GetAttributes(fullRoot);
+        if ((rootAttr & FileAttributes.ReparsePoint) != 0 || new DirectoryInfo(fullRoot).LinkTarget is not null)
+        {
+            throw new IOException($"Die Eingabe enthält einen symbolischen Link oder Reparse Point: {fullRoot}");
+        }
+
+        var results = new List<string>();
+        var pending = new Stack<string>();
+        pending.Push(fullRoot);
+
+        while (pending.Count > 0)
+        {
+            string current = pending.Pop();
+            foreach (string entry in Directory.EnumerateFileSystemEntries(current))
+            {
+                FileAttributes attr = File.GetAttributes(entry);
+                if ((attr & FileAttributes.ReparsePoint) != 0 || new FileInfo(entry).LinkTarget is not null || new DirectoryInfo(entry).LinkTarget is not null)
+                {
+                    throw new IOException($"Die Eingabe enthält einen symbolischen Link oder Reparse Point: {entry}");
+                }
+
+                if ((attr & FileAttributes.Directory) != 0)
+                {
+                    pending.Push(entry);
+                }
+                else
+                {
+                    results.Add(entry);
+                }
+            }
+        }
+
+        return results;
     }
 
     private static string GetArchiveWorkingDirectory(IEnumerable<string> inputPaths)

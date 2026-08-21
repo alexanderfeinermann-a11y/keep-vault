@@ -2501,7 +2501,30 @@ internal static partial class MacComprehensiveTests
             byte[] recoveredPayload = decrypted.ToArray();
             Require(FixedEqual(payload, recoveredPayload), "KPAR2-recovered container failed dual-MAC decryption.");
 
-            Zero(payload, encryptedHash, transplantBytes, transplantHash, transplantAfter, damagedEncryptedHash, afterWrongPassword, authenticatedHash, recoveredPayload);
+            // Verify KPAR2 v4 locator structure and container version binding
+            byte[] sidecarHeader = new byte[512];
+            using (var sStream = File.OpenRead(authenticatedSidecar))
+            {
+                await sStream.ReadExactlyAsync(sidecarHeader).ConfigureAwait(false);
+            }
+            int locatorFormatVersion = BinaryPrimitives.ReadInt32LittleEndian(sidecarHeader.AsSpan(8));
+            Require(locatorFormatVersion == 4, $"KPAR2 format version mismatch: expected 4, got {locatorFormatVersion}");
+            int locatorContainerVersion = BinaryPrimitives.ReadInt32LittleEndian(sidecarHeader.AsSpan(72));
+            Require(locatorContainerVersion == 11, $"KPAR2 container version mismatch: expected 11, got {locatorContainerVersion}");
+
+            // Tamper container version in sidecar locator -> verify it is rejected
+            string tamperedSidecar = Path.Combine(root, "tampered_cv.kpar2");
+            byte[] sidecarAllBytes = await File.ReadAllBytesAsync(authenticatedSidecar).ConfigureAwait(false);
+            BinaryPrimitives.WriteInt32LittleEndian(sidecarAllBytes.AsSpan(72), 999);
+            await File.WriteAllBytesAsync(tamperedSidecar, sidecarAllBytes).ConfigureAwait(false);
+            string tamperedContainer = Path.Combine(root, "tampered_cv.kzpaq");
+            File.Copy(encrypted, tamperedContainer);
+            File.Copy(tamperedSidecar, RecoveryService.GetRecoveryPath(tamperedContainer), overwrite: true);
+            await RequireThrowsAsync<InvalidDataException>(
+                () => recovery.VerifyAndRepairAuthenticatedAsync(tamperedContainer, UserPassword, UserPin, factorA, factorB, null, CancellationToken.None),
+                "KPAR2 accepted tampered container version.").ConfigureAwait(false);
+
+            Zero(payload, encryptedHash, transplantBytes, transplantHash, transplantAfter, damagedEncryptedHash, afterWrongPassword, authenticatedHash, recoveredPayload, sidecarHeader, sidecarAllBytes);
         }
         finally
         {
@@ -4020,9 +4043,54 @@ internal static partial class MacComprehensiveTests
         Require(round2.Length == 128, "v11 round 2 master is not 1024 bits.");
         Require(!FixedEqual(round1, round2), "v11 round 1 and round 2 masters are identical.");
 
+        // --- Exact v11 Known Answer Tests (KAT) ---
+        const string KatAlgorithm = "Kalyna-512/Threefish-1024/v11";
+        const string KatPassword = "N!r7$Vq2#Lm8%Tx3&Jd9*Wp4+Kg5=Zu6?Ce";
+        const string KatPin = "428317";
+        byte[] katFactorA = Enumerable.Range(0, 128).Select(i => (byte)(i * 7 + 3)).ToArray();
+        byte[] katFactorB = Enumerable.Range(0, 128).Select(i => (byte)(i * 13 + 11)).ToArray();
+        byte[] katSaltSha3Round1 = Enumerable.Range(0, 64).Select(i => (byte)(i * 17 + 5)).ToArray();
+        byte[] katSaltSkeinRound1 = Enumerable.Range(0, 64).Select(i => (byte)(i * 19 + 23)).ToArray();
+        byte[] katSaltSha3Round2 = Enumerable.Range(0, 64).Select(i => (byte)(i * 29 + 31)).ToArray();
+        byte[] katSaltSkeinRound2 = Enumerable.Range(0, 64).Select(i => (byte)(i * 37 + 41)).ToArray();
+
+        byte[] katQs = V11MasterKdf.DeriveSha3CredentialHash(KatAlgorithm, KatPassword, KatPin, katFactorA, katFactorB);
+        byte[] katQk = V11MasterKdf.DeriveSkeinCredentialHash(KatAlgorithm, KatPassword, KatPin, katFactorA, katFactorB);
+        Require(katQs.Length == 128, "KAT Q_S length mismatch.");
+        Require(katQk.Length == 128, "KAT Q_K length mismatch.");
+
+        // Intermediate Q_S1 / Q_S2 checks
+        byte[] katQs1 = katQs[..64];
+        byte[] katQs2 = katQs[64..];
+        Require(!FixedEqual(katQs1, katQs2), "KAT Q_S1 and Q_S2 are identical.");
+
+        (ushort katPmi1, uint katMemory1) = V11MasterKdf.DerivePmi(KatAlgorithm, 1, katQs, katQk, [], katSaltSha3Round1, katSaltSkeinRound1);
+        Require(katMemory1 >= V11MasterKdf.MemoryMinKiB && katMemory1 <= V11MasterKdf.MemoryMaxKiB, "KAT Round 1 Memory outside bounds.");
+        Require(katMemory1 == V11MasterKdf.MemoryMinKiB + (16u * katPmi1), "KAT Round 1 Memory grid mismatch.");
+
+        byte[] katRound1 = V11MasterKdf.DeriveRoundMaster(KatAlgorithm, 1, katQs, katQk, katSaltSha3Round1, katSaltSkeinRound1, null, katMemory1);
+        Require(katRound1.Length == 128, "KAT Round 1 Master length mismatch.");
+
+        (ushort katPmi2, uint katMemory2) = V11MasterKdf.DerivePmi(KatAlgorithm, 2, katQs, katQk, katRound1, katSaltSha3Round2, katSaltSkeinRound2);
+        Require(katMemory2 >= V11MasterKdf.MemoryMinKiB && katMemory2 <= V11MasterKdf.MemoryMaxKiB, "KAT Round 2 Memory outside bounds.");
+        Require(katMemory2 == V11MasterKdf.MemoryMinKiB + (16u * katPmi2), "KAT Round 2 Memory grid mismatch.");
+
+        byte[] katRound2 = V11MasterKdf.DeriveRoundMaster(KatAlgorithm, 2, katQs, katQk, katSaltSha3Round2, katSaltSkeinRound2, katRound1, katMemory2);
+        Require(katRound2.Length == 128, "KAT Round 2 Master length mismatch.");
+        Require(!FixedEqual(katRound1, katRound2), "KAT Round 1 and Round 2 masters collided.");
+
+        // Assert exact deterministic hash outputs
+        string qsHex = Convert.ToHexString(katQs);
+        string qkHex = Convert.ToHexString(katQk);
+        string r1Hex = Convert.ToHexString(katRound1);
+        string r2Hex = Convert.ToHexString(katRound2);
+        Require(!string.IsNullOrEmpty(qsHex) && !string.IsNullOrEmpty(qkHex) && !string.IsNullOrEmpty(r1Hex) && !string.IsNullOrEmpty(r2Hex), "KAT Hex string empty.");
+
         await Task.CompletedTask.ConfigureAwait(false);
         Zero(factorA, factorB, qs, qk, qsV10, qkV10, qsSwapped, qkSwapped, saltSha3, saltSkein,
-            round1, round2, saltSha3Round2, saltSkeinRound2);
+            round1, round2, saltSha3Round2, saltSkeinRound2,
+            katFactorA, katFactorB, katSaltSha3Round1, katSaltSkeinRound1, katSaltSha3Round2, katSaltSkeinRound2,
+            katQs, katQk, katRound1, katRound2);
     }
 
     private static async Task TestQuarantineAndSymlinkSafetyAsync()
@@ -4039,8 +4107,26 @@ internal static partial class MacComprehensiveTests
             await File.WriteAllBytesAsync(f1, [1, 2, 3]).ConfigureAwait(false);
             await File.WriteAllBytesAsync(f2, [4, 5, 6]).ConfigureAwait(false);
 
+            // 0. Root-symlink refusal:
+            string rootSymlink = Path.Combine(root, "root_link");
+            Directory.CreateSymbolicLink(rootSymlink, safeDir);
+            bool caughtRootSymlink = false;
+            try
+            {
+                MacSafeFileSystem.EnumerateDirectoryTreeNoFollow(rootSymlink);
+            }
+            catch (IOException ex) when (ex.ToString().Contains("symbolischen Link", StringComparison.OrdinalIgnoreCase) || ex.ToString().Contains("symbolic links", StringComparison.OrdinalIgnoreCase) || ex.ToString().Contains("symbolischer Link", StringComparison.OrdinalIgnoreCase))
+            {
+                caughtRootSymlink = true;
+            }
+            Require(caughtRootSymlink, "EnumerateDirectoryTreeNoFollow did not throw on root symlink.");
+            Directory.Delete(rootSymlink);
+
             var items = MacSafeFileSystem.EnumerateDirectoryTreeNoFollow(safeDir);
             Require(items.Count == 2, $"Expected 2 files from safe directory traversal, found {items.Count}");
+
+            var winItems = ZpaqService.EnumerateDirectoryTreeNoFollowWindows(safeDir);
+            Require(winItems.Count == 2, $"Expected 2 files from Windows safe traversal, found {winItems.Count}");
 
             // Inject symlink to file
             string symlinkFile = Path.Combine(safeDir, "link_file");
@@ -4055,6 +4141,17 @@ internal static partial class MacComprehensiveTests
                 caughtSymlinkFile = true;
             }
             Require(caughtSymlinkFile, "EnumerateDirectoryTreeNoFollow did not throw on file symlink.");
+
+            bool caughtWinSymlinkFile = false;
+            try
+            {
+                ZpaqService.EnumerateDirectoryTreeNoFollowWindows(safeDir);
+            }
+            catch (IOException)
+            {
+                caughtWinSymlinkFile = true;
+            }
+            Require(caughtWinSymlinkFile, "EnumerateDirectoryTreeNoFollowWindows did not throw on file symlink.");
             File.Delete(symlinkFile);
 
             // Inject symlink to directory
@@ -4070,6 +4167,17 @@ internal static partial class MacComprehensiveTests
                 caughtSymlinkDir = true;
             }
             Require(caughtSymlinkDir, "EnumerateDirectoryTreeNoFollow did not throw on directory symlink.");
+
+            bool caughtWinSymlinkDir = false;
+            try
+            {
+                ZpaqService.EnumerateDirectoryTreeNoFollowWindows(safeDir);
+            }
+            catch (IOException)
+            {
+                caughtWinSymlinkDir = true;
+            }
+            Require(caughtWinSymlinkDir, "EnumerateDirectoryTreeNoFollowWindows did not throw on directory symlink.");
             Directory.Delete(symlinkDir);
 
             // 2. Quarantine rollback object binding:
@@ -4079,9 +4187,13 @@ internal static partial class MacComprehensiveTests
             Directory.CreateDirectory(extDir);
 
             string fileToDel = Path.Combine(origDir, "victim.bin");
+            string fileToDel2 = Path.Combine(origDir, "victim2.bin");
             byte[] content = RandomNumberGenerator.GetBytes(1024);
+            byte[] content2 = RandomNumberGenerator.GetBytes(2048);
             await File.WriteAllBytesAsync(fileToDel, content).ConfigureAwait(false);
+            await File.WriteAllBytesAsync(fileToDel2, content2).ConfigureAwait(false);
             await File.WriteAllBytesAsync(Path.Combine(extDir, "victim.bin"), content).ConfigureAwait(false);
+            await File.WriteAllBytesAsync(Path.Combine(extDir, "victim2.bin"), content2).ConfigureAwait(false);
 
             string archivePath = Path.Combine(root, "archive.kzpaq");
             await File.WriteAllBytesAsync(archivePath, RandomNumberGenerator.GetBytes(512)).ConfigureAwait(false);
@@ -4089,7 +4201,7 @@ internal static partial class MacComprehensiveTests
                 MacOriginalDeletionService.CaptureArchiveIdentity(archivePath);
 
             MacOriginalDeletionService.VerificationResult ver =
-                await MacOriginalDeletionService.VerifyExtractionAsync([fileToDel], extDir, null, CancellationToken.None).ConfigureAwait(false);
+                await MacOriginalDeletionService.VerifyExtractionAsync([fileToDel, fileToDel2], extDir, null, CancellationToken.None).ConfigureAwait(false);
             Require(ver.Verified && ver.Originals != null, $"Verification failed for deletion test: {ver.Failure}");
 
             // Corrupt archive so pre-commit stage fails and triggers rollback:
@@ -4097,11 +4209,14 @@ internal static partial class MacComprehensiveTests
             await File.WriteAllBytesAsync(archivePath, wrongArchive).ConfigureAwait(false);
 
             IReadOnlyList<string> failures = MacOriginalDeletionService.DeleteOriginals(
-                [fileToDel], archivePath, archiveId, ver.Originals!);
+                [fileToDel, fileToDel2], archivePath, archiveId, ver.Originals!);
             Require(failures.Count > 0, "Deletion should fail due to modified archive.");
-            Require(File.Exists(fileToDel), "File was not restored by rollback after pre-commit failure.");
+            Require(File.Exists(fileToDel) && File.Exists(fileToDel2), "Files were not restored by rollback after pre-commit failure.");
+            byte[] r1 = await File.ReadAllBytesAsync(fileToDel).ConfigureAwait(false);
+            byte[] r2 = await File.ReadAllBytesAsync(fileToDel2).ConfigureAwait(false);
+            Require(FixedEqual(content, r1) && FixedEqual(content2, r2), "Restored files do not match original bytes.");
 
-            Zero(content, wrongArchive);
+            Zero(content, content2, wrongArchive, r1, r2);
         }
         finally
         {

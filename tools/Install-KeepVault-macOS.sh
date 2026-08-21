@@ -473,29 +473,28 @@ fi
 # Record this installation machine-wide as part of the commit transaction
 installed_version=${candidate_version}
 
-if (( installed_version > recorded_version )) || [[ ! -f ${anchor_path} ]]; then
-  anchor_updated=1
-  anchor_update_status=0
-  ANCHOR_DIRECTORY=${anchor_directory} ANCHOR_PATH=${anchor_path} ANCHOR_VERSION=${installed_version} \
-    osascript <<'APPLESCRIPT' || anchor_update_status=$?
-set anchorDirectory to system attribute "ANCHOR_DIRECTORY"
+# 6. UPDATE ROLLBACK ANCHOR
+update_anchor=0
+if (( ! had_existing_anchor )) || (( installed_version > recorded_version )) || [[ ! -f ${anchor_path} ]]; then
+  update_anchor=1
+fi
+
+if (( update_anchor )); then
+  ANCHOR_PATH=${anchor_path} NEW_VERSION=${installed_version} osascript <<'APPLESCRIPT' || {
 set anchorPath to system attribute "ANCHOR_PATH"
-set anchorVersion to system attribute "ANCHOR_VERSION"
-set tempPath to anchorPath & ".tmp." & (do shell script "echo $$")
-set commandText to "/bin/mkdir -p " & quoted form of anchorDirectory & ¬
-  " && /usr/sbin/chown root:wheel " & quoted form of anchorDirectory & ¬
-  " && /bin/chmod 0755 " & quoted form of anchorDirectory & ¬
-  " && /usr/bin/printf '%s' " & quoted form of anchorVersion & " > " & quoted form of tempPath & ¬
-  " && /usr/sbin/chown root:wheel " & quoted form of tempPath & ¬
-  " && /bin/chmod 0644 " & quoted form of tempPath & ¬
-  " && /bin/mv -f " & quoted form of tempPath & " " & quoted form of anchorPath
+set newVersion to system attribute "NEW_VERSION"
+set commandText to "/bin/mkdir -p " & quoted form of (do shell script "dirname " & quoted form of anchorPath) & " && /usr/bin/printf '%s' " & quoted form of newVersion & " > " & quoted form of anchorPath & " && /usr/sbin/chown 0:0 " & quoted form of anchorPath & " && /bin/chmod 0644 " & quoted form of anchorPath
 do shell script commandText with administrator privileges
 APPLESCRIPT
-  anchor_owner=$(stat -f '%u' ${anchor_path} 2>/dev/null || print -1)
+    print -u2 "Failed to update machine-wide rollback anchor to version ${installed_version}"
+    exit 1
+  }
+  anchor_updated=1
+  anchor_uid=$(stat -f '%u' ${anchor_path} 2>/dev/null || print -1)
+  anchor_links=$(stat -f '%l' ${anchor_path} 2>/dev/null || print 0)
   anchor_mode=$(stat -f '%Lp' ${anchor_path} 2>/dev/null || print 0)
-  if (( anchor_update_status != 0 || anchor_owner != 0 || (8#${anchor_mode} & 8#022) != 0 )) || [[ $(<${anchor_path}) != ${installed_version} ]]; then
-    print -u2 'The machine-wide installation record could not be written or has insecure permissions; rolling back installation.'
-    execute_rollback
+  if (( anchor_uid != 0 || anchor_links != 1 || (8#${anchor_mode} & 8#022) != 0 )); then
+    print -u2 "Rollback anchor has insecure permissions or ownership after update: ${anchor_path}"
     exit 1
   fi
   print "rollback_anchor=${anchor_path} (${installed_version})"
@@ -507,37 +506,84 @@ fi
 transaction_committed=1
 
 recovery_path=''
+post_commit_recovery_failed=0
+preserve_install_root=0
+retained_paths=()
+
 if [[ -d ${backup_path} && ! -L ${backup_path} ]] || [[ -d ${scanner_backup_path} && ! -L ${scanner_backup_path} ]]; then
   trash_dir=${HOME}/.Trash
   if [[ ! -d ${trash_dir} ]]; then
     mkdir -p ${trash_dir} 2>/dev/null || true
   fi
-  recovery_dir=$(mktemp -d "${trash_dir}/Keep Vault previous.XXXXXXXX" 2>/dev/null || mktemp -d "${TMPDIR:-/tmp}/Keep Vault previous.XXXXXXXX")
 
-  if [[ -d ${backup_path} && ! -L ${backup_path} ]]; then
-    if ! mv ${backup_path} ${recovery_dir}/Keep\ Vault.app 2>/dev/null; then
-      print -u2 "Warning: Could not move previous Keep Vault backup to ${recovery_dir}; backup remains at ${backup_path}"
-    fi
-    for launcher_sidecar_suffix in .sha3 .skein .khsig .sha3.khsig .skein.khsig; do
-      old_sidecar=${backup_dir}/Keep\ Vault.app.launcher${launcher_sidecar_suffix}
-      if [[ -f ${old_sidecar} && ! -L ${old_sidecar} ]]; then
-        mv ${old_sidecar} ${recovery_dir}/Keep\ Vault.app.launcher${launcher_sidecar_suffix} 2>/dev/null || true
-      fi
-    done
+  recovery_dir=''
+  if [[ -d ${trash_dir} ]] && recovery_dir=$(mktemp -d "${trash_dir}/Keep Vault previous.XXXXXXXX" 2>/dev/null); then
+    :
+  elif recovery_dir=$(mktemp -d "${TMPDIR:-/tmp}/Keep Vault previous.XXXXXXXX" 2>/dev/null); then
+    :
+  else
+    recovery_dir=''
   fi
 
-  if [[ -d ${scanner_backup_path} && ! -L ${scanner_backup_path} ]]; then
-    if ! mv ${scanner_backup_path} ${recovery_dir}/QR-Scanner.app 2>/dev/null; then
-      print -u2 "Warning: Could not move previous QR-Scanner backup to ${recovery_dir}; backup remains at ${scanner_backup_path}"
-    fi
-    for scanner_sidecar_suffix in .sha3 .skein .khsig .sha3.khsig .skein.khsig; do
-      old_scanner_sidecar=${backup_dir}/QR-Scanner.app${scanner_sidecar_suffix}
-      if [[ -f ${old_scanner_sidecar} && ! -L ${old_scanner_sidecar} ]]; then
-        mv ${old_scanner_sidecar} ${recovery_dir}/QR-Scanner.app${scanner_sidecar_suffix} 2>/dev/null || true
+  if [[ -z ${recovery_dir} || ! -d ${recovery_dir} ]]; then
+    print -u2 "Warning: Could not create a destination directory for previous version backups; preserving backups in ${backup_dir}"
+    post_commit_recovery_failed=1
+    preserve_install_root=1
+    [[ -d ${backup_path} ]] && retained_paths+=(${backup_path})
+    [[ -d ${scanner_backup_path} ]] && retained_paths+=(${scanner_backup_path})
+  else
+    if [[ -d ${backup_path} && ! -L ${backup_path} ]]; then
+      if mv ${backup_path} ${recovery_dir}/Keep\ Vault.app 2>/dev/null; then
+        :
+      else
+        print -u2 "Warning: Could not move previous Keep Vault backup to ${recovery_dir}; backup remains at ${backup_path}"
+        post_commit_recovery_failed=1
+        preserve_install_root=1
+        retained_paths+=(${backup_path})
       fi
-    done
+      for launcher_sidecar_suffix in .sha3 .skein .khsig .sha3.khsig .skein.khsig; do
+        old_sidecar=${backup_dir}/Keep\ Vault.app.launcher${launcher_sidecar_suffix}
+        if [[ -f ${old_sidecar} && ! -L ${old_sidecar} ]]; then
+          if mv ${old_sidecar} ${recovery_dir}/Keep\ Vault.app.launcher${launcher_sidecar_suffix} 2>/dev/null; then
+            :
+          else
+            print -u2 "Warning: Could not move launcher signature ${launcher_sidecar_suffix} to ${recovery_dir}; remains at ${old_sidecar}"
+            post_commit_recovery_failed=1
+            preserve_install_root=1
+            retained_paths+=(${old_sidecar})
+          fi
+        fi
+      done
+    fi
+
+    if [[ -d ${scanner_backup_path} && ! -L ${scanner_backup_path} ]]; then
+      if mv ${scanner_backup_path} ${recovery_dir}/QR-Scanner.app 2>/dev/null; then
+        :
+      else
+        print -u2 "Warning: Could not move previous QR-Scanner backup to ${recovery_dir}; backup remains at ${scanner_backup_path}"
+        post_commit_recovery_failed=1
+        preserve_install_root=1
+        retained_paths+=(${scanner_backup_path})
+      fi
+      for scanner_sidecar_suffix in .sha3 .skein .khsig .sha3.khsig .skein.khsig; do
+        old_scanner_sidecar=${backup_dir}/QR-Scanner.app${scanner_sidecar_suffix}
+        if [[ -f ${old_scanner_sidecar} && ! -L ${old_scanner_sidecar} ]]; then
+          if mv ${old_scanner_sidecar} ${recovery_dir}/QR-Scanner.app${scanner_sidecar_suffix} 2>/dev/null; then
+            :
+          else
+            print -u2 "Warning: Could not move scanner signature ${scanner_sidecar_suffix} to ${recovery_dir}; remains at ${old_scanner_sidecar}"
+            post_commit_recovery_failed=1
+            preserve_install_root=1
+            retained_paths+=(${old_scanner_sidecar})
+          fi
+        fi
+      done
+    fi
+
+    if (( post_commit_recovery_failed == 0 )); then
+      recovery_path=${recovery_dir}
+    fi
   fi
-  recovery_path=${recovery_dir}
 fi
 
 launch_services='/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister'
@@ -583,6 +629,10 @@ APPLESCRIPT
 fi
 
 print "installed_app=${destination}"
-[[ -z ${recovery_path} ]] || print "previous_version_recoverable_at=${recovery_path}"
-
-
+if [[ -n ${recovery_path} ]]; then
+  print "previous_version_recoverable_at=${recovery_path}"
+elif (( ${#retained_paths[@]} > 0 )); then
+  for ret in ${retained_paths[@]}; do
+    print "previous_version_retained_at=${ret}"
+  done
+fi

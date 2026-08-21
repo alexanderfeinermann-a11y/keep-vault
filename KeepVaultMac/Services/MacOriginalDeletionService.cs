@@ -464,10 +464,20 @@ internal sealed class MacOriginalDeletionService
                 MacFileIdentity sourceIdentity;
                 using (SafeFileHandle parentHandle = MacSafeFileSystem.OpenDirectoryHandle(canonicalParent))
                 {
+                    MacFileIdentity currentParentIdentity = MacSafeFileSystem.GetIdentity(parentHandle);
+                    if (!currentParentIdentity.SameObject(context.ParentIdentity))
+                    {
+                        throw new InvalidOperationException($"Elternverzeichnis wurde vor Quarantänisierung ausgetauscht: {path}");
+                    }
+
                     sourceIdentity = MacSafeFileSystem.GetIdentityAt(parentHandle, fileName);
                     // Atomically move from parent directory to quarantine directory
                     MacSafeFileSystem.RenameAt(parentHandle, fileName, context.QuarantineDirHandle, fileName);
                 }
+
+                // Register rollback entry immediately following successful rename
+                var item = new QuarantinedItem(path, fileName, context, sourceIdentity);
+                quarantined.Add(item);
 
                 // Verify identity after move immediately
                 MacFileIdentity qIdentity = MacSafeFileSystem.GetIdentityAt(context.QuarantineDirHandle, fileName);
@@ -476,9 +486,7 @@ internal sealed class MacOriginalDeletionService
                     throw new InvalidOperationException($"Quarantänisierte Datei weicht vom Original ab für {path}");
                 }
 
-                // Register rollback entry immediately following successful rename and proven identity
-                var item = new QuarantinedItem(path, fileName, context, qIdentity);
-                quarantined.Add(item);
+                item.Identity = qIdentity;
             }
 
             // Stage 2: Descriptor-bound verification of quarantined files before committing to unlink

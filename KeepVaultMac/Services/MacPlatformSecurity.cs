@@ -568,10 +568,11 @@ internal static partial class MacSafeFileSystem
     internal static List<(string FullPath, string RelativePath)> EnumerateDirectoryTreeNoFollow(string rootDirectory)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(rootDirectory);
-        string canonicalRoot = ResolveExistingRealPath(rootDirectory);
-        using SafeFileHandle rootHandle = OpenDirectoryHandle(canonicalRoot);
+        string fullRoot = Path.TrimEndingDirectorySeparator(Path.GetFullPath(rootDirectory));
+        using SafeFileHandle rootHandle = OpenDirectoryHandle(fullRoot);
+        RequirePathStillNamesHandle(rootHandle, fullRoot);
         var results = new List<(string FullPath, string RelativePath)>();
-        EnumerateDirectoryTreeNoFollowDescriptor(rootHandle, canonicalRoot, string.Empty, results);
+        EnumerateDirectoryTreeNoFollowDescriptor(rootHandle, fullRoot, string.Empty, results);
         return results;
     }
 
