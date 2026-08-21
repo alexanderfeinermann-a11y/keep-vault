@@ -565,6 +565,122 @@ internal static partial class MacSafeFileSystem
         }
     }
 
+    internal static List<(string FullPath, string RelativePath)> EnumerateDirectoryTreeNoFollow(string rootDirectory)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(rootDirectory);
+        string canonicalRoot = ResolveExistingRealPath(rootDirectory);
+        using SafeFileHandle rootHandle = OpenDirectoryHandle(canonicalRoot);
+        var results = new List<(string FullPath, string RelativePath)>();
+        EnumerateDirectoryTreeNoFollowDescriptor(rootHandle, canonicalRoot, string.Empty, results);
+        return results;
+    }
+
+    private static void EnumerateDirectoryTreeNoFollowDescriptor(
+        SafeFileHandle dirHandle,
+        string currentFullPath,
+        string relativePrefix,
+        List<(string FullPath, string RelativePath)> results)
+    {
+        ArgumentNullException.ThrowIfNull(dirHandle);
+        bool added = false;
+        try
+        {
+            dirHandle.DangerousAddRef(ref added);
+            int fd = checked((int)dirHandle.DangerousGetHandle());
+            int dupFd = Dup(fd);
+            if (dupFd < 0)
+            {
+                throw new Win32Exception(Marshal.GetLastPInvokeError(), "macOS could not dup directory descriptor.");
+            }
+            nint dirp = FdOpenDir(dupFd);
+            if (dirp == 0)
+            {
+                CloseDescriptor(dupFd);
+                throw new Win32Exception(Marshal.GetLastPInvokeError(), "macOS fdopendir failed.");
+            }
+            try
+            {
+                while (true)
+                {
+                    nint entryPtr = ReadDir(dirp);
+                    if (entryPtr == 0)
+                    {
+                        break;
+                    }
+                    unsafe
+                    {
+                        var entry = (DarwinDirent*)entryPtr;
+                        string name = Marshal.PtrToStringUTF8((nint)entry->d_name, entry->d_namlen);
+                        if (name is "." or "..")
+                        {
+                            continue;
+                        }
+
+                        string itemRelPath = string.IsNullOrEmpty(relativePrefix) ? name : Path.Combine(relativePrefix, name);
+                        string itemFullPath = Path.Combine(currentFullPath, name);
+
+                        if (entry->d_type == 10 /* DT_LNK */)
+                        {
+                            throw new IOException($"Die Eingabe enthält einen symbolischen Link: {itemFullPath}");
+                        }
+
+                        bool isDirectory = entry->d_type == 4 /* DT_DIR */;
+                        bool isRegular = entry->d_type == 8 /* DT_REG */;
+
+                        if (entry->d_type == 0 /* DT_UNKNOWN */ || (!isDirectory && !isRegular))
+                        {
+                            if (FStatAt(fd, name, out DarwinStat status, 0x0020 /* AT_SYMLINK_NOFOLLOW */) == 0)
+                            {
+                                uint fileType = (uint)(status.Mode & 0xF000 /* S_IFMT */);
+                                if (fileType == 0xA000 /* S_IFLNK */)
+                                {
+                                    throw new IOException($"Die Eingabe enthält einen symbolischen Link: {itemFullPath}");
+                                }
+                                isDirectory = fileType == 0x4000 /* S_IFDIR */;
+                                isRegular = fileType == 0x8000 /* S_IFREG */;
+                            }
+                        }
+
+                        if (isDirectory)
+                        {
+                            int subFd = PInvokeOpenAt(fd, name, OpenReadOnly | OpenDirectory | OpenCloseOnExec | OpenNoFollowAny, 0);
+                            if (subFd < 0)
+                            {
+                                int err = Marshal.GetLastPInvokeError();
+                                throw new IOException(
+                                    $"macOS could not open subdirectory '{itemFullPath}' without following symlinks.",
+                                    new Win32Exception(err));
+                            }
+                            using (var subHandle = new SafeFileHandle(subFd, ownsHandle: true))
+                            {
+                                EnumerateDirectoryTreeNoFollowDescriptor(subHandle, itemFullPath, itemRelPath, results);
+                            }
+                        }
+                        else if (isRegular)
+                        {
+                            results.Add((itemFullPath, itemRelPath));
+                        }
+                        else
+                        {
+                            throw new IOException($"Eingabe ist weder eine reguläre Datei noch ein Verzeichnis: {itemFullPath}");
+                        }
+                    }
+                }
+            }
+            finally
+            {
+                CloseDir(dirp);
+            }
+        }
+        finally
+        {
+            if (added)
+            {
+                dirHandle.DangerousRelease();
+            }
+        }
+    }
+
     internal static void DeleteDirectoryContentsDescriptor(SafeFileHandle dirHandle)
     {
         ArgumentNullException.ThrowIfNull(dirHandle);

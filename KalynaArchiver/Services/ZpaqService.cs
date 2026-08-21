@@ -460,16 +460,37 @@ public sealed partial class ZpaqService
         {
             if (File.Exists(full))
             {
+#if KEEPVAULT_MACOS
+                using (var _ = MacSafeFileSystem.OpenReadNoSymlinks(full)) { }
+#else
+                if (new FileInfo(full).LinkTarget is not null)
+                {
+                    throw new IOException($"Die Eingabe enthält einen symbolischen Link: {full}");
+                }
+#endif
                 string rel = Path.GetRelativePath(workingDirectory, full);
                 map[rel] = full;
             }
             else if (Directory.Exists(full))
             {
+#if KEEPVAULT_MACOS
+                var files = MacSafeFileSystem.EnumerateDirectoryTreeNoFollow(full);
+                foreach (var (filePath, _) in files)
+                {
+                    string rel = Path.GetRelativePath(workingDirectory, filePath);
+                    map[rel] = filePath;
+                }
+#else
                 foreach (string file in Directory.EnumerateFiles(full, "*", SearchOption.AllDirectories))
                 {
+                    if (new FileInfo(file).LinkTarget is not null)
+                    {
+                        throw new IOException($"Die Eingabe enthält einen symbolischen Link: {file}");
+                    }
                     string rel = Path.GetRelativePath(workingDirectory, file);
                     map[rel] = file;
                 }
+#endif
             }
         }
 

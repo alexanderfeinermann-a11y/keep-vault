@@ -983,8 +983,6 @@ internal sealed class GeneratedArchiveEntropy : IDisposable
     {
         ArgumentNullException.ThrowIfNull(firstPassword);
         ArgumentNullException.ThrowIfNull(secondPassword);
-        _firstFactor = V10KeyDerivation.ParseFactor(firstPassword, nameof(firstPassword));
-        _secondFactor = V10KeyDerivation.ParseFactor(secondPassword, nameof(secondPassword));
         _salt = salt ?? throw new ArgumentNullException(nameof(salt));
         _fullNonce = fullNonce ?? throw new ArgumentNullException(nameof(fullNonce));
         _secondSalt = secondSalt ?? throw new ArgumentNullException(nameof(secondSalt));
@@ -1000,6 +998,25 @@ internal sealed class GeneratedArchiveEntropy : IDisposable
         if (CryptographicOperations.FixedTimeEquals(_salt.Bytes, _secondSalt.Bytes))
         {
             throw new CryptographicException("Both prepared Argon2id rounds carry the same salt.");
+        }
+
+        LockedSensitiveBuffer? first = null;
+        LockedSensitiveBuffer? second = null;
+        try
+        {
+            first = V10KeyDerivation.ParseFactor(firstPassword, nameof(firstPassword));
+            second = V10KeyDerivation.ParseFactor(secondPassword, nameof(secondPassword));
+
+            _firstFactor = first;
+            first = null; // ownership transferred to this instance
+
+            _secondFactor = second;
+            second = null; // ownership transferred to this instance
+        }
+        finally
+        {
+            second?.Dispose();
+            first?.Dispose();
         }
     }
 

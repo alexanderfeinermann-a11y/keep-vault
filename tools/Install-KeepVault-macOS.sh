@@ -509,26 +509,31 @@ transaction_committed=1
 recovery_path=''
 if [[ -d ${backup_path} && ! -L ${backup_path} ]] || [[ -d ${scanner_backup_path} && ! -L ${scanner_backup_path} ]]; then
   trash_dir=${HOME}/.Trash
-  mkdir -p ${trash_dir}
-  recovery_dir=${trash_dir}/Keep\ Vault\ previous\ $(date -u +%Y%m%dT%H%M%SZ)
-  mkdir -p ${recovery_dir}
+  if [[ ! -d ${trash_dir} ]]; then
+    mkdir -p ${trash_dir} 2>/dev/null || true
+  fi
+  recovery_dir=$(mktemp -d "${trash_dir}/Keep Vault previous.XXXXXXXX" 2>/dev/null || mktemp -d "${TMPDIR:-/tmp}/Keep Vault previous.XXXXXXXX")
 
   if [[ -d ${backup_path} && ! -L ${backup_path} ]]; then
-    mv ${backup_path} ${recovery_dir}/Keep\ Vault.app
+    if ! mv ${backup_path} ${recovery_dir}/Keep\ Vault.app 2>/dev/null; then
+      print -u2 "Warning: Could not move previous Keep Vault backup to ${recovery_dir}; backup remains at ${backup_path}"
+    fi
     for launcher_sidecar_suffix in .sha3 .skein .khsig .sha3.khsig .skein.khsig; do
       old_sidecar=${backup_dir}/Keep\ Vault.app.launcher${launcher_sidecar_suffix}
       if [[ -f ${old_sidecar} && ! -L ${old_sidecar} ]]; then
-        mv ${old_sidecar} ${recovery_dir}/Keep\ Vault.app.launcher${launcher_sidecar_suffix}
+        mv ${old_sidecar} ${recovery_dir}/Keep\ Vault.app.launcher${launcher_sidecar_suffix} 2>/dev/null || true
       fi
     done
   fi
 
   if [[ -d ${scanner_backup_path} && ! -L ${scanner_backup_path} ]]; then
-    mv ${scanner_backup_path} ${recovery_dir}/QR-Scanner.app
+    if ! mv ${scanner_backup_path} ${recovery_dir}/QR-Scanner.app 2>/dev/null; then
+      print -u2 "Warning: Could not move previous QR-Scanner backup to ${recovery_dir}; backup remains at ${scanner_backup_path}"
+    fi
     for scanner_sidecar_suffix in .sha3 .skein .khsig .sha3.khsig .skein.khsig; do
       old_scanner_sidecar=${backup_dir}/QR-Scanner.app${scanner_sidecar_suffix}
       if [[ -f ${old_scanner_sidecar} && ! -L ${old_scanner_sidecar} ]]; then
-        mv ${old_scanner_sidecar} ${recovery_dir}/QR-Scanner.app${scanner_sidecar_suffix}
+        mv ${old_scanner_sidecar} ${recovery_dir}/QR-Scanner.app${scanner_sidecar_suffix} 2>/dev/null || true
       fi
     done
   fi
@@ -536,7 +541,9 @@ if [[ -d ${backup_path} && ! -L ${backup_path} ]] || [[ -d ${scanner_backup_path
 fi
 
 launch_services='/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister'
-${launch_services} -f ${destination}
+if [[ -x ${launch_services} ]]; then
+  ${launch_services} -f ${destination} 2>/dev/null || true
+fi
 
 if (( create_desktop_alias )); then
   temporary_alias_name=.Keep\ Vault.$RANDOM.$$.alias
@@ -555,8 +562,8 @@ APPLESCRIPT
   if (( alias_creation_status != 0 )) || [[ ! -f ${temporary_alias_path} || -L ${temporary_alias_path} || $(file -b ${temporary_alias_path}) != 'MacOS Alias file' ]]; then
     print -u2 'Warning: Finder did not create a valid Keep Vault alias.'
   else
-    mv -f ${temporary_alias_path} ${alias_path}
-    resolved_alias=$(ALIAS_PATH=${alias_path} osascript <<'APPLESCRIPT'
+    if mv -f ${temporary_alias_path} ${alias_path} 2>/dev/null; then
+      resolved_alias=$(ALIAS_PATH=${alias_path} osascript <<'APPLESCRIPT' 2>/dev/null || print ''
 set aliasPath to system attribute "ALIAS_PATH"
 tell application "Finder"
   set originalItem to original item of (POSIX file aliasPath as alias)
@@ -564,10 +571,13 @@ tell application "Finder"
 end tell
 APPLESCRIPT
 )
-    if [[ ${resolved_alias%/} == ${destination%/} ]]; then
-      print "desktop_alias=${alias_path}"
+      if [[ ${resolved_alias%/} == ${destination%/} ]]; then
+        print "desktop_alias=${alias_path}"
+      else
+        print -u2 'Warning: The Desktop Finder alias does not resolve to the installed Keep Vault app.'
+      fi
     else
-      print -u2 'Warning: The Desktop Finder alias does not resolve to the installed Keep Vault app.'
+      print -u2 'Warning: Could not move temporary alias to Desktop.'
     fi
   fi
 fi
