@@ -174,15 +174,34 @@ internal static class Sha3HkdfExpand
             throw new ArgumentOutOfRangeException(nameof(outputBytes));
         }
 
+        byte[] output = new byte[outputBytes];
+        Expand(pseudoRandomKey, info, output);
+        return output;
+    }
+
+    public static void Expand(ReadOnlySpan<byte> pseudoRandomKey, ReadOnlySpan<byte> info, Span<byte> destination)
+    {
+        if (destination.IsEmpty)
+        {
+            throw new ArgumentOutOfRangeException(nameof(destination));
+        }
+
         byte[] prk = pseudoRandomKey.ToArray();
         byte[] infoBytes = info.ToArray();
         try
         {
             var generator = new HkdfBytesGenerator(new Sha3Digest(512));
             generator.Init(HkdfParameters.SkipExtractParameters(prk, infoBytes));
-            byte[] output = new byte[outputBytes];
-            generator.GenerateBytes(output, 0, outputBytes);
-            return output;
+            byte[] output = new byte[destination.Length];
+            try
+            {
+                generator.GenerateBytes(output, 0, destination.Length);
+                output.CopyTo(destination);
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(output);
+            }
         }
         finally
         {

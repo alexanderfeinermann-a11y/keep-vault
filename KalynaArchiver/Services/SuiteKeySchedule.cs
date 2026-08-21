@@ -150,61 +150,63 @@ internal static class SuiteKeySchedule
     /// <summary>
     /// The full 1024-bit role value, before any truncation.
     /// </summary>
-    public static byte[] DeriveRoleValue(ReadOnlySpan<byte> master, ReadOnlySpan<byte> roleContext)
+    public static void DeriveRoleValue(ReadOnlySpan<byte> master, ReadOnlySpan<byte> roleContext, Span<byte> destination)
     {
         if (master.Length != MasterBytes)
         {
             throw new ArgumentException($"The v10 master must be {MasterBytes} bytes.", nameof(master));
         }
 
+        if (destination.Length < RoleBytes)
+        {
+            throw new ArgumentException($"Destination must be at least {RoleBytes} bytes.", nameof(destination));
+        }
+
         // Each half already carries 32 bytes from each Argon2id branch, because
         // the master was interleaved. Splitting here rather than de-interleaving
         // is what makes both HKDF halves depend on both branches.
-        byte[] sha3Side = DeriveSha3Side(master, roleContext);
-        byte[] skeinSide = KeyedSkein1024.Compute(master, SkeinRoleDomain, roleContext);
-        try
+        using var sha3Side = LockedSensitiveBuffer.Create(RoleBytes);
+        using var skeinSide = LockedSensitiveBuffer.Create(RoleBytes);
+
+        DeriveSha3Side(master, roleContext, sha3Side.Bytes);
+        KeyedSkein1024.Compute(master, SkeinRoleDomain, roleContext, skeinSide.Bytes);
+
+        if (sha3Side.Bytes.Length != RoleBytes || skeinSide.Bytes.Length != RoleBytes)
         {
-            if (sha3Side.Length != RoleBytes || skeinSide.Length != RoleBytes)
-            {
-                throw new CryptographicException("A role key branch returned the wrong width.");
-            }
-
-            byte[] combined = new byte[RoleBytes];
-            for (int i = 0; i < RoleBytes; i++)
-            {
-                combined[i] = (byte)(sha3Side[i] ^ skeinSide[i]);
-            }
-
-            return combined;
+            throw new CryptographicException("A role key branch returned the wrong width.");
         }
-        finally
+
+        for (int i = 0; i < RoleBytes; i++)
         {
-            CryptographicOperations.ZeroMemory(sha3Side);
-            CryptographicOperations.ZeroMemory(skeinSide);
+            destination[i] = (byte)(sha3Side.Bytes[i] ^ skeinSide.Bytes[i]);
         }
     }
 
-    private static byte[] DeriveSha3Side(ReadOnlySpan<byte> master, ReadOnlySpan<byte> roleContext)
+    public static byte[] DeriveRoleValue(ReadOnlySpan<byte> master, ReadOnlySpan<byte> roleContext)
     {
+        byte[] result = new byte[RoleBytes];
+        DeriveRoleValue(master, roleContext, result);
+        return result;
+    }
+
+    private static void DeriveSha3Side(ReadOnlySpan<byte> master, ReadOnlySpan<byte> roleContext, Span<byte> destination)
+    {
+        if (destination.Length < RoleBytes)
+        {
+            throw new ArgumentException($"Destination must be at least {RoleBytes} bytes.", nameof(destination));
+        }
+
         byte[] info0 = BuildSha3Info(roleContext, "Half-0");
         byte[] info1 = BuildSha3Info(roleContext, "Half-1");
-        byte[]? half0 = null;
-        byte[]? half1 = null;
         try
         {
-            half0 = Sha3HkdfExpand.Expand(master[..64], info0, 64);
-            half1 = Sha3HkdfExpand.Expand(master[64..], info1, 64);
-            byte[] result = new byte[RoleBytes];
-            half0.CopyTo(result, 0);
-            half1.CopyTo(result, 64);
-            return result;
+            Sha3HkdfExpand.Expand(master[..64], info0, destination.Slice(0, 64));
+            Sha3HkdfExpand.Expand(master[64..], info1, destination.Slice(64, 64));
         }
         finally
         {
             CryptographicOperations.ZeroMemory(info0);
             CryptographicOperations.ZeroMemory(info1);
-            if (half0 is not null) CryptographicOperations.ZeroMemory(half0);
-            if (half1 is not null) CryptographicOperations.ZeroMemory(half1);
         }
     }
 
@@ -226,6 +228,32 @@ internal static class SuiteKeySchedule
     /// <summary>
     /// A role value truncated to the target primitive's key width.
     /// </summary>
+    public static void DeriveRoleKey(
+        ReadOnlySpan<byte> master,
+        string algorithm,
+        int stageIndex,
+        string cipher,
+        KeyRolePurpose purpose,
+        Span<byte> destination)
+    {
+        if (destination.IsEmpty || destination.Length > RoleBytes)
+        {
+            throw new ArgumentOutOfRangeException(nameof(destination));
+        }
+
+        byte[] context = RoleContext(algorithm, stageIndex, cipher, purpose, destination.Length * 8);
+        using var roleValue = LockedSensitiveBuffer.Create(RoleBytes);
+        try
+        {
+            DeriveRoleValue(master, context, roleValue.Bytes);
+            roleValue.Bytes.AsSpan(0, destination.Length).CopyTo(destination);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(context);
+        }
+    }
+
     public static byte[] DeriveRoleKey(
         ReadOnlySpan<byte> master,
         string algorithm,
@@ -234,22 +262,9 @@ internal static class SuiteKeySchedule
         KeyRolePurpose purpose,
         int keyBytes)
     {
-        if (keyBytes is <= 0 or > RoleBytes)
-        {
-            throw new ArgumentOutOfRangeException(nameof(keyBytes));
-        }
-
-        byte[] context = RoleContext(algorithm, stageIndex, cipher, purpose, keyBytes * 8);
-        byte[] roleValue = DeriveRoleValue(master, context);
-        try
-        {
-            return roleValue[..keyBytes];
-        }
-        finally
-        {
-            CryptographicOperations.ZeroMemory(roleValue);
-            CryptographicOperations.ZeroMemory(context);
-        }
+        byte[] result = new byte[keyBytes];
+        DeriveRoleKey(master, algorithm, stageIndex, cipher, purpose, result);
+        return result;
     }
 
     /// <summary>
@@ -276,21 +291,13 @@ internal static class SuiteKeySchedule
             for (int stageIndex = 0; stageIndex < stages.Count; stageIndex++)
             {
                 CascadeStage stage = stages[stageIndex];
-                byte[] stageKey = DeriveRoleKey(
+                DeriveRoleKey(
                     master,
                     parameters.Algorithm,
                     stageIndex,
                     CanonicalCipherString(stage.Cipher),
                     KeyRolePurpose.Encryption,
-                    stage.KeyBytes);
-                try
-                {
-                    stageKey.CopyTo(encryptionKey.Bytes, offset);
-                }
-                finally
-                {
-                    CryptographicOperations.ZeroMemory(stageKey);
-                }
+                    encryptionKey.Bytes.AsSpan(offset, stage.KeyBytes));
 
                 offset += stage.KeyBytes;
             }
@@ -302,30 +309,14 @@ internal static class SuiteKeySchedule
             }
 
             sha3MacKey = LockedSensitiveBuffer.Create(parameters.Sha3MacKeyBytes);
-            byte[] sha3Key = DeriveGlobalKey(
+            DeriveGlobalKey(
                 master, parameters.Algorithm, "HMAC-SHA3-512",
-                KeyRolePurpose.Sha3Mac, parameters.Sha3MacKeyBytes);
-            try
-            {
-                sha3Key.CopyTo(sha3MacKey.Bytes, 0);
-            }
-            finally
-            {
-                CryptographicOperations.ZeroMemory(sha3Key);
-            }
+                KeyRolePurpose.Sha3Mac, sha3MacKey.Bytes.AsSpan(0, parameters.Sha3MacKeyBytes));
 
             skeinMacKey = LockedSensitiveBuffer.Create(parameters.SkeinMacKeyBytes);
-            byte[] skeinKey = DeriveGlobalKey(
+            DeriveGlobalKey(
                 master, parameters.Algorithm, "Skein-MAC-1024-1024",
-                KeyRolePurpose.SkeinMac, parameters.SkeinMacKeyBytes);
-            try
-            {
-                skeinKey.CopyTo(skeinMacKey.Bytes, 0);
-            }
-            finally
-            {
-                CryptographicOperations.ZeroMemory(skeinKey);
-            }
+                KeyRolePurpose.SkeinMac, skeinMacKey.Bytes.AsSpan(0, parameters.SkeinMacKeyBytes));
 
             var result = new RoleKeyMaterial(encryptionKey, sha3MacKey, skeinMacKey);
             encryptionKey = null!;
@@ -380,6 +371,31 @@ internal static class SuiteKeySchedule
             parameters.BlockBytes)];
     }
 
+    public static void DeriveGlobalKey(
+        ReadOnlySpan<byte> master,
+        string algorithm,
+        string cipher,
+        KeyRolePurpose purpose,
+        Span<byte> destination)
+    {
+        if (destination.IsEmpty || destination.Length > RoleBytes)
+        {
+            throw new ArgumentOutOfRangeException(nameof(destination));
+        }
+
+        byte[] context = GlobalRoleContext(algorithm, cipher, purpose, destination.Length * 8);
+        using var roleValue = LockedSensitiveBuffer.Create(RoleBytes);
+        try
+        {
+            DeriveRoleValue(master, context, roleValue.Bytes);
+            roleValue.Bytes.AsSpan(0, destination.Length).CopyTo(destination);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(context);
+        }
+    }
+
     public static byte[] DeriveGlobalKey(
         ReadOnlySpan<byte> master,
         string algorithm,
@@ -387,17 +403,9 @@ internal static class SuiteKeySchedule
         KeyRolePurpose purpose,
         int keyBytes)
     {
-        byte[] context = GlobalRoleContext(algorithm, cipher, purpose, keyBytes * 8);
-        byte[] roleValue = DeriveRoleValue(master, context);
-        try
-        {
-            return roleValue[..keyBytes];
-        }
-        finally
-        {
-            CryptographicOperations.ZeroMemory(roleValue);
-            CryptographicOperations.ZeroMemory(context);
-        }
+        byte[] result = new byte[keyBytes];
+        DeriveGlobalKey(master, algorithm, cipher, purpose, result);
+        return result;
     }
 }
 

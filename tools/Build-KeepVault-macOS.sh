@@ -980,12 +980,33 @@ else
   print "notarization=stapled (${notary_profile})"
 fi
 
-# ATOMIC PUBLISH: dist/ receives only fully verified, tested, and sealed release artifacts.
-dist_dir=${repo_root}/dist/Keep\ Vault-macOS
-mkdir -p ${dist_dir:h}
-rm -rf -- ${dist_dir}
-ditto ${dist_stage} ${dist_dir}
-touch ${repo_root}/dist/.metadata_never_index
+# ATOMIC PUBLISH: Only official, Developer-ID-signed and notarized release artifacts
+# land in dist/. Development and local builds land in build/dev/ to avoid accidental distribution.
+publish_target_dir=''
+if (( release_mode )) && [[ -n ${notary_profile:-} && ${identity_details} == *'Developer ID Application'* ]]; then
+  publish_target_dir=${repo_root}/dist/Keep\ Vault-macOS
+else
+  publish_target_dir=${repo_root}/build/dev/Keep\ Vault-macOS
+  print "publish_mode=development (outputs placed in build/dev/; dist/ is reserved for Developer ID + notarized production releases)"
+fi
 
-print "published_app=${dist_dir}/Keep Vault.app"
-print "published_archive=${dist_dir}/Keep Vault-macOS-${architecture}.zip"
+publish_parent=${publish_target_dir:h}
+mkdir -p ${publish_parent}
+
+publish_stage=${publish_parent}/.publish_stage.$$.$RANDOM
+rm -rf -- ${publish_stage}
+ditto ${dist_stage} ${publish_stage}
+
+if [[ -e ${publish_target_dir} ]]; then
+  publish_old=${publish_parent}/.publish_old.$$.$RANDOM
+  mv ${publish_target_dir} ${publish_old}
+  mv ${publish_stage} ${publish_target_dir}
+  rm -rf -- ${publish_old}
+else
+  mv ${publish_stage} ${publish_target_dir}
+fi
+
+touch ${publish_parent}/.metadata_never_index
+
+print "published_app=${publish_target_dir}/Keep Vault.app"
+print "published_archive=${publish_target_dir}/Keep Vault-macOS-${architecture}.zip"

@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
+using Microsoft.Win32.SafeHandles;
 
 namespace KalynaArchiver.Services;
 
@@ -78,34 +79,31 @@ public static partial class SecureFile
         string parentDir = Path.GetDirectoryName(path)
             ?? throw new InvalidOperationException("Parent directory not found for secure deletion target.");
 
-        string quarantinePath = Path.Combine(parentDir, ".keepvault_erase_" + Guid.NewGuid().ToString("N"));
+        string canonicalParent = MacSafeFileSystem.ResolveExistingRealPath(parentDir);
+        using SafeFileHandle parentHandle = MacSafeFileSystem.OpenDirectoryHandle(canonicalParent);
+
+        string oldName = Path.GetFileName(path);
+        string quarantineName = ".keepvault_erase_" + Guid.NewGuid().ToString("N");
 
         MacSafeFileSystem.RequirePathStillNamesHandle(stream.SafeFileHandle, path);
-        if (Rename(path, quarantinePath) != 0)
+
+        // Atomically rename via parent directory descriptor
+        MacSafeFileSystem.RenameAt(parentHandle, oldName, parentHandle, quarantineName);
+
+        // Verify that the open file descriptor matches the quarantined directory entry
+        MacFileIdentity handleIdentity = MacSafeFileSystem.GetIdentity(stream.SafeFileHandle);
+        MacFileIdentity quarantineIdentity = MacSafeFileSystem.GetIdentityAt(parentHandle, quarantineName);
+
+        if (!handleIdentity.SameObject(quarantineIdentity))
         {
-            throw new Win32Exception(Marshal.GetLastPInvokeError(), "macOS could not atomically quarantine the file for secure deletion.");
+            // CRITICAL: Identity mismatch indicates a race substitution. NEVER unlink the quarantine entry!
+            throw new InvalidOperationException("Quarantined file identity mismatch after rename. Refusing to delete.");
         }
 
-        try
-        {
-            MacSafeFileSystem.RequirePathStillNamesHandle(stream.SafeFileHandle, quarantinePath);
-            MacSafeFileSystem.FullSync(stream.SafeFileHandle);
-            if (Unlink(quarantinePath) != 0)
-            {
-                throw new Win32Exception(Marshal.GetLastPInvokeError(), "macOS could not unlink the securely quarantined file.");
-            }
-        }
-        catch
-        {
-            // If unlinking the quarantine path failed, attempt to clean up or leave in quarantine
-            _ = Unlink(quarantinePath);
-            throw;
-        }
+        // Flush and sync descriptor before unlinking
+        MacSafeFileSystem.FullSync(stream.SafeFileHandle);
+
+        // Unlink via parent directory descriptor
+        MacSafeFileSystem.UnlinkAt(parentHandle, quarantineName);
     }
-
-    [LibraryImport("libSystem.B.dylib", EntryPoint = "rename", SetLastError = true, StringMarshalling = StringMarshalling.Utf8)]
-    private static partial int Rename(string oldPath, string newPath);
-
-    [LibraryImport("libSystem.B.dylib", EntryPoint = "unlink", SetLastError = true, StringMarshalling = StringMarshalling.Utf8)]
-    private static partial int Unlink(string path);
 }

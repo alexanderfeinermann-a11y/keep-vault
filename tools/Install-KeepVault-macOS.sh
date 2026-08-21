@@ -3,7 +3,7 @@ set -euo pipefail
 
 script_dir=${0:A:h}
 repo_root=${script_dir:h}
-source_app=${repo_root}/dist/Keep\ Vault-macOS/Keep\ Vault.app
+source_app=''
 applications_dir='/Applications'
 create_desktop_alias=1
 
@@ -32,6 +32,16 @@ while (( $# != 0 )); do
     *) usage ;;
   esac
 done
+
+if [[ -z ${source_app} ]]; then
+  if [[ -d ${repo_root}/dist/Keep\ Vault-macOS/Keep\ Vault.app ]]; then
+    source_app=${repo_root}/dist/Keep\ Vault-macOS/Keep\ Vault.app
+  elif [[ -d ${repo_root}/build/dev/Keep\ Vault-macOS/Keep\ Vault.app ]]; then
+    source_app=${repo_root}/build/dev/Keep\ Vault-macOS/Keep\ Vault.app
+  else
+    source_app=${repo_root}/dist/Keep\ Vault-macOS/Keep\ Vault.app
+  fi
+fi
 
 if (( EUID == 0 )); then
   print -u2 'Do not run this installer with sudo. It must create the Finder alias for the signed-in user.'
@@ -67,6 +77,32 @@ if (( create_desktop_alias )); then
       exit 1
     fi
   fi
+fi
+
+anchor_directory='/Library/Application Support/Keep Vault'
+anchor_path=${anchor_directory}/minimum-version
+candidate_version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' ${source_app}/Contents/Info.plist 2>/dev/null || true)
+if [[ ! ${candidate_version} =~ '^[0-9]+$' ]]; then
+  print -u2 "The candidate bundle has no valid numeric CFBundleVersion: ${candidate_version}"
+  exit 1
+fi
+
+recorded_version=0
+if [[ -e ${anchor_path} || -L ${anchor_path} ]]; then
+  if [[ -L ${anchor_path} || ! -f ${anchor_path} ]]; then
+    print -u2 "The machine-wide rollback anchor is corrupted or a symlink: ${anchor_path}"
+    exit 1
+  fi
+  recorded_version=$(<${anchor_path})
+  if [[ ! ${recorded_version} =~ '^[0-9]+$' ]]; then
+    print -u2 "The machine-wide rollback anchor contains non-numeric version: ${recorded_version}"
+    exit 1
+  fi
+fi
+
+if (( candidate_version < recorded_version )); then
+  print -u2 "Refusing to install version ${candidate_version} over the newer ${recorded_version} recorded on this machine."
+  exit 1
 fi
 
 ${script_dir}/Verify-KeepVault-macOS.sh --app ${source_app} --allow-development --require-launcher-signature
@@ -131,6 +167,10 @@ destination=${applications_dir}/Keep\ Vault.app
 backup_name=.Keep\ Vault.previous.$(date -u +%Y%m%dT%H%M%SZ).app
 backup_path=${applications_dir}/${backup_name}
 
+scanner_destination=${applications_dir}/QR-Scanner.app
+scanner_backup_name=.QR-Scanner.previous.$(date -u +%Y%m%dT%H%M%SZ).app
+scanner_backup_path=${applications_dir}/${scanner_backup_name}
+
 atomic_replace() {
   local old_path=$1
   local new_path=$2
@@ -179,7 +219,32 @@ if [[ -e ${destination} || -L ${destination} ]]; then
       ditto ${existing_sidecar} ${backup_dir}/Keep\ Vault.app.launcher${launcher_sidecar_suffix}
     fi
   done
+fi
 
+has_existing_scanner=0
+if (( install_scanner )) && [[ -e ${scanner_destination} || -L ${scanner_destination} ]]; then
+  if [[ ! -d ${scanner_destination} || -L ${scanner_destination} ]]; then
+    print -u2 "Refusing to replace a non-app object or symbolic link: ${scanner_destination}"
+    exit 1
+  fi
+  existing_scanner_id=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' ${scanner_destination}/Contents/Info.plist 2>/dev/null || true)
+  if [[ ${existing_scanner_id} != de.michael-feinermann.qr-scanner ]]; then
+    print -u2 "Refusing to replace foreign application at ${scanner_destination} with identifier: ${existing_scanner_id}"
+    exit 1
+  fi
+  has_existing_scanner=1
+
+  # Back up existing scanner sidecars
+  for scanner_sidecar_suffix in .sha3 .skein .khsig .sha3.khsig .skein.khsig; do
+    existing_scanner_sidecar=${applications_dir}/QR-Scanner.app${scanner_sidecar_suffix}
+    if [[ -f ${existing_scanner_sidecar} && ! -L ${existing_scanner_sidecar} ]]; then
+      ditto ${existing_scanner_sidecar} ${backup_dir}/QR-Scanner.app${scanner_sidecar_suffix}
+    fi
+  done
+fi
+
+# Execute installation of Keep Vault
+if (( has_existing_installation )); then
   atomic_replace ${destination} ${staged_app} ${backup_name}
 else
   mv ${staged_app} ${destination}
@@ -191,34 +256,41 @@ for launcher_sidecar_suffix in .sha3 .skein .khsig .sha3.khsig .skein.khsig; do
   mv -f -- ${staged_sidecar} ${final_sidecar}
 done
 
+# Execute installation of QR-Scanner
 if (( install_scanner )); then
-  scanner_destination=${applications_dir}/QR-Scanner.app
-  # Sidecars first: a scanner bundle that is briefly present without its
-  # signature is exactly the state Keep Vault is built to refuse.
   for scanner_sidecar_suffix in .sha3 .skein .khsig .sha3.khsig .skein.khsig; do
     mv -f -- ${install_root}/QR-Scanner.app${scanner_sidecar_suffix} \
       ${applications_dir}/QR-Scanner.app${scanner_sidecar_suffix}
   done
-  rm -rf -- ${scanner_destination}
-  mv ${install_root}/QR-Scanner.app ${scanner_destination}
+
+  if (( has_existing_scanner )); then
+    atomic_replace ${scanner_destination} ${install_root}/QR-Scanner.app ${scanner_backup_name}
+  else
+    mv ${install_root}/QR-Scanner.app ${scanner_destination}
+  fi
   print "installed_scanner=${scanner_destination}"
 fi
 
+# Verify complete installation transaction
+verification_passed=1
 if ! ${script_dir}/Verify-KeepVault-macOS.sh --app ${destination} --allow-development --require-launcher-signature; then
+  verification_passed=0
+fi
+
+if (( ! verification_passed )); then
+  print -u2 'Installation verification failed; executing unified rollback transaction...'
+
+  # Rollback Keep Vault
   if (( has_existing_installation )) && [[ -d ${backup_path} && ! -L ${backup_path} ]]; then
     failed_name=.Keep\ Vault.failed.$(date -u +%Y%m%dT%H%M%SZ).app
     if atomic_replace ${destination} ${backup_path} ${failed_name}; then
-      # Restore backed-up launcher sidecars matching the restored app
       for launcher_sidecar_suffix in .sha3 .skein .khsig .sha3.khsig .skein.khsig; do
         if [[ -f ${backup_dir}/Keep\ Vault.app.launcher${launcher_sidecar_suffix} ]]; then
           ditto ${backup_dir}/Keep\ Vault.app.launcher${launcher_sidecar_suffix} \
             ${applications_dir}/Keep\ Vault.app.launcher${launcher_sidecar_suffix}
         fi
       done
-      ${script_dir}/Verify-KeepVault-macOS.sh --app ${destination} --allow-development --require-launcher-signature || true
-      print -u2 'The new installation failed verification; both the previous Keep Vault app and its launcher signatures were restored.'
-    else
-      print -u2 "CRITICAL: installation verification and automatic rollback both failed. Backup: ${backup_path}"
+      print -u2 'Previous Keep Vault app and launcher signatures successfully restored.'
     fi
   elif [[ -d ${destination} && ! -L ${destination} ]]; then
     failed_destination=${HOME}/.Trash/Keep\ Vault\ failed\ $(date -u +%Y%m%dT%H%M%SZ).app
@@ -227,8 +299,29 @@ if ! ${script_dir}/Verify-KeepVault-macOS.sh --app ${destination} --allow-develo
     for launcher_sidecar_suffix in .sha3 .skein .khsig .sha3.khsig .skein.khsig; do
       rm -f -- ${applications_dir}/Keep\ Vault.app.launcher${launcher_sidecar_suffix}
     done
-    print -u2 "The failed first installation was moved to: ${failed_destination}"
   fi
+
+  # Rollback Scanner
+  if (( install_scanner )); then
+    if (( has_existing_scanner )) && [[ -d ${scanner_backup_path} && ! -L ${scanner_backup_path} ]]; then
+      scanner_failed_name=.QR-Scanner.failed.$(date -u +%Y%m%dT%H%M%SZ).app
+      if atomic_replace ${scanner_destination} ${scanner_backup_path} ${scanner_failed_name}; then
+        for scanner_sidecar_suffix in .sha3 .skein .khsig .sha3.khsig .skein.khsig; do
+          if [[ -f ${backup_dir}/QR-Scanner.app${scanner_sidecar_suffix} ]]; then
+            ditto ${backup_dir}/QR-Scanner.app${scanner_sidecar_suffix} \
+              ${applications_dir}/QR-Scanner.app${scanner_sidecar_suffix}
+          fi
+        done
+        print -u2 'Previous QR-Scanner app and signatures successfully restored.'
+      fi
+    elif [[ -d ${scanner_destination} && ! -L ${scanner_destination} ]]; then
+      rm -rf -- ${scanner_destination}
+      for scanner_sidecar_suffix in .sha3 .skein .khsig .sha3.khsig .skein.khsig; do
+        rm -f -- ${applications_dir}/QR-Scanner.app${scanner_sidecar_suffix}
+      done
+    fi
+  fi
+
   exit 1
 fi
 
@@ -283,28 +376,7 @@ fi
 # Record this installation machine-wide so an older release cannot be put back
 # later. An old release keeps valid signatures for as long as the key lives, so
 # signature checks alone cannot tell "ours" from "ours, and known to be flawed".
-#
-# The record has to sit where this user cannot rewrite it, otherwise it stops
-# whoever it is meant to stop. That is the one part of the installation that
-# needs an administrator; everything else deliberately runs unprivileged.
-anchor_directory='/Library/Application Support/Keep Vault'
-anchor_path=${anchor_directory}/minimum-version
-installed_version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' ${destination}/Contents/Info.plist)
-if [[ ! ${installed_version} =~ '^[0-9]+$' ]]; then
-  print -u2 "The installed bundle has no numeric version: ${installed_version}"
-  exit 1
-fi
-
-recorded_version=0
-if [[ -f ${anchor_path} && ! -L ${anchor_path} ]]; then
-  recorded_version=$(<${anchor_path})
-  [[ ${recorded_version} =~ '^[0-9]+$' ]] || recorded_version=0
-fi
-
-if (( installed_version < recorded_version )); then
-  print -u2 "Refusing to install version ${installed_version} over the newer ${recorded_version} recorded on this machine."
-  exit 1
-fi
+installed_version=${candidate_version}
 
 if (( installed_version > recorded_version )) || [[ ! -f ${anchor_path} ]]; then
   ANCHOR_DIRECTORY=${anchor_directory} ANCHOR_PATH=${anchor_path} ANCHOR_VERSION=${installed_version} \

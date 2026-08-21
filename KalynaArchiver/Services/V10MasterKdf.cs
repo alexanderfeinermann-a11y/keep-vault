@@ -128,19 +128,17 @@ internal static class V10MasterKdf
             throw new ArgumentException($"Destination must be at least {CredentialHashBytes} bytes.", nameof(destination));
         }
 
-        byte[] password = Encoding.UTF8.GetBytes(userPassword);
-        byte[] pinBytes = Encoding.ASCII.GetBytes(pin);
         byte[] domainA = Encoding.UTF8.GetBytes($"Kalyna-ZPAQ/v10/{algorithm}/SHA3-512/User+PIN+Factor-A");
         byte[] domainB = Encoding.UTF8.GetBytes($"Kalyna-ZPAQ/v10/{algorithm}/SHA3-512/User+PIN+Factor-B");
 
         int maxPassBytes = Encoding.UTF8.GetMaxByteCount(userPassword.Length);
         using var passBuf = LockedSensitiveBuffer.Create(maxPassBytes);
-        int passLen = Encoding.UTF8.GetBytes(userPassword, passBuf.Bytes);
-        byte[] passwordSlice = passBuf.Bytes.AsSpan(0, passLen).ToArray();
+        int passLen = Encoding.UTF8.GetBytes(userPassword.AsSpan(), passBuf.Bytes);
+        ReadOnlySpan<byte> passwordSpan = passBuf.Bytes.AsSpan(0, passLen);
 
         using var pinBuf = LockedSensitiveBuffer.Create(pin.Length);
-        int pinLen = Encoding.ASCII.GetBytes(pin, pinBuf.Bytes);
-        byte[] pinSlice = pinBuf.Bytes.AsSpan(0, pinLen).ToArray();
+        int pinLen = Encoding.ASCII.GetBytes(pin.AsSpan(), pinBuf.Bytes);
+        ReadOnlySpan<byte> pinSpan = pinBuf.Bytes.AsSpan(0, pinLen);
 
         int lenA = (sizeof(int) + domainA.Length) + (sizeof(int) + passLen) + (sizeof(int) + pinLen) + (sizeof(int) + factorA.Length);
         int lenB = (sizeof(int) + domainB.Length) + (sizeof(int) + passLen) + (sizeof(int) + pinLen) + (sizeof(int) + factorB.Length);
@@ -151,14 +149,14 @@ internal static class V10MasterKdf
         {
             int offsetA = 0;
             WriteLengthPrefixed(messageABuf.Bytes, ref offsetA, domainA);
-            WriteLengthPrefixed(messageABuf.Bytes, ref offsetA, passwordSlice);
-            WriteLengthPrefixed(messageABuf.Bytes, ref offsetA, pinSlice);
+            WriteLengthPrefixed(messageABuf.Bytes, ref offsetA, passwordSpan);
+            WriteLengthPrefixed(messageABuf.Bytes, ref offsetA, pinSpan);
             WriteLengthPrefixed(messageABuf.Bytes, ref offsetA, factorA);
 
             int offsetB = 0;
             WriteLengthPrefixed(messageBBuf.Bytes, ref offsetB, domainB);
-            WriteLengthPrefixed(messageBBuf.Bytes, ref offsetB, passwordSlice);
-            WriteLengthPrefixed(messageBBuf.Bytes, ref offsetB, pinSlice);
+            WriteLengthPrefixed(messageBBuf.Bytes, ref offsetB, passwordSpan);
+            WriteLengthPrefixed(messageBBuf.Bytes, ref offsetB, pinSpan);
             WriteLengthPrefixed(messageBBuf.Bytes, ref offsetB, factorB);
 
             _ = Sha3_512Compat.HashData(messageABuf.Bytes, destination.Slice(0, 64));
@@ -166,8 +164,6 @@ internal static class V10MasterKdf
         }
         finally
         {
-            CryptographicOperations.ZeroMemory(passwordSlice);
-            CryptographicOperations.ZeroMemory(pinSlice);
             CryptographicOperations.ZeroMemory(domainA);
             CryptographicOperations.ZeroMemory(domainB);
         }
@@ -208,35 +204,28 @@ internal static class V10MasterKdf
 
         int maxPassBytes = Encoding.UTF8.GetMaxByteCount(userPassword.Length);
         using var passBuf = LockedSensitiveBuffer.Create(maxPassBytes);
-        int passLen = Encoding.UTF8.GetBytes(userPassword, passBuf.Bytes);
-        byte[] passwordSlice = passBuf.Bytes.AsSpan(0, passLen).ToArray();
+        int passLen = Encoding.UTF8.GetBytes(userPassword.AsSpan(), passBuf.Bytes);
+        ReadOnlySpan<byte> passwordSpan = passBuf.Bytes.AsSpan(0, passLen);
 
         using var pinBuf = LockedSensitiveBuffer.Create(pin.Length);
-        int pinLen = Encoding.ASCII.GetBytes(pin, pinBuf.Bytes);
-        byte[] pinSlice = pinBuf.Bytes.AsSpan(0, pinLen).ToArray();
+        int pinLen = Encoding.ASCII.GetBytes(pin.AsSpan(), pinBuf.Bytes);
+        ReadOnlySpan<byte> pinSpan = pinBuf.Bytes.AsSpan(0, pinLen);
 
         int msgLen = (sizeof(int) + passLen) + (sizeof(int) + pinLen);
         using var messageBuf = LockedSensitiveBuffer.Create(msgLen);
-        try
-        {
-            factorA.CopyTo(keyBuffer.Bytes.AsSpan(0, FactorBytes));
-            factorB.CopyTo(keyBuffer.Bytes.AsSpan(FactorBytes, FactorBytes));
 
-            int offset = 0;
-            WriteLengthPrefixed(messageBuf.Bytes, ref offset, passwordSlice);
-            WriteLengthPrefixed(messageBuf.Bytes, ref offset, pinSlice);
+        factorA.CopyTo(keyBuffer.Bytes.AsSpan(0, FactorBytes));
+        factorB.CopyTo(keyBuffer.Bytes.AsSpan(FactorBytes, FactorBytes));
 
-            KeyedSkein1024.Compute(
-                keyBuffer.Bytes,
-                $"Kalyna-ZPAQ/v10/{algorithm}/Skein-MAC-1024-1024/User+PIN/Factors-A+B-Key",
-                messageBuf.Bytes,
-                destination);
-        }
-        finally
-        {
-            CryptographicOperations.ZeroMemory(passwordSlice);
-            CryptographicOperations.ZeroMemory(pinSlice);
-        }
+        int offset = 0;
+        WriteLengthPrefixed(messageBuf.Bytes, ref offset, passwordSpan);
+        WriteLengthPrefixed(messageBuf.Bytes, ref offset, pinSpan);
+
+        KeyedSkein1024.Compute(
+            keyBuffer.Bytes,
+            $"Kalyna-ZPAQ/v10/{algorithm}/Skein-MAC-1024-1024/User+PIN/Factors-A+B-Key",
+            messageBuf.Bytes,
+            destination);
     }
 
     public static byte[] DeriveSkeinCredentialHash(

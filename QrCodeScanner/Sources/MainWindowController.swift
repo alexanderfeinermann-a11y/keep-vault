@@ -11,6 +11,58 @@ import Foundation
 // history — and every one of those paths would carry the payload with it. They
 // are switched off individually because there is no single switch for them.
 
+final class VolatileSecureTextView: NSTextView {
+    var onVolatileCopy: (() -> Void)?
+
+    override func copy(_ sender: Any?) {
+        if let onVolatileCopy {
+            onVolatileCopy()
+        }
+    }
+
+    override func cut(_ sender: Any?) {
+        if let onVolatileCopy {
+            onVolatileCopy()
+        }
+    }
+
+    override func paste(_ sender: Any?) {
+        // Non-editable display only
+    }
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if event.modifierFlags.contains(.command) && event.charactersIgnoringModifiers == "c" {
+            copy(self)
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+
+    override func menu(for event: NSEvent) -> NSMenu? {
+        let menu = NSMenu()
+        let copyItem = NSMenuItem(title: "Copy", action: #selector(copy(_:)), keyEquivalent: "c")
+        copyItem.target = self
+        menu.addItem(copyItem)
+        return menu
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        // Disable drag-and-drop extraction of payload
+    }
+
+    override func draggingEntered(_ sender: any NSDraggingInfo) -> NSDragOperation {
+        return []
+    }
+
+    override func draggingUpdated(_ sender: any NSDraggingInfo) -> NSDragOperation {
+        return []
+    }
+
+    override func draggingSession(_ session: NSDraggingSession, sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation {
+        return []
+    }
+}
+
 @MainActor
 final class MainWindowController: NSObject, NSWindowDelegate, ScanSessionDelegate {
     /// What the status line is currently saying, kept as a case rather than as
@@ -73,7 +125,7 @@ final class MainWindowController: NSObject, NSWindowDelegate, ScanSessionDelegat
     private let noticeLabel = NSTextField(labelWithString: "")
     private let languageLabel = NSTextField(labelWithString: "")
     private let languageControl = NSSegmentedControl()
-    private let resultView = NSTextView()
+    private let resultView = VolatileSecureTextView()
     private let resultScroll = NSScrollView()
     private let copyButton = NSButton()
     private let rescanButton = NSButton()
@@ -249,6 +301,12 @@ final class MainWindowController: NSObject, NSWindowDelegate, ScanSessionDelegat
         resultView.usesFindPanel = false
         resultView.usesFontPanel = false
         resultView.allowsUndo = false
+
+        resultView.onVolatileCopy = { [weak self] in
+            Task { @MainActor in
+                self?.copyPayload()
+            }
+        }
     }
 
     @objc private func previewFrameChanged() {

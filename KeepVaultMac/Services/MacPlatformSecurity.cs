@@ -122,7 +122,7 @@ internal static partial class MacSafeFileSystem
                 const int Eopnotsupp = 102;
                 if (errorCode == Exdev || errorCode == Enotsup || errorCode == Eopnotsupp)
                 {
-                    StreamCopyDescriptorIntoPrivateDirectory(sourceDescriptor, canonicalDirectory, destinationFileName);
+                    StreamCopyDescriptorIntoPrivateDirectory(sourceDescriptor, targetDescriptor, destinationFileName);
                 }
                 else
                 {
@@ -148,7 +148,7 @@ internal static partial class MacSafeFileSystem
 
     private static void StreamCopyDescriptorIntoPrivateDirectory(
         int sourceDescriptor,
-        string canonicalDirectory,
+        int targetDirectoryDescriptor,
         string destinationFileName)
     {
         if (FStat(sourceDescriptor, out DarwinStat beforeStat) != 0)
@@ -156,18 +156,25 @@ internal static partial class MacSafeFileSystem
             throw new Win32Exception(Marshal.GetLastPInvokeError(), "macOS could not stat source descriptor before copy.");
         }
 
-        string destPath = Path.Combine(canonicalDirectory, destinationFileName);
-        using var destStream = new FileStream(
-            destPath,
-            FileMode.CreateNew,
-            FileAccess.Write,
-            FileShare.None,
-            bufferSize: 64 * 1024,
-            FileOptions.None);
+        // Open target file descriptor directly via openat
+        const int openFlags = 0x0002 /* O_RDWR */
+            | 0x0200 /* O_CREAT */
+            | 0x0800 /* O_EXCL */
+            | 0x20000000 /* O_NOFOLLOW_ANY */
+            | 0x01000000 /* O_CLOEXEC */;
 
+        int targetFileFd = OpenAt(targetDirectoryDescriptor, destinationFileName, openFlags, 0x180 /* 0600 */);
+        if (targetFileFd < 0)
+        {
+            throw new Win32Exception(Marshal.GetLastPInvokeError(), "macOS openat failed for snapshot destination.");
+        }
+
+        using var targetFileHandle = new SafeFileHandle(targetFileFd, ownsHandle: true);
+
+        using var hashStream = IncrementalHash.CreateHash(HashAlgorithmName.SHA512);
         byte[] buffer = new byte[64 * 1024];
-        long totalRead = 0;
         long sourceOffset = 0;
+        long totalRead = 0;
         try
         {
             while (sourceOffset < beforeStat.Size)
@@ -182,35 +189,80 @@ internal static partial class MacSafeFileSystem
                 {
                     break;
                 }
-                destStream.Write(buffer, 0, (int)bytesRead);
+
+                nint bytesWritten = PWrite(targetFileFd, buffer, (nuint)bytesRead, sourceOffset);
+                if (bytesWritten != bytesRead)
+                {
+                    throw new IOException("macOS pwrite incomplete during cross-volume snapshot.");
+                }
+
+                hashStream.AppendData(buffer, 0, (int)bytesRead);
                 sourceOffset += bytesRead;
                 totalRead += bytesRead;
             }
-            destStream.Flush(flushToDisk: true);
-            MacSafeFileSystem.FullSync(destStream.SafeFileHandle);
+            MacSafeFileSystem.FullSync(targetFileHandle);
         }
         finally
         {
             CryptographicOperations.ZeroMemory(buffer);
         }
+        byte[] writtenHash = hashStream.GetHashAndReset();
+
+        // Independent second verification pass over source descriptor to detect concurrent mutations
+        using var verifyHashStream = IncrementalHash.CreateHash(HashAlgorithmName.SHA512);
+        long verifyOffset = 0;
+        try
+        {
+            while (verifyOffset < beforeStat.Size)
+            {
+                int toRead = checked((int)Math.Min(buffer.Length, beforeStat.Size - verifyOffset));
+                nint bytesRead = PRead(sourceDescriptor, buffer, (nuint)toRead, verifyOffset);
+                if (bytesRead < 0)
+                {
+                    throw new Win32Exception(Marshal.GetLastPInvokeError(), "macOS pread verification pass failed.");
+                }
+                if (bytesRead == 0)
+                {
+                    break;
+                }
+                verifyHashStream.AppendData(buffer, 0, (int)bytesRead);
+                verifyOffset += bytesRead;
+            }
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(buffer);
+        }
+        byte[] verifyHash = verifyHashStream.GetHashAndReset();
 
         if (FStat(sourceDescriptor, out DarwinStat afterStat) != 0)
         {
             throw new Win32Exception(Marshal.GetLastPInvokeError(), "macOS could not stat source descriptor after copy.");
         }
 
-        if (beforeStat.Device != afterStat.Device || beforeStat.Inode != afterStat.Inode || beforeStat.Size != afterStat.Size)
+        bool stable = beforeStat.Device == afterStat.Device
+            && beforeStat.Inode == afterStat.Inode
+            && beforeStat.Size == afterStat.Size
+            && beforeStat.ModificationTime.Seconds == afterStat.ModificationTime.Seconds
+            && beforeStat.ModificationTime.Nanoseconds == afterStat.ModificationTime.Nanoseconds
+            && beforeStat.ChangeTime.Seconds == afterStat.ChangeTime.Seconds
+            && beforeStat.ChangeTime.Nanoseconds == afterStat.ChangeTime.Nanoseconds
+            && totalRead == beforeStat.Size
+            && verifyOffset == beforeStat.Size
+            && CryptographicOperations.FixedTimeEquals(writtenHash, verifyHash);
+
+        if (!stable)
         {
-            throw new InvalidOperationException("Source file modified or mutated during cross-volume snapshot.");
-        }
-        if (totalRead != beforeStat.Size)
-        {
-            throw new InvalidDataException("Cross-volume snapshot size mismatch.");
+            PInvokeUnlinkAt(targetDirectoryDescriptor, destinationFileName, 0);
+            throw new InvalidOperationException("Source file metadata or content mutated concurrently during cross-volume snapshot copy.");
         }
     }
 
     [LibraryImport("libSystem.B.dylib", EntryPoint = "pread", SetLastError = true)]
     private static partial nint PRead(int descriptor, byte[] buffer, nuint count, long offset);
+
+    [LibraryImport("libSystem.B.dylib", EntryPoint = "pwrite", SetLastError = true)]
+    private static partial nint PWrite(int descriptor, byte[] buffer, nuint count, long offset);
 
     internal static MacFileIdentity GetIdentity(SafeFileHandle handle)
     {
@@ -365,6 +417,79 @@ internal static partial class MacSafeFileSystem
         return checked((long)(stat.f_bavail * stat.f_frsize));
     }
 
+    internal static MacFileIdentity GetIdentityAt(SafeFileHandle parentHandle, string relativePath)
+    {
+        ArgumentNullException.ThrowIfNull(parentHandle);
+        ArgumentException.ThrowIfNullOrWhiteSpace(relativePath);
+        bool added = false;
+        try
+        {
+            parentHandle.DangerousAddRef(ref added);
+            int parentFd = checked((int)parentHandle.DangerousGetHandle());
+            // 0x0020 is AT_SYMLINK_NOFOLLOW on macOS
+            if (FStatAt(parentFd, relativePath, out DarwinStat status, 0x0020) != 0)
+            {
+                throw new Win32Exception(Marshal.GetLastPInvokeError(), $"macOS could not inspect '{relativePath}' relative to directory descriptor.");
+            }
+            return new MacFileIdentity(status.Device, status.Inode, status.LinkCount, status.Mode, status.Size);
+        }
+        finally
+        {
+            if (added)
+            {
+                parentHandle.DangerousRelease();
+            }
+        }
+    }
+
+    internal static void RenameAt(SafeFileHandle fromDirHandle, string fromPath, SafeFileHandle toDirHandle, string toPath)
+    {
+        ArgumentNullException.ThrowIfNull(fromDirHandle);
+        ArgumentNullException.ThrowIfNull(toDirHandle);
+        ArgumentException.ThrowIfNullOrWhiteSpace(fromPath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(toPath);
+
+        bool fromAdded = false;
+        bool toAdded = false;
+        try
+        {
+            fromDirHandle.DangerousAddRef(ref fromAdded);
+            toDirHandle.DangerousAddRef(ref toAdded);
+            int fromFd = checked((int)fromDirHandle.DangerousGetHandle());
+            int toFd = checked((int)toDirHandle.DangerousGetHandle());
+            if (PInvokeRenameAt(fromFd, fromPath, toFd, toPath) != 0)
+            {
+                throw new Win32Exception(Marshal.GetLastPInvokeError(), $"macOS renameat failed from '{fromPath}' to '{toPath}'.");
+            }
+        }
+        finally
+        {
+            if (toAdded) toDirHandle.DangerousRelease();
+            if (fromAdded) fromDirHandle.DangerousRelease();
+        }
+    }
+
+    internal static void UnlinkAt(SafeFileHandle dirHandle, string path)
+    {
+        ArgumentNullException.ThrowIfNull(dirHandle);
+        ArgumentException.ThrowIfNullOrWhiteSpace(path);
+
+        bool added = false;
+        try
+        {
+            dirHandle.DangerousAddRef(ref added);
+            int dirFd = checked((int)dirHandle.DangerousGetHandle());
+            if (PInvokeUnlinkAt(dirFd, path, 0) != 0)
+            {
+                throw new Win32Exception(Marshal.GetLastPInvokeError(), $"macOS unlinkat failed for '{path}'.");
+            }
+        }
+        finally
+        {
+            if (added) dirHandle.DangerousRelease();
+        }
+    }
+
     [LibraryImport("libSystem.B.dylib", EntryPoint = "open", SetLastError = true, StringMarshalling = StringMarshalling.Utf8)]
     private static partial int Open(string path, int flags);
 
@@ -376,6 +501,9 @@ internal static partial class MacSafeFileSystem
 
     [LibraryImport("libSystem.B.dylib", EntryPoint = "fstat", SetLastError = true)]
     private static partial int FStat(int descriptor, out DarwinStat status);
+
+    [LibraryImport("libSystem.B.dylib", EntryPoint = "fstatat", SetLastError = true, StringMarshalling = StringMarshalling.Utf8)]
+    private static partial int FStatAt(int dirfd, string path, out DarwinStat status, int flags);
 
     [LibraryImport("libSystem.B.dylib", EntryPoint = "lstat", SetLastError = true, StringMarshalling = StringMarshalling.Utf8)]
     private static partial int LStat(string path, out DarwinStat status);
@@ -391,6 +519,12 @@ internal static partial class MacSafeFileSystem
 
     [LibraryImport("libSystem.B.dylib", EntryPoint = "openat", SetLastError = true, StringMarshalling = StringMarshalling.Utf8)]
     internal static partial int OpenAt(int dirfd, string path, int flags, int mode);
+
+    [LibraryImport("libSystem.B.dylib", EntryPoint = "renameat", SetLastError = true, StringMarshalling = StringMarshalling.Utf8)]
+    private static partial int PInvokeRenameAt(int fromDirFd, string fromPath, int toDirFd, string toPath);
+
+    [LibraryImport("libSystem.B.dylib", EntryPoint = "unlinkat", SetLastError = true, StringMarshalling = StringMarshalling.Utf8)]
+    private static partial int PInvokeUnlinkAt(int dirfd, string path, int flags);
 
     [LibraryImport("libSystem.B.dylib", EntryPoint = "statvfs", SetLastError = true, StringMarshalling = StringMarshalling.Utf8)]
     private static partial int StatVfs(string path, out DarwinStatVfs buf);
@@ -595,24 +729,49 @@ internal sealed class MacExtractionStaging : IDisposable
     public void Install()
     {
         VerifyIdentity();
-        if (File.Exists(DestinationPath))
+        string destName = Path.GetFileName(DestinationPath);
+
+        // Verify that Staging directory entry under parent matches our descriptor before rename
+        MacFileIdentity parentStagingIdentity = MacSafeFileSystem.GetIdentityAt(_parentHandle, StagingName);
+        if (!parentStagingIdentity.SameObject(_stagingIdentity))
         {
-            throw new IOException("A file appeared at the extraction target before installation.");
+            throw new InvalidOperationException("Extraction staging directory entry changed before installation.");
         }
 
-        if (Directory.Exists(DestinationPath))
+        // Check if destination entry already exists under parent
+        bool destExists = false;
+        try
         {
-            FileAttributes attributes = File.GetAttributes(DestinationPath);
-            if ((attributes & FileAttributes.ReparsePoint) != 0
-                || Directory.EnumerateFileSystemEntries(DestinationPath).Any())
+            _ = MacSafeFileSystem.GetIdentityAt(_parentHandle, destName);
+            destExists = true;
+        }
+        catch (Win32Exception ex) when (ex.NativeErrorCode == 2 /* ENOENT */)
+        {
+            destExists = false;
+        }
+
+        if (destExists)
+        {
+            if (File.Exists(DestinationPath))
             {
-                throw new IOException("The extraction target changed while extraction was running.");
+                throw new IOException("A file appeared at the extraction target before installation.");
             }
 
-            Directory.Delete(DestinationPath);
+            if (Directory.Exists(DestinationPath))
+            {
+                FileAttributes attributes = File.GetAttributes(DestinationPath);
+                if ((attributes & FileAttributes.ReparsePoint) != 0
+                    || Directory.EnumerateFileSystemEntries(DestinationPath).Any())
+                {
+                    throw new IOException("The extraction target changed while extraction was running.");
+                }
+
+                Directory.Delete(DestinationPath);
+            }
         }
 
-        Directory.Move(StagingPath, DestinationPath);
+        // Perform atomic rename via parent directory descriptor
+        MacSafeFileSystem.RenameAt(_parentHandle, StagingName, _parentHandle, destName);
         _installed = true;
     }
 
@@ -625,39 +784,42 @@ internal sealed class MacExtractionStaging : IDisposable
 
         try
         {
-            if (!Directory.Exists(StagingPath))
+            // Verify that staging handle and parent directory entry still match before deletion
+            if (!_stagingHandle.IsInvalid && !_stagingHandle.IsClosed && !_parentHandle.IsInvalid && !_parentHandle.IsClosed)
             {
-                return;
-            }
-
-            // Ensure StagingPath still matches our verified staging descriptor before any deletion
-            if (!_stagingHandle.IsInvalid && !_stagingHandle.IsClosed)
-            {
-                MacFileIdentity currentStat = MacSafeFileSystem.GetIdentity(_stagingHandle);
-                if (currentStat.Device != _stagingIdentity.Device || currentStat.Inode != _stagingIdentity.Inode)
+                MacFileIdentity currentDescriptorIdentity = MacSafeFileSystem.GetIdentity(_stagingHandle);
+                if (!currentDescriptorIdentity.SameObject(_stagingIdentity))
                 {
-                    // Path substitution detected! Refuse recursive deletion of foreign directory.
-                    return;
+                    return; // Descriptor mutated; refuse deletion
                 }
+
+                MacFileIdentity parentEntryIdentity;
                 try
                 {
-                    MacSafeFileSystem.RequirePathStillNamesHandle(_stagingHandle, StagingPath);
+                    parentEntryIdentity = MacSafeFileSystem.GetIdentityAt(_parentHandle, StagingName);
                 }
                 catch
                 {
-                    // Path swapped or changed; refuse to delete foreign files
-                    return;
+                    return; // Staging directory entry vanished or inaccessible
+                }
+
+                if (!parentEntryIdentity.SameObject(_stagingIdentity))
+                {
+                    return; // Path swapped; refuse recursive deletion of foreign directory!
                 }
             }
 
-            FileAttributes attributes = File.GetAttributes(StagingPath);
-            if ((attributes & FileAttributes.ReparsePoint) != 0)
+            if (Directory.Exists(StagingPath))
             {
-                Directory.Delete(StagingPath);
-                return;
-            }
+                FileAttributes attributes = File.GetAttributes(StagingPath);
+                if ((attributes & FileAttributes.ReparsePoint) != 0)
+                {
+                    Directory.Delete(StagingPath);
+                    return;
+                }
 
-            Directory.Delete(StagingPath, recursive: true);
+                Directory.Delete(StagingPath, recursive: true);
+            }
         }
         catch
         {

@@ -588,10 +588,12 @@ public sealed partial class ZpaqService
     }
 
     public const long DefaultMaxExtractedBytes = 500L * 1024 * 1024 * 1024; // 500 GiB
+    public const long DefaultMaxSingleFileBytes = 500L * 1024 * 1024 * 1024; // 500 GiB
     public const int DefaultMaxExtractedFiles = 500_000;
     public const long DefaultMinFreeDiskSpaceBytes = 256L * 1024 * 1024; // 256 MiB
 
     internal static long MaxExtractedBytesOverride = -1;
+    internal static long MaxSingleFileBytesOverride = -1;
     internal static int MaxExtractedFilesOverride = -1;
     internal static long MinFreeDiskSpaceBytesOverride = -1;
 
@@ -603,6 +605,7 @@ public sealed partial class ZpaqService
         }
 
         long maxBytes = MaxExtractedBytesOverride > 0 ? MaxExtractedBytesOverride : DefaultMaxExtractedBytes;
+        long maxSingleBytes = MaxSingleFileBytesOverride > 0 ? MaxSingleFileBytesOverride : DefaultMaxSingleFileBytes;
         int maxFiles = MaxExtractedFilesOverride > 0 ? MaxExtractedFilesOverride : DefaultMaxExtractedFiles;
         long minFreeSpace = MinFreeDiskSpaceBytesOverride > 0 ? MinFreeDiskSpaceBytesOverride : DefaultMinFreeDiskSpaceBytes;
 
@@ -614,6 +617,11 @@ public sealed partial class ZpaqService
             fileCount++;
             var info = new FileInfo(file);
             totalBytes += info.Length;
+
+            if (info.Length > maxSingleBytes)
+            {
+                throw new InvalidDataException($"ZPAQ-Extraktionsgrenze für Einzeldateigröße überschritten ({maxSingleBytes} Bytes). Mögliche Decompression-Bomb abgelehnt.");
+            }
 
             if (fileCount > maxFiles)
             {
@@ -642,18 +650,102 @@ public sealed partial class ZpaqService
         CancellationToken cancellationToken)
     {
         long maxBytes = MaxExtractedBytesOverride > 0 ? MaxExtractedBytesOverride : DefaultMaxExtractedBytes;
+        long maxSingleBytes = MaxSingleFileBytesOverride > 0 ? MaxSingleFileBytesOverride : DefaultMaxSingleFileBytes;
         int maxFiles = MaxExtractedFilesOverride > 0 ? MaxExtractedFilesOverride : DefaultMaxExtractedFiles;
         long minFreeSpace = MinFreeDiskSpaceBytesOverride > 0 ? MinFreeDiskSpaceBytesOverride : DefaultMinFreeDiskSpaceBytes;
 
-        while (!process.HasExited && !cancellationToken.IsCancellationRequested)
+        Exception? limitViolation = null;
+
+        void CheckLimits()
+        {
+            if (process.HasExited || !Directory.Exists(stagingDirectory))
+            {
+                return;
+            }
+
+            long totalBytes = 0;
+            int fileCount = 0;
+
+            foreach (string file in Directory.EnumerateFiles(stagingDirectory, "*", SearchOption.AllDirectories))
+            {
+                fileCount++;
+                var info = new FileInfo(file);
+                totalBytes += info.Length;
+
+                if (info.Length > maxSingleBytes)
+                {
+                    linkedCts.Cancel();
+                    try { process.Kill(entireProcessTree: true); } catch { }
+                    limitViolation ??= new InvalidDataException($"ZPAQ-Extraktionsgrenze für Einzeldateigröße überschritten ({maxSingleBytes} Bytes). Mögliche Decompression-Bomb abgelehnt.");
+                    return;
+                }
+
+                if (fileCount > maxFiles)
+                {
+                    linkedCts.Cancel();
+                    try { process.Kill(entireProcessTree: true); } catch { }
+                    limitViolation ??= new InvalidDataException($"ZPAQ-Extraktionsgrenze für Dateianzahl überschritten ({maxFiles}). Mögliche Decompression-Bomb abgelehnt.");
+                    return;
+                }
+
+                if (totalBytes > maxBytes)
+                {
+                    linkedCts.Cancel();
+                    try { process.Kill(entireProcessTree: true); } catch { }
+                    limitViolation ??= new InvalidDataException($"ZPAQ-Extraktionsgrenze für Gesamtgröße überschritten ({maxBytes} Bytes). Mögliche Decompression-Bomb abgelehnt.");
+                    return;
+                }
+            }
+
+#if KEEPVAULT_MACOS
+            long freeSpace = MacSafeFileSystem.GetFreeDiskSpaceBytes(stagingDirectory);
+            if (freeSpace >= 0 && freeSpace < minFreeSpace)
+            {
+                linkedCts.Cancel();
+                try { process.Kill(entireProcessTree: true); } catch { }
+                limitViolation ??= new IOException($"ZPAQ-Extraktion abgebrochen: Unzureichender freier Speicherplatz auf dem Ziellaufwerk ({freeSpace} Bytes verbleibend).");
+                return;
+            }
+#endif
+        }
+
+        using var watcher = new FileSystemWatcher();
+        if (Directory.Exists(stagingDirectory))
         {
             try
             {
-                await Task.Delay(100, cancellationToken).ConfigureAwait(false);
+                watcher.Path = stagingDirectory;
+                watcher.IncludeSubdirectories = true;
+                watcher.NotifyFilter = NotifyFilters.FileName | NotifyFilters.Size | NotifyFilters.LastWrite;
+                watcher.Created += (_, _) => { try { CheckLimits(); } catch { } };
+                watcher.Changed += (_, _) => { try { CheckLimits(); } catch { } };
+                watcher.EnableRaisingEvents = true;
+            }
+            catch
+            {
+                // Fallback to high-frequency polling
+            }
+        }
+
+        while (!process.HasExited && !cancellationToken.IsCancellationRequested)
+        {
+            if (limitViolation != null)
+            {
+                throw limitViolation;
+            }
+
+            try
+            {
+                await Task.Delay(20, cancellationToken).ConfigureAwait(false);
             }
             catch (OperationCanceledException)
             {
                 break;
+            }
+
+            if (limitViolation != null)
+            {
+                throw limitViolation;
             }
 
             if (process.HasExited)
@@ -661,59 +753,24 @@ public sealed partial class ZpaqService
                 break;
             }
 
-            if (!Directory.Exists(stagingDirectory))
-            {
-                continue;
-            }
-
-            long totalBytes = 0;
-            int fileCount = 0;
-
             try
             {
-                foreach (string file in Directory.EnumerateFiles(stagingDirectory, "*", SearchOption.AllDirectories))
-                {
-                    fileCount++;
-                    var info = new FileInfo(file);
-                    totalBytes += info.Length;
-
-                    if (fileCount > maxFiles)
-                    {
-                        linkedCts.Cancel();
-                        try { process.Kill(entireProcessTree: true); } catch { }
-                        throw new InvalidDataException($"ZPAQ-Extraktionsgrenze für Dateianzahl überschritten ({maxFiles}). Mögliche Decompression-Bomb abgelehnt.");
-                    }
-
-                    if (totalBytes > maxBytes)
-                    {
-                        linkedCts.Cancel();
-                        try { process.Kill(entireProcessTree: true); } catch { }
-                        throw new InvalidDataException($"ZPAQ-Extraktionsgrenze für Gesamtgröße überschritten ({maxBytes} Bytes). Mögliche Decompression-Bomb abgelehnt.");
-                    }
-                }
-
-#if KEEPVAULT_MACOS
-                long freeSpace = MacSafeFileSystem.GetFreeDiskSpaceBytes(stagingDirectory);
-                if (freeSpace >= 0 && freeSpace < minFreeSpace)
-                {
-                    linkedCts.Cancel();
-                    try { process.Kill(entireProcessTree: true); } catch { }
-                    throw new IOException($"ZPAQ-Extraktion abgebrochen: Unzureichender freier Speicherplatz auf dem Ziellaufwerk ({freeSpace} Bytes verbleibend).");
-                }
-#endif
-            }
-            catch (InvalidDataException)
-            {
-                throw;
-            }
-            catch (IOException ioEx) when (ioEx.Message.Contains("Unzureichender freier Speicherplatz", StringComparison.Ordinal))
-            {
-                throw;
+                CheckLimits();
             }
             catch
             {
                 // Transient sharing locks while files are actively written; continue monitoring
             }
+
+            if (limitViolation != null)
+            {
+                throw limitViolation;
+            }
+        }
+
+        if (limitViolation != null)
+        {
+            throw limitViolation;
         }
     }
 

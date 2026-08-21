@@ -31,7 +31,7 @@ public sealed class PasswordKeyService
     private static readonly string[] CommonPasswordTerms =
     [
         "PASSWORD", "PASSWORT", "LETMEIN", "WELCOME", "ADMIN", "CORRECTHORSEBATTERY",
-        "QWERTY", "ASDF", "ZXCV", "KALYNA", "ZPAQ", "KEEPVALLT", "MASTERKEY",
+        "QWERTY", "ASDF", "ZXCV", "KALYNA", "ZPAQ", "KEEPVAULT", "MASTERKEY",
     ];
 
     public static void ValidateArgon2Profile(Argon2Profile profile)

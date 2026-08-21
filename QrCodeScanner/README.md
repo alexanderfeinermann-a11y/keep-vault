@@ -113,7 +113,7 @@ Damit die Liste oben etwas wert ist, hier ehrlich das Gegenstueck.
   Zwischenablage an andere Apple-Geraete weitergeben. Kein Entitlement aendert
   das. Getan wird, was geht — der Eintrag wird als
   `org.nspasteboard.ConcealedType` markiert, den Zwischenablage-Verwalter
-  respektieren, und nach **90 Sekunden** wieder geleert. Geleert wird nur, wenn
+  respektieren, und nach **30 Sekunden** wieder geleert. Geleert wird nur, wenn
   in der Zwischenablage noch derselbe Wert steht; hat der Benutzer inzwischen
   etwas anderes kopiert, bleibt das unangetastet.
 - **Der Sandbox-Container.** `~/Library/Containers/de.michael-feinermann.qr-scanner/`

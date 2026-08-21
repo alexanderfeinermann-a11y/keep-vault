@@ -49,6 +49,7 @@ internal static partial class MacComprehensiveTests
             ("the companion QR scanner is checked against the pinned keys", TestCompanionScannerAsync),
             ("v10 primitives against independent second implementations", TestV10PrimitivesAsync),
             ("v10 creation PIN policy and weak-pattern rejection", TestPinCreationPolicyAsync),
+            ("password policy and KEEPVAULT term rejection", TestPasswordPolicyAsync),
             ("v10 master KDF: credential binding, PMI range and round chaining", TestV10MasterKdfAsync),
             ("v10 peak memory stays at one Argon2 matrix, and the header leaks nothing", TestV10CostAndHeaderAsync),
             ("SHA3, Skein, Kalyna and Threefish reference vectors", TestPrimitiveVectorsAsync),
@@ -779,6 +780,28 @@ internal static partial class MacComprehensiveTests
             // Extraction syntax validation must pass for these weak PINs (so existing archives can still be opened)
             V10KeyDerivation.ValidatePinSyntax(pin);
         }
+
+        return Task.CompletedTask;
+    }
+
+    private static Task TestPasswordPolicyAsync()
+    {
+        const string strongPass = "N!r7$Vq2#Lm8%Tx3&Jd9*Wp4+Kg5=Zu6?Ce";
+        PasswordPolicyAnalysis strong = PasswordKeyService.AnalyzeUserPassword(strongPass);
+        Require(strong.IsAccepted, $"Strong password was rejected: {string.Join(", ", strong.Violations)}");
+
+        // Verify common term detection: KEEPVAULT penalizes entropy by 32 bits
+        string basePassword = "KeepVault!@#$123456789XyZ#";
+        PasswordPolicyAnalysis termAnalysis = PasswordKeyService.AnalyzeUserPassword(basePassword);
+        Require(termAnalysis.ConservativeEntropyBits < 128.0 || !termAnalysis.IsAccepted,
+            $"Password containing common term KEEPVAULT should suffer severe entropy penalty. Got: {termAnalysis.ConservativeEntropyBits} bits.");
+
+        // Verify other weak patterns
+        PasswordPolicyAnalysis hexAnalysis = PasswordKeyService.AnalyzeUserPassword("0123456789abcdef01234567");
+        Require(!hexAnalysis.IsAccepted, "Predictable hex password was accepted.");
+
+        PasswordPolicyAnalysis shortAnalysis = PasswordKeyService.AnalyzeUserPassword("short");
+        Require(!shortAnalysis.IsAccepted, "Short password was accepted.");
 
         return Task.CompletedTask;
     }

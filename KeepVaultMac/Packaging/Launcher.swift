@@ -616,15 +616,30 @@ private func replaceWithSuspendedCore(at path: String, openedCore: OpenedCore) t
 /// in a directory owned by root, which an attacker holding only this user's
 /// rights can neither lower nor delete. Writing it is the one step of the
 /// installation that asks for an administrator.
+private let rollbackAnchorDir = "/Library/Application Support/Keep Vault"
 private let rollbackAnchorPath = "/Library/Application Support/Keep Vault/minimum-version"
 
 private func enforceRollbackFloor() throws {
+    var dirStat = stat()
+    if lstat(rollbackAnchorDir, &dirStat) == 0 {
+        guard (dirStat.st_mode & S_IFMT) == S_IFDIR,
+              dirStat.st_uid == 0,
+              (dirStat.st_mode & (S_IWGRP | S_IWOTH)) == 0 else {
+            throw LauncherFailure(message:
+                "Das Verzeichnis der Installationsmarke (\(rollbackAnchorDir)) ist ungesichert oder manipuliert. "
+                + "Bitte Keep Vault mit Install-KeepVault-macOS.sh neu installieren.")
+        }
+    }
+
     let fileDescriptor = open(rollbackAnchorPath, O_RDONLY | O_CLOEXEC | O_NOFOLLOW_ANY)
-    guard fileDescriptor >= 0 else {
-        // No anchor yet: a first installation, or one made before anchoring
-        // existed. The directory is root-owned, so this user cannot have
-        // removed it to get here.
-        return
+    if fileDescriptor < 0 {
+        let err = errno
+        if err == ENOENT {
+            // No anchor yet: a first installation, or one made before anchoring existed.
+            return
+        }
+        throw LauncherFailure(message:
+            "Die Installationsmarke konnte nicht sicher geoeffnet werden (Fehlercode \(err)). Start verweigert.")
     }
     defer { close(fileDescriptor) }
 
