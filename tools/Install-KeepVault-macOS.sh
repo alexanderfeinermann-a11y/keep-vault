@@ -34,12 +34,20 @@ while (( $# != 0 )); do
 done
 
 if [[ -z ${source_app} ]]; then
-  if [[ -d ${repo_root}/dist/Keep\ Vault-macOS/Keep\ Vault.app ]]; then
-    source_app=${repo_root}/dist/Keep\ Vault-macOS/Keep\ Vault.app
-  elif [[ -d ${repo_root}/build/dev/Keep\ Vault-macOS/Keep\ Vault.app ]]; then
-    source_app=${repo_root}/build/dev/Keep\ Vault-macOS/Keep\ Vault.app
+  dist_candidate=${repo_root}/dist/Keep\ Vault-macOS/Keep\ Vault.app
+  dev_candidate=${repo_root}/build/dev/Keep\ Vault-macOS/Keep\ Vault.app
+  if [[ -d ${dist_candidate} && -d ${dev_candidate} ]]; then
+    if [[ ${dev_candidate} -nt ${dist_candidate} ]]; then
+      source_app=${dev_candidate}
+    else
+      source_app=${dist_candidate}
+    fi
+  elif [[ -d ${dist_candidate} ]]; then
+    source_app=${dist_candidate}
+  elif [[ -d ${dev_candidate} ]]; then
+    source_app=${dev_candidate}
   else
-    source_app=${repo_root}/dist/Keep\ Vault-macOS/Keep\ Vault.app
+    source_app=${dist_candidate}
   fi
 fi
 
@@ -105,43 +113,10 @@ if (( candidate_version < recorded_version )); then
   exit 1
 fi
 
+# Pre-flight verify Keep Vault source before staging
 ${script_dir}/Verify-KeepVault-macOS.sh --app ${source_app} --allow-development --require-launcher-signature
 
-install_root=$(mktemp -d "${applications_dir}/.keep-vault-install.XXXXXXXX")
-staged_app=${install_root}/Keep\ Vault.app
-backup_dir=${install_root}/backup
-mkdir -p ${backup_dir}
-temporary_alias_path=''
-cleanup() {
-  if [[ -n ${install_root:-} && -d ${install_root} && ${install_root} == ${applications_dir}/.keep-vault-install.* ]]; then
-    rm -rf -- ${install_root}
-  fi
-  if [[ -n ${temporary_alias_path:-} && -f ${temporary_alias_path} && ! -L ${temporary_alias_path} ]]; then
-    rm -- ${temporary_alias_path}
-  fi
-}
-trap cleanup EXIT INT TERM
-
-ditto ${source_app} ${staged_app}
-
-# The launcher's own dual signature cannot live inside the bundle — codesign
-# writes the bundle seal into the launcher itself, so a signature over its bytes
-# would invalidate itself. It travels beside the app and is verified at every
-# launch, so it has to be installed alongside.
-for launcher_sidecar_suffix in .sha3 .skein .khsig .sha3.khsig .skein.khsig; do
-  launcher_sidecar=${source_app}.launcher${launcher_sidecar_suffix}
-  if [[ ! -f ${launcher_sidecar} || -L ${launcher_sidecar} ]]; then
-    print -u2 "The launcher self-signature is missing from the source: ${launcher_sidecar:t}"
-    exit 1
-  fi
-  ditto ${launcher_sidecar} ${install_root}/Keep\ Vault.app.launcher${launcher_sidecar_suffix}
-done
-
-# The QR scanner reads the two secret factors off the printed key sheets, and
-# Keep Vault checks its dual signature at every start. That check needs the
-# scanner's sidecars installed beside it, so the scanner is only installed when
-# its signature comes with it -- an installed scanner Keep Vault has to warn
-# about at every launch is worse than no installed scanner.
+# The QR scanner reads secret factors off key sheets; pre-flight verify before installation
 scanner_source=${source_app:h}/QR-Scanner.app
 install_scanner=0
 if [[ -d ${scanner_source} && ! -L ${scanner_source} ]]; then
@@ -153,15 +128,16 @@ if [[ -d ${scanner_source} && ! -L ${scanner_source} ]]; then
       break
     fi
   done
-fi
-if (( install_scanner )); then
-  ditto ${scanner_source} ${install_root}/QR-Scanner.app
-  for scanner_sidecar_suffix in .sha3 .skein .khsig .sha3.khsig .skein.khsig; do
-    ditto ${scanner_source}${scanner_sidecar_suffix} ${install_root}/QR-Scanner.app${scanner_sidecar_suffix}
-  done
+  if (( install_scanner )); then
+    ${script_dir}/Verify-QR-Scanner-macOS.sh --app ${scanner_source} --allow-development
+  fi
 fi
 
-${script_dir}/Verify-KeepVault-macOS.sh --app ${staged_app} --allow-development --require-launcher-signature
+install_root=$(mktemp -d "${applications_dir}/.keep-vault-install.XXXXXXXX")
+staged_app=${install_root}/Keep\ Vault.app
+backup_dir=${install_root}/backup
+mkdir -p ${backup_dir}
+temporary_alias_path=''
 
 destination=${applications_dir}/Keep\ Vault.app
 backup_name=.Keep\ Vault.previous.$(date -u +%Y%m%dT%H%M%SZ).app
@@ -170,6 +146,89 @@ backup_path=${applications_dir}/${backup_name}
 scanner_destination=${applications_dir}/QR-Scanner.app
 scanner_backup_name=.QR-Scanner.previous.$(date -u +%Y%m%dT%H%M%SZ).app
 scanner_backup_path=${applications_dir}/${scanner_backup_name}
+
+has_existing_installation=0
+has_existing_scanner=0
+transaction_active=0
+transaction_committed=0
+
+execute_rollback() {
+  if (( transaction_active && !transaction_committed )); then
+    transaction_active=0
+    print -u2 'Installation incomplete or verification failed; executing unified rollback transaction...'
+
+    # Rollback Keep Vault
+    if (( has_existing_installation )) && [[ -d ${backup_path} && ! -L ${backup_path} ]]; then
+      failed_name=.Keep\ Vault.failed.$(date -u +%Y%m%dT%H%M%SZ).app
+      if atomic_replace ${destination} ${backup_path} ${failed_name}; then
+        for launcher_sidecar_suffix in .sha3 .skein .khsig .sha3.khsig .skein.khsig; do
+          if [[ -f ${backup_dir}/Keep\ Vault.app.launcher${launcher_sidecar_suffix} ]]; then
+            ditto ${backup_dir}/Keep\ Vault.app.launcher${launcher_sidecar_suffix} \
+              ${applications_dir}/Keep\ Vault.app.launcher${launcher_sidecar_suffix}
+          fi
+        done
+        print -u2 'Previous Keep Vault app and launcher signatures successfully restored.'
+      fi
+    elif [[ -d ${destination} && ! -L ${destination} ]]; then
+      rm -rf -- ${destination}
+      for launcher_sidecar_suffix in .sha3 .skein .khsig .sha3.khsig .skein.khsig; do
+        rm -f -- ${applications_dir}/Keep\ Vault.app.launcher${launcher_sidecar_suffix}
+      done
+    fi
+
+    # Rollback QR-Scanner
+    if (( install_scanner )); then
+      if (( has_existing_scanner )) && [[ -d ${scanner_backup_path} && ! -L ${scanner_backup_path} ]]; then
+        scanner_failed_name=.QR-Scanner.failed.$(date -u +%Y%m%dT%H%M%SZ).app
+        if atomic_replace ${scanner_destination} ${scanner_backup_path} ${scanner_failed_name}; then
+          for scanner_sidecar_suffix in .sha3 .skein .khsig .sha3.khsig .skein.khsig; do
+            if [[ -f ${backup_dir}/QR-Scanner.app${scanner_sidecar_suffix} ]]; then
+              ditto ${backup_dir}/QR-Scanner.app${scanner_sidecar_suffix} \
+                ${applications_dir}/QR-Scanner.app${scanner_sidecar_suffix}
+            fi
+          done
+          print -u2 'Previous QR-Scanner app and signatures successfully restored.'
+        fi
+      elif [[ -d ${scanner_destination} && ! -L ${scanner_destination} ]]; then
+        rm -rf -- ${scanner_destination}
+        for scanner_sidecar_suffix in .sha3 .skein .khsig .sha3.khsig .skein.khsig; do
+          rm -f -- ${applications_dir}/QR-Scanner.app${scanner_sidecar_suffix}
+        done
+      fi
+    fi
+  fi
+}
+
+cleanup() {
+  execute_rollback
+  if [[ -n ${install_root:-} && -d ${install_root} && ${install_root} == ${applications_dir}/.keep-vault-install.* ]]; then
+    rm -rf -- ${install_root}
+  fi
+  if [[ -n ${temporary_alias_path:-} && -f ${temporary_alias_path} && ! -L ${temporary_alias_path} ]]; then
+    rm -- ${temporary_alias_path}
+  fi
+}
+trap cleanup EXIT INT TERM
+
+ditto ${source_app} ${staged_app}
+
+for launcher_sidecar_suffix in .sha3 .skein .khsig .sha3.khsig .skein.khsig; do
+  launcher_sidecar=${source_app}.launcher${launcher_sidecar_suffix}
+  if [[ ! -f ${launcher_sidecar} || -L ${launcher_sidecar} ]]; then
+    print -u2 "The launcher self-signature is missing from the source: ${launcher_sidecar:t}"
+    exit 1
+  fi
+  ditto ${launcher_sidecar} ${install_root}/Keep\ Vault.app.launcher${launcher_sidecar_suffix}
+done
+
+if (( install_scanner )); then
+  ditto ${scanner_source} ${install_root}/QR-Scanner.app
+  for scanner_sidecar_suffix in .sha3 .skein .khsig .sha3.khsig .skein.khsig; do
+    ditto ${scanner_source}${scanner_sidecar_suffix} ${install_root}/QR-Scanner.app${scanner_sidecar_suffix}
+  done
+fi
+
+${script_dir}/Verify-KeepVault-macOS.sh --app ${staged_app} --allow-development --require-launcher-signature
 
 atomic_replace() {
   local old_path=$1
@@ -199,7 +258,6 @@ if (!replaced) {
 JAVASCRIPT
 }
 
-has_existing_installation=0
 if [[ -e ${destination} || -L ${destination} ]]; then
   if [[ ! -d ${destination} || -L ${destination} ]]; then
     print -u2 "Refusing to replace a non-app object or symbolic link: ${destination}"
@@ -221,7 +279,6 @@ if [[ -e ${destination} || -L ${destination} ]]; then
   done
 fi
 
-has_existing_scanner=0
 if (( install_scanner )) && [[ -e ${scanner_destination} || -L ${scanner_destination} ]]; then
   if [[ ! -d ${scanner_destination} || -L ${scanner_destination} ]]; then
     print -u2 "Refusing to replace a non-app object or symbolic link: ${scanner_destination}"
@@ -242,6 +299,9 @@ if (( install_scanner )) && [[ -e ${scanner_destination} || -L ${scanner_destina
     fi
   done
 fi
+
+# BEGIN MUTATION TRANSACTION
+transaction_active=1
 
 # Execute installation of Keep Vault
 if (( has_existing_installation )); then
@@ -271,59 +331,55 @@ if (( install_scanner )); then
   print "installed_scanner=${scanner_destination}"
 fi
 
-# Verify complete installation transaction
-verification_passed=1
-if ! ${script_dir}/Verify-KeepVault-macOS.sh --app ${destination} --allow-development --require-launcher-signature; then
-  verification_passed=0
+# Verify complete installation transaction (both Keep Vault and QR-Scanner)
+main_verification_passed=0
+if ${script_dir}/Verify-KeepVault-macOS.sh --app ${destination} --allow-development --require-launcher-signature; then
+  main_verification_passed=1
 fi
 
-if (( ! verification_passed )); then
-  print -u2 'Installation verification failed; executing unified rollback transaction...'
-
-  # Rollback Keep Vault
-  if (( has_existing_installation )) && [[ -d ${backup_path} && ! -L ${backup_path} ]]; then
-    failed_name=.Keep\ Vault.failed.$(date -u +%Y%m%dT%H%M%SZ).app
-    if atomic_replace ${destination} ${backup_path} ${failed_name}; then
-      for launcher_sidecar_suffix in .sha3 .skein .khsig .sha3.khsig .skein.khsig; do
-        if [[ -f ${backup_dir}/Keep\ Vault.app.launcher${launcher_sidecar_suffix} ]]; then
-          ditto ${backup_dir}/Keep\ Vault.app.launcher${launcher_sidecar_suffix} \
-            ${applications_dir}/Keep\ Vault.app.launcher${launcher_sidecar_suffix}
-        fi
-      done
-      print -u2 'Previous Keep Vault app and launcher signatures successfully restored.'
-    fi
-  elif [[ -d ${destination} && ! -L ${destination} ]]; then
-    failed_destination=${HOME}/.Trash/Keep\ Vault\ failed\ $(date -u +%Y%m%dT%H%M%SZ).app
-    mkdir -p ${HOME}/.Trash
-    mv ${destination} ${failed_destination} || true
-    for launcher_sidecar_suffix in .sha3 .skein .khsig .sha3.khsig .skein.khsig; do
-      rm -f -- ${applications_dir}/Keep\ Vault.app.launcher${launcher_sidecar_suffix}
-    done
+scanner_verification_passed=1
+if (( install_scanner )); then
+  if ! ${script_dir}/Verify-QR-Scanner-macOS.sh --app ${scanner_destination} --allow-development; then
+    scanner_verification_passed=0
   fi
+fi
 
-  # Rollback Scanner
-  if (( install_scanner )); then
-    if (( has_existing_scanner )) && [[ -d ${scanner_backup_path} && ! -L ${scanner_backup_path} ]]; then
-      scanner_failed_name=.QR-Scanner.failed.$(date -u +%Y%m%dT%H%M%SZ).app
-      if atomic_replace ${scanner_destination} ${scanner_backup_path} ${scanner_failed_name}; then
-        for scanner_sidecar_suffix in .sha3 .skein .khsig .sha3.khsig .skein.khsig; do
-          if [[ -f ${backup_dir}/QR-Scanner.app${scanner_sidecar_suffix} ]]; then
-            ditto ${backup_dir}/QR-Scanner.app${scanner_sidecar_suffix} \
-              ${applications_dir}/QR-Scanner.app${scanner_sidecar_suffix}
-          fi
-        done
-        print -u2 'Previous QR-Scanner app and signatures successfully restored.'
-      fi
-    elif [[ -d ${scanner_destination} && ! -L ${scanner_destination} ]]; then
-      rm -rf -- ${scanner_destination}
-      for scanner_sidecar_suffix in .sha3 .skein .khsig .sha3.khsig .skein.khsig; do
-        rm -f -- ${applications_dir}/QR-Scanner.app${scanner_sidecar_suffix}
-      done
-    fi
-  fi
-
+if (( ! main_verification_passed || ! scanner_verification_passed )); then
+  execute_rollback
   exit 1
 fi
+
+# Record this installation machine-wide as part of the commit transaction
+installed_version=${candidate_version}
+
+if (( installed_version > recorded_version )) || [[ ! -f ${anchor_path} ]]; then
+  anchor_update_status=0
+  ANCHOR_DIRECTORY=${anchor_directory} ANCHOR_PATH=${anchor_path} ANCHOR_VERSION=${installed_version} \
+    osascript <<'APPLESCRIPT' || anchor_update_status=$?
+set anchorDirectory to system attribute "ANCHOR_DIRECTORY"
+set anchorPath to system attribute "ANCHOR_PATH"
+set anchorVersion to system attribute "ANCHOR_VERSION"
+set commandText to "/bin/mkdir -p " & quoted form of anchorDirectory & ¬
+  " && /usr/sbin/chown root:wheel " & quoted form of anchorDirectory & ¬
+  " && /bin/chmod 0755 " & quoted form of anchorDirectory & ¬
+  " && /usr/bin/printf '%s' " & quoted form of anchorVersion & " > " & quoted form of anchorPath & ¬
+  " && /usr/sbin/chown root:wheel " & quoted form of anchorPath & ¬
+  " && /bin/chmod 0644 " & quoted form of anchorPath
+do shell script commandText with administrator privileges
+APPLESCRIPT
+  anchor_owner=$(stat -f '%u' ${anchor_path} 2>/dev/null || print -1)
+  if (( anchor_update_status != 0 )) || [[ ${anchor_owner} != 0 || $(<${anchor_path}) != ${installed_version} ]]; then
+    print -u2 'The machine-wide installation record could not be written; rolling back installation.'
+    execute_rollback
+    exit 1
+  fi
+  print "rollback_anchor=${anchor_path} (${installed_version})"
+else
+  print "rollback_anchor=${anchor_path} (unveraendert ${recorded_version})"
+fi
+
+# COMMIT TRANSACTION
+transaction_committed=1
 
 recovery_path=''
 if [[ -d ${backup_path} && ! -L ${backup_path} ]]; then
@@ -359,8 +415,6 @@ APPLESCRIPT
   resolved_alias=$(ALIAS_PATH=${alias_path} osascript <<'APPLESCRIPT'
 set aliasPath to system attribute "ALIAS_PATH"
 tell application "Finder"
-  -- "original item" yields a Finder object reference, and POSIX path cannot be
-  -- read from one directly; coerce it to an alias first.
   set originalItem to original item of (POSIX file aliasPath as alias)
   return POSIX path of (originalItem as alias)
 end tell
@@ -373,34 +427,6 @@ APPLESCRIPT
   print "desktop_alias=${alias_path}"
 fi
 
-# Record this installation machine-wide so an older release cannot be put back
-# later. An old release keeps valid signatures for as long as the key lives, so
-# signature checks alone cannot tell "ours" from "ours, and known to be flawed".
-installed_version=${candidate_version}
-
-if (( installed_version > recorded_version )) || [[ ! -f ${anchor_path} ]]; then
-  ANCHOR_DIRECTORY=${anchor_directory} ANCHOR_PATH=${anchor_path} ANCHOR_VERSION=${installed_version} \
-    osascript <<'APPLESCRIPT'
-set anchorDirectory to system attribute "ANCHOR_DIRECTORY"
-set anchorPath to system attribute "ANCHOR_PATH"
-set anchorVersion to system attribute "ANCHOR_VERSION"
-set commandText to "/bin/mkdir -p " & quoted form of anchorDirectory & ¬
-  " && /usr/sbin/chown root:wheel " & quoted form of anchorDirectory & ¬
-  " && /bin/chmod 0755 " & quoted form of anchorDirectory & ¬
-  " && /usr/bin/printf '%s' " & quoted form of anchorVersion & " > " & quoted form of anchorPath & ¬
-  " && /usr/sbin/chown root:wheel " & quoted form of anchorPath & ¬
-  " && /bin/chmod 0644 " & quoted form of anchorPath
-do shell script commandText with administrator privileges
-APPLESCRIPT
-  anchor_owner=$(stat -f '%u' ${anchor_path} 2>/dev/null || print -1)
-  if [[ ${anchor_owner} != 0 || $(<${anchor_path}) != ${installed_version} ]]; then
-    print -u2 'The machine-wide installation record could not be written; a rollback would go undetected.'
-    exit 1
-  fi
-  print "rollback_anchor=${anchor_path} (${installed_version})"
-else
-  print "rollback_anchor=${anchor_path} (unveraendert ${recorded_version})"
-fi
-
 print "installed_app=${destination}"
 [[ -z ${recovery_path} ]] || print "previous_version_recoverable_at=${recovery_path}"
+

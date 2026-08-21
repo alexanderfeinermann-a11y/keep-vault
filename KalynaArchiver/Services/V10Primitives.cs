@@ -110,45 +110,30 @@ internal static class KeyedSkein1024
         }
 
         var mac = new SkeinMac(SkeinEngine.SKEIN_1024, OutputBytes * 8);
-        byte[] parameterKey = key.ToArray();
+        using var paramKeyBuf = LockedSensitiveBuffer.Create(key.Length);
+        key.CopyTo(paramKeyBuf.Bytes);
         byte[] personalisationBytes = Encoding.UTF8.GetBytes(personalisation);
         try
         {
             SkeinParameters parameters = new SkeinParameters.Builder()
-                .SetKey(parameterKey)
+                .SetKey(paramKeyBuf.Bytes.ToArray())
                 .SetPersonalisation(personalisationBytes)
                 .Build();
             mac.Init(parameters);
-            byte[] messageBytes = message.ToArray();
-            try
+            mac.BlockUpdate(message);
+
+            using var outBuf = LockedSensitiveBuffer.Create(OutputBytes);
+            int written = mac.DoFinal(outBuf.Bytes);
+            if (written != OutputBytes)
             {
-                mac.BlockUpdate(messageBytes, 0, messageBytes.Length);
-            }
-            finally
-            {
-                CryptographicOperations.ZeroMemory(messageBytes);
+                throw new CryptographicException(
+                    $"Skein-MAC-1024-1024 returned {written} bytes instead of {OutputBytes}.");
             }
 
-            byte[] output = new byte[OutputBytes];
-            try
-            {
-                int written = mac.DoFinal(output, 0);
-                if (written != OutputBytes)
-                {
-                    throw new CryptographicException(
-                        $"Skein-MAC-1024-1024 returned {written} bytes instead of {OutputBytes}.");
-                }
-
-                output.CopyTo(destination);
-            }
-            finally
-            {
-                CryptographicOperations.ZeroMemory(output);
-            }
+            outBuf.Bytes.CopyTo(destination);
         }
         finally
         {
-            CryptographicOperations.ZeroMemory(parameterKey);
             CryptographicOperations.ZeroMemory(personalisationBytes);
             mac.Reset();
         }
@@ -186,26 +171,19 @@ internal static class Sha3HkdfExpand
             throw new ArgumentOutOfRangeException(nameof(destination));
         }
 
-        byte[] prk = pseudoRandomKey.ToArray();
+        using var prkBuf = LockedSensitiveBuffer.Create(pseudoRandomKey.Length);
+        pseudoRandomKey.CopyTo(prkBuf.Bytes);
         byte[] infoBytes = info.ToArray();
         try
         {
             var generator = new HkdfBytesGenerator(new Sha3Digest(512));
-            generator.Init(HkdfParameters.SkipExtractParameters(prk, infoBytes));
-            byte[] output = new byte[destination.Length];
-            try
-            {
-                generator.GenerateBytes(output, 0, destination.Length);
-                output.CopyTo(destination);
-            }
-            finally
-            {
-                CryptographicOperations.ZeroMemory(output);
-            }
+            generator.Init(HkdfParameters.SkipExtractParameters(prkBuf.Bytes.ToArray(), infoBytes));
+            using var outBuf = LockedSensitiveBuffer.Create(destination.Length);
+            generator.GenerateBytes(outBuf.Bytes);
+            outBuf.Bytes.CopyTo(destination);
         }
         finally
         {
-            CryptographicOperations.ZeroMemory(prk);
             CryptographicOperations.ZeroMemory(infoBytes);
         }
     }

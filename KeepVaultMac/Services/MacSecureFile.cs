@@ -71,6 +71,8 @@ public static partial class SecureFile
         }
     }
 
+    internal static Action? TestHookBeforeRename { get; set; }
+
     internal static void MarkForDeletion(FileStream stream, string path)
     {
         ArgumentNullException.ThrowIfNull(stream);
@@ -87,6 +89,8 @@ public static partial class SecureFile
 
         MacSafeFileSystem.RequirePathStillNamesHandle(stream.SafeFileHandle, path);
 
+        TestHookBeforeRename?.Invoke();
+
         // Atomically rename via parent directory descriptor
         MacSafeFileSystem.RenameAt(parentHandle, oldName, parentHandle, quarantineName);
 
@@ -96,8 +100,44 @@ public static partial class SecureFile
 
         if (!handleIdentity.SameObject(quarantineIdentity))
         {
-            // CRITICAL: Identity mismatch indicates a race substitution. NEVER unlink the quarantine entry!
-            throw new InvalidOperationException("Quarantined file identity mismatch after rename. Refusing to delete.");
+            // Identity mismatch indicates a race substitution. NEVER unlink the quarantine entry!
+            // Attempt descriptor-relative rollback if the original name is free.
+            bool restored = false;
+            bool oldNameOccupied = false;
+            try
+            {
+                _ = MacSafeFileSystem.GetIdentityAt(parentHandle, oldName);
+                oldNameOccupied = true;
+            }
+            catch (Win32Exception ex) when (ex.NativeErrorCode == 2 /* ENOENT */)
+            {
+                oldNameOccupied = false;
+            }
+
+            if (!oldNameOccupied)
+            {
+                try
+                {
+                    MacSafeFileSystem.RenameAt(parentHandle, quarantineName, parentHandle, oldName);
+                    restored = true;
+                }
+                catch
+                {
+                    restored = false;
+                }
+            }
+
+            if (restored)
+            {
+                throw new InvalidOperationException(
+                    $"Quarantined file identity mismatch after rename for '{path}'. Foreign item restored to original location; deletion aborted.");
+            }
+            else
+            {
+                throw new InvalidOperationException(
+                    $"Quarantined file identity mismatch after rename for '{path}'. Original path '{oldName}' is occupied or restore failed. "
+                    + $"Foreign item preserved safely in quarantine under '{quarantineName}'; deletion aborted.");
+            }
         }
 
         // Flush and sync descriptor before unlinking

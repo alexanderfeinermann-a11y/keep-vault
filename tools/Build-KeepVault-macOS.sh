@@ -990,6 +990,17 @@ else
   print "publish_mode=development (outputs placed in build/dev/; dist/ is reserved for Developer ID + notarized production releases)"
 fi
 
+# Include companion QR-Scanner and sidecars if built
+scanner_dist=${repo_root}/QrCodeScanner/dist/QR-Scanner.app
+if [[ -d ${scanner_dist} && ! -L ${scanner_dist} ]]; then
+  ditto ${scanner_dist} ${dist_stage}/QR-Scanner.app
+  for sidecar_suffix in .sha3 .skein .khsig .sha3.khsig .skein.khsig; do
+    if [[ -f ${scanner_dist}${sidecar_suffix} && ! -L ${scanner_dist}${sidecar_suffix} ]]; then
+      ditto ${scanner_dist}${sidecar_suffix} ${dist_stage}/QR-Scanner.app${sidecar_suffix}
+    fi
+  done
+fi
+
 publish_parent=${publish_target_dir:h}
 mkdir -p ${publish_parent}
 
@@ -1000,7 +1011,11 @@ ditto ${dist_stage} ${publish_stage}
 if [[ -e ${publish_target_dir} ]]; then
   publish_old=${publish_parent}/.publish_old.$$.$RANDOM
   mv ${publish_target_dir} ${publish_old}
-  mv ${publish_stage} ${publish_target_dir}
+  if ! mv ${publish_stage} ${publish_target_dir}; then
+    print -u2 "Publish stage move failed; restoring previous target from ${publish_old}..."
+    mv ${publish_old} ${publish_target_dir} || true
+    exit 1
+  fi
   rm -rf -- ${publish_old}
 else
   mv ${publish_stage} ${publish_target_dir}

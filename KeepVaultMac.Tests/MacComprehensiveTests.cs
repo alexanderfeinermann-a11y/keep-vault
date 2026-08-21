@@ -2505,6 +2505,45 @@ internal static partial class MacComprehensiveTests
             Require(result.Deleted, "Cryptographic erase did not report success.");
             Require(!File.Exists(container), "Cryptographic erase left the encrypted container.");
             Require(!File.Exists(sidecar), "Cryptographic erase left recoverable KPAR2 data.");
+
+            // Test recovery path for MarkForDeletion under race substitution
+            string victimPath = Path.Combine(root, "victim.txt");
+            string foreignPath = Path.Combine(root, "foreign.txt");
+            await File.WriteAllTextAsync(victimPath, "victim content").ConfigureAwait(false);
+            await File.WriteAllTextAsync(foreignPath, "foreign content").ConfigureAwait(false);
+
+            using (FileStream victimStream = MacSafeFileSystem.OpenReadNoSymlinks(victimPath))
+            {
+                SecureFile.TestHookBeforeRename = () =>
+                {
+                    // Simulate adversary replacing victimPath with foreign item before RenameAt
+                    File.Delete(victimPath);
+                    File.Move(foreignPath, victimPath);
+                };
+
+                try
+                {
+                    bool threw = false;
+                    try
+                    {
+                        SecureFile.MarkForDeletion(victimStream, victimPath);
+                    }
+                    catch (InvalidOperationException ex)
+                    {
+                        threw = true;
+                        Require(ex.Message.Contains("Quarantined file identity mismatch", StringComparison.Ordinal),
+                            "MarkForDeletion did not report identity mismatch.");
+                    }
+                    Require(threw, "MarkForDeletion did not reject identity mismatch on race substitution.");
+                    Require(File.Exists(victimPath), "MarkForDeletion recovery did not restore the foreign item back to its location.");
+                    Require(File.ReadAllText(victimPath) == "foreign content", "Foreign item content was corrupted during recovery.");
+                }
+                finally
+                {
+                    SecureFile.TestHookBeforeRename = null;
+                }
+            }
+
             CryptographicOperations.ZeroMemory(payload);
         }
         finally

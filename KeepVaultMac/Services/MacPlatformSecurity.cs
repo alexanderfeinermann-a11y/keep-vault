@@ -410,9 +410,10 @@ internal static partial class MacSafeFileSystem
 
     internal static long GetFreeDiskSpaceBytes(string path)
     {
+        ArgumentException.ThrowIfNullOrWhiteSpace(path);
         if (StatVfs(path, out DarwinStatVfs stat) != 0)
         {
-            return -1;
+            throw new Win32Exception(Marshal.GetLastPInvokeError(), $"macOS could not stat filesystem at '{path}'.");
         }
         return checked((long)(stat.f_bavail * stat.f_frsize));
     }
@@ -469,6 +470,34 @@ internal static partial class MacSafeFileSystem
         }
     }
 
+    internal static void RenameAtExclusive(SafeFileHandle fromDirHandle, string fromPath, SafeFileHandle toDirHandle, string toPath)
+    {
+        ArgumentNullException.ThrowIfNull(fromDirHandle);
+        ArgumentNullException.ThrowIfNull(toDirHandle);
+        ArgumentException.ThrowIfNullOrWhiteSpace(fromPath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(toPath);
+
+        bool fromAdded = false;
+        bool toAdded = false;
+        try
+        {
+            fromDirHandle.DangerousAddRef(ref fromAdded);
+            toDirHandle.DangerousAddRef(ref toAdded);
+            int fromFd = checked((int)fromDirHandle.DangerousGetHandle());
+            int toFd = checked((int)toDirHandle.DangerousGetHandle());
+            // 0x00000004 is RENAME_EXCL on macOS
+            if (PInvokeRenameAtxNp(fromFd, fromPath, toFd, toPath, 0x00000004) != 0)
+            {
+                throw new Win32Exception(Marshal.GetLastPInvokeError(), $"macOS renameatx_np(RENAME_EXCL) failed from '{fromPath}' to '{toPath}'.");
+            }
+        }
+        finally
+        {
+            if (toAdded) toDirHandle.DangerousRelease();
+            if (fromAdded) fromDirHandle.DangerousRelease();
+        }
+    }
+
     internal static void UnlinkAt(SafeFileHandle dirHandle, string path)
     {
         ArgumentNullException.ThrowIfNull(dirHandle);
@@ -492,6 +521,9 @@ internal static partial class MacSafeFileSystem
 
     [LibraryImport("libSystem.B.dylib", EntryPoint = "open", SetLastError = true, StringMarshalling = StringMarshalling.Utf8)]
     private static partial int Open(string path, int flags);
+
+    [LibraryImport("libSystem.B.dylib", EntryPoint = "close", SetLastError = true)]
+    internal static partial int CloseDescriptor(int fd);
 
     [LibraryImport("libSystem.B.dylib", EntryPoint = "fcntl", SetLastError = true)]
     private static partial int FcntlNoArgument(int descriptor, int command);
@@ -523,8 +555,11 @@ internal static partial class MacSafeFileSystem
     [LibraryImport("libSystem.B.dylib", EntryPoint = "renameat", SetLastError = true, StringMarshalling = StringMarshalling.Utf8)]
     private static partial int PInvokeRenameAt(int fromDirFd, string fromPath, int toDirFd, string toPath);
 
+    [LibraryImport("libSystem.B.dylib", EntryPoint = "renameatx_np", SetLastError = true, StringMarshalling = StringMarshalling.Utf8)]
+    internal static partial int PInvokeRenameAtxNp(int fromDirFd, string fromPath, int toDirFd, string toPath, uint flags);
+
     [LibraryImport("libSystem.B.dylib", EntryPoint = "unlinkat", SetLastError = true, StringMarshalling = StringMarshalling.Utf8)]
-    private static partial int PInvokeUnlinkAt(int dirfd, string path, int flags);
+    internal static partial int PInvokeUnlinkAt(int dirfd, string path, int flags);
 
     [LibraryImport("libSystem.B.dylib", EntryPoint = "statvfs", SetLastError = true, StringMarshalling = StringMarshalling.Utf8)]
     private static partial int StatVfs(string path, out DarwinStatVfs buf);
@@ -553,6 +588,12 @@ internal readonly record struct MacFileIdentity(int Device, ulong Inode, ushort 
 
 internal static partial class NativePathResolver
 {
+    internal static string ResolveExistingPath(string path)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(path);
+        return MacSafeFileSystem.ResolveExistingRealPath(path);
+    }
+
     internal static string ResolveFinalDosPath(SafeFileHandle handle) =>
         throw new PlatformNotSupportedException(
             "Descriptor-only pathname recovery is intentionally unavailable on macOS. Pass the already no-follow-opened expected path and compare file identity instead.");
@@ -684,6 +725,8 @@ internal sealed class MacExtractionStaging : IDisposable
         StagingPath = Path.Combine(canonicalParent, StagingName);
 
         bool parentAdded = false;
+        bool stagingCreated = false;
+        int stagingFd = -1;
         try
         {
             _parentHandle.DangerousAddRef(ref parentAdded);
@@ -693,8 +736,9 @@ internal sealed class MacExtractionStaging : IDisposable
             {
                 throw new Win32Exception(Marshal.GetLastPInvokeError(), "Could not create extraction staging directory.");
             }
+            stagingCreated = true;
 
-            int stagingFd = MacSafeFileSystem.OpenAt(
+            stagingFd = MacSafeFileSystem.OpenAt(
                 parentFd,
                 StagingName,
                 0x0000 /* O_RDONLY */ | 0x00100000 /* O_DIRECTORY */ | 0x20000000 /* O_NOFOLLOW_ANY */ | 0x01000000 /* O_CLOEXEC */,
@@ -705,7 +749,24 @@ internal sealed class MacExtractionStaging : IDisposable
             }
 
             _stagingHandle = new SafeFileHandle(stagingFd, ownsHandle: true);
+            stagingFd = -1; // Transferred ownership
             _stagingIdentity = MacSafeFileSystem.GetIdentity(_stagingHandle);
+        }
+        catch
+        {
+            if (stagingFd >= 0)
+            {
+                MacSafeFileSystem.CloseDescriptor(stagingFd);
+            }
+            _stagingHandle?.Dispose();
+            if (stagingCreated && parentAdded)
+            {
+                int parentFd = checked((int)_parentHandle.DangerousGetHandle());
+                // 0x0080 is AT_REMOVEDIR on macOS
+                _ = MacSafeFileSystem.PInvokeUnlinkAt(parentFd, StagingName, 0x0080);
+            }
+            _parentHandle?.Dispose();
+            throw;
         }
         finally
         {
@@ -738,40 +799,39 @@ internal sealed class MacExtractionStaging : IDisposable
             throw new InvalidOperationException("Extraction staging directory entry changed before installation.");
         }
 
-        // Check if destination entry already exists under parent
-        bool destExists = false;
+        // Attempt atomic exclusive rename
         try
         {
-            _ = MacSafeFileSystem.GetIdentityAt(_parentHandle, destName);
-            destExists = true;
+            MacSafeFileSystem.RenameAtExclusive(_parentHandle, StagingName, _parentHandle, destName);
         }
-        catch (Win32Exception ex) when (ex.NativeErrorCode == 2 /* ENOENT */)
+        catch (Win32Exception ex) when (ex.NativeErrorCode == 17 /* EEXIST */)
         {
-            destExists = false;
-        }
-
-        if (destExists)
-        {
-            if (File.Exists(DestinationPath))
-            {
-                throw new IOException("A file appeared at the extraction target before installation.");
-            }
-
             if (Directory.Exists(DestinationPath))
             {
                 FileAttributes attributes = File.GetAttributes(DestinationPath);
-                if ((attributes & FileAttributes.ReparsePoint) != 0
-                    || Directory.EnumerateFileSystemEntries(DestinationPath).Any())
+                if ((attributes & FileAttributes.ReparsePoint) == 0 && !Directory.EnumerateFileSystemEntries(DestinationPath).Any())
                 {
-                    throw new IOException("The extraction target changed while extraction was running.");
+                    Directory.Delete(DestinationPath);
+                    MacSafeFileSystem.RenameAtExclusive(_parentHandle, StagingName, _parentHandle, destName);
                 }
-
-                Directory.Delete(DestinationPath);
+                else
+                {
+                    throw new IOException("The extraction target changed or is not empty before installation.", ex);
+                }
+            }
+            else
+            {
+                throw new IOException("A file appeared at the extraction target before installation.", ex);
             }
         }
 
-        // Perform atomic rename via parent directory descriptor
-        MacSafeFileSystem.RenameAt(_parentHandle, StagingName, _parentHandle, destName);
+        // Post-rename identity verification
+        MacFileIdentity postRenameIdentity = MacSafeFileSystem.GetIdentityAt(_parentHandle, destName);
+        if (!postRenameIdentity.SameObject(_stagingIdentity))
+        {
+            throw new InvalidOperationException("Installed directory identity mismatch after atomic rename.");
+        }
+
         _installed = true;
     }
 
@@ -807,18 +867,49 @@ internal sealed class MacExtractionStaging : IDisposable
                 {
                     return; // Path swapped; refuse recursive deletion of foreign directory!
                 }
-            }
 
-            if (Directory.Exists(StagingPath))
-            {
-                FileAttributes attributes = File.GetAttributes(StagingPath);
-                if ((attributes & FileAttributes.ReparsePoint) != 0)
+                // Atomically rename staging directory to a unique private cleanup name in parent
+                string cleanupName = $".keepvault_cleanup_{Guid.NewGuid():N}.extract-part";
+                try
                 {
-                    Directory.Delete(StagingPath);
+                    MacSafeFileSystem.RenameAt(_parentHandle, StagingName, _parentHandle, cleanupName);
+                }
+                catch
+                {
                     return;
                 }
 
-                Directory.Delete(StagingPath, recursive: true);
+                // Verify identity of renamed cleanup entry
+                MacFileIdentity cleanupIdentity;
+                try
+                {
+                    cleanupIdentity = MacSafeFileSystem.GetIdentityAt(_parentHandle, cleanupName);
+                }
+                catch
+                {
+                    return;
+                }
+
+                if (!cleanupIdentity.SameObject(_stagingIdentity))
+                {
+                    return; // Cleanup entry mismatch! Refuse deletion.
+                }
+
+                // Safely remove the isolated cleanup directory
+                string canonicalParent = MacSafeFileSystem.ResolveExistingRealPath(Path.GetDirectoryName(DestinationPath) ?? Environment.CurrentDirectory);
+                string cleanupPath = Path.Combine(canonicalParent, cleanupName);
+                if (Directory.Exists(cleanupPath))
+                {
+                    FileAttributes attributes = File.GetAttributes(cleanupPath);
+                    if ((attributes & FileAttributes.ReparsePoint) != 0)
+                    {
+                        Directory.Delete(cleanupPath);
+                    }
+                    else
+                    {
+                        Directory.Delete(cleanupPath, recursive: true);
+                    }
+                }
             }
         }
         catch

@@ -269,8 +269,10 @@ internal static class V10MasterKdf
             + (sizeof(int) + sha3Salt.Length)
             + (sizeof(int) + skeinSalt.Length);
 
-        byte[] message = new byte[total];
-        byte[] digest = new byte[64];
+        using LockedSensitiveBuffer messageBuf = LockedSensitiveBuffer.Create(total);
+        using LockedSensitiveBuffer digestBuf = LockedSensitiveBuffer.Create(64);
+        Span<byte> message = messageBuf.Bytes;
+        Span<byte> digest = digestBuf.Bytes;
         try
         {
             int offset = 0;
@@ -285,7 +287,7 @@ internal static class V10MasterKdf
             WriteLengthPrefixed(message, ref offset, skeinSalt);
 
             _ = Sha3_512Compat.HashData(message, digest);
-            ushort pmi = BinaryPrimitives.ReadUInt16BigEndian(digest.AsSpan(0, 2));
+            ushort pmi = BinaryPrimitives.ReadUInt16BigEndian(digest.Slice(0, 2));
             uint memory = MemoryMinKiB + (MemoryStepKiB * pmi);
             if (memory is < MemoryMinKiB or > MemoryMaxKiB)
             {
@@ -296,8 +298,6 @@ internal static class V10MasterKdf
         }
         finally
         {
-            CryptographicOperations.ZeroMemory(message);
-            CryptographicOperations.ZeroMemory(digest);
             CryptographicOperations.ZeroMemory(domainBytes);
         }
     }
