@@ -33,18 +33,18 @@ internal static class MacGuiTests
         public void Write(string key, string value) => _values[key] = value;
     }
 
-    internal static (string Name, Func<Task> Run)[] Tests =>
+    internal static TestCase[] Tests =>
     [
-        ("GUI entropy display beyond the 512 minimum", () => RunOnUiThread(TestEntropyDisplayGrowsPastMinimum)),
-        ("GUI encryption toggle and target normalization", () => RunOnUiThread(TestEncryptionToggle)),
-        ("GUI folder target lands beside the folder", () => RunOnUiThread(TestFolderTargetSuggestion)),
-        ("GUI password policy feedback", () => RunOnUiThread(TestPasswordPolicyFeedback)),
-        ("GUI verified-original-deletion localization", () => RunOnUiThread(TestDeleteOriginalsLocalization)),
-        ("GUI reference control inventory", () => RunOnUiThread(TestReferenceControlsPresent)),
-        ("GUI 256-character factor normalization and field handling", () => RunOnUiThread(TestFactorBoxesLengthAndNormalization)),
-        ("GUI secret clearing wipes password, PIN, and factors", () => RunOnUiThread(TestSecretClearing)),
-        ("GUI KDF and entropy profile description localization", () => RunOnUiThread(TestKdfAndEntropyLocalization)),
-        ("GUI full creation flow with mouse sampling and factor generation", () => RunOnUiThread(TestFullCreationFlowViaGui)),
+        new("GUI entropy display beyond the 512 minimum", () => RunOnUiThread(TestEntropyDisplayGrowsPastMinimum), TestResource.Gui, "GUI"),
+        new("GUI encryption toggle and target normalization", () => RunOnUiThread(TestEncryptionToggle), TestResource.Gui, "GUI"),
+        new("GUI folder target lands beside the folder", () => RunOnUiThread(TestFolderTargetSuggestion), TestResource.Gui, "GUI"),
+        new("GUI password policy feedback", () => RunOnUiThread(TestPasswordPolicyFeedback), TestResource.Gui, "GUI"),
+        new("GUI verified-original-deletion localization", () => RunOnUiThread(TestDeleteOriginalsLocalization), TestResource.Gui, "GUI"),
+        new("GUI reference control inventory", () => RunOnUiThread(TestReferenceControlsPresent), TestResource.Gui, "GUI"),
+        new("GUI 256-character factor normalization and field handling", () => RunOnUiThread(TestFactorBoxesLengthAndNormalization), TestResource.Gui, "GUI"),
+        new("GUI secret clearing wipes password, PIN, and factors", () => RunOnUiThread(TestSecretClearing), TestResource.Gui, "GUI"),
+        new("GUI KDF and entropy profile description localization", () => RunOnUiThread(TestKdfAndEntropyLocalization), TestResource.Gui, "GUI"),
+        new("GUI full creation flow with mouse sampling and factor generation", () => RunOnUiThread(TestFullCreationFlowViaGui), TestResource.Gui, "GUI"),
     ];
 
     private static readonly BlockingCollection<(Action<MainWindow> Body, TaskCompletionSource Completion)> Work = new();

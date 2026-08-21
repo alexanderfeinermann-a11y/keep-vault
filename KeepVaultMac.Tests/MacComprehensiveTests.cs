@@ -34,6 +34,37 @@ internal static partial class MacComprehensiveTests
     private const string UserPin = "428317";
     private const string WrongPassword = "Q!m8$Ls2#Vx7%Tp4&Jd9*Wr5+Kn6=Zu3?Ce";
 
+    internal static uint? TestSeed { get; set; }
+
+    internal static IReadOnlyList<TestCase> AllTests =>
+    [
+        new("macOS process hardening", TestProcessHardeningAsync, TestResource.ProcessGlobal, "Security"),
+        new("signed native trust and tamper rejection", TestNativeTrustAsync, TestResource.Light, "Trust"),
+        new("every Mach-O in the release bundle carries a hybrid signature", TestBundleMachOClosureAsync, TestResource.Light, "Packaging"),
+        new("the companion QR scanner is checked against the pinned keys", TestCompanionScannerAsync, TestResource.Light, "Packaging"),
+        new("v10 primitives against independent second implementations", TestV10PrimitivesAsync, TestResource.Light, "Crypto"),
+        new("v10 creation PIN policy and weak-pattern rejection", TestPinCreationPolicyAsync, TestResource.Light, "Policy"),
+        new("password policy and KEEPVAULT term rejection", TestPasswordPolicyAsync, TestResource.Light, "Policy"),
+        new("v10 master KDF: credential binding, PMI range and round chaining", TestV10MasterKdfAsync, TestResource.ArgonHeavy, "KDF"),
+        new("v10 peak memory stays at one Argon2 matrix, and the header leaks nothing", TestV10CostAndHeaderAsync, TestResource.ArgonPeakMemory, "KDF"),
+        new("SHA3, Skein, Kalyna and Threefish reference vectors", TestPrimitiveVectorsAsync, TestResource.Light, "Crypto"),
+        new("ML-DSA-87 managed/reference interoperability", TestMldsaInteropAsync, TestResource.CpuHeavy, "Crypto"),
+        new("randomised differential testing against every reference library", TestReferenceDifferentialAsync, TestResource.CpuHeavy, "Crypto"),
+        new("Argon2id fixed 1 GiB profile and independent equivalence", TestArgon2Async, TestResource.ArgonHeavy, "KDF"),
+        new("ZPAQ levels, streaming, traversal and malformed corpus", TestZpaqAsync, TestResource.ZpaqGlobal, "ZPAQ"),
+        new("v10 suite roundtrips and manipulation rejection", TestContainersAsync, TestResource.EntropyGlobal, "Containers"),
+        new("cascade layering: the outer layer alone reveals nothing", TestCascadeLayeringAsync, TestResource.Light, "Crypto"),
+        new("v10 two-round key derivation from one pool consumption", TestTwoRoundDerivationAsync, TestResource.EntropyGlobal, "Crypto"),
+        new("salt and nonce for every single-round suite without prepared entropy", TestUnpreparedEncryptionParametersAsync, TestResource.EntropyGlobal, "Crypto"),
+        new("v10 per-chunk nonces across a multi-chunk archive", TestPerChunkNoncesAsync, TestResource.CpuHeavy, "Crypto"),
+        new("MARS and SHACAL-2 published vectors and CTR behaviour", TestCascadeCipherVectorsAsync, TestResource.Light, "Crypto"),
+        new("KPAR2-v3 repair, authentication and transplantation rejection", TestRecoveryAsync, TestResource.EntropyGlobal, "Recovery"),
+        new("KPAR2-v3 accepts every catalogued suite, not just the first two", TestRecoveryAcrossSuitesAsync, TestResource.EntropyGlobal, "Recovery"),
+        new("cryptographic erase ordering and hard-link refusal", TestCryptographicEraseAsync, TestResource.EntropyGlobal, "Deletion"),
+        new("verified original deletion refuses on any mismatch", TestVerifiedOriginalDeletionAsync, TestResource.Light, "Deletion"),
+        .. MacGuiTests.Tests,
+    ];
+
     /// <summary>
     /// Runs the comprehensive groups, optionally narrowed to those whose name
     /// contains <paramref name="only"/>. The filter exists so a single group
@@ -41,56 +72,12 @@ internal static partial class MacComprehensiveTests
     /// </summary>
     internal static async Task RunAsync(string? only = null)
     {
-        (string Name, Func<Task> Run)[] tests =
-        [
-            ("macOS process hardening", TestProcessHardeningAsync),
-            ("signed native trust and tamper rejection", TestNativeTrustAsync),
-            ("every Mach-O in the release bundle carries a hybrid signature", TestBundleMachOClosureAsync),
-            ("the companion QR scanner is checked against the pinned keys", TestCompanionScannerAsync),
-            ("v10 primitives against independent second implementations", TestV10PrimitivesAsync),
-            ("v10 creation PIN policy and weak-pattern rejection", TestPinCreationPolicyAsync),
-            ("password policy and KEEPVAULT term rejection", TestPasswordPolicyAsync),
-            ("v10 master KDF: credential binding, PMI range and round chaining", TestV10MasterKdfAsync),
-            ("v10 peak memory stays at one Argon2 matrix, and the header leaks nothing", TestV10CostAndHeaderAsync),
-            ("SHA3, Skein, Kalyna and Threefish reference vectors", TestPrimitiveVectorsAsync),
-            ("ML-DSA-87 managed/reference interoperability", TestMldsaInteropAsync),
-            ("randomised differential testing against every reference library", TestReferenceDifferentialAsync),
-            ("Argon2id fixed 1 GiB profile and independent equivalence", TestArgon2Async),
-            ("ZPAQ levels, streaming, traversal and malformed corpus", TestZpaqAsync),
-            ("v10 suite roundtrips and manipulation rejection", TestContainersAsync),
-            ("cascade layering: the outer layer alone reveals nothing", TestCascadeLayeringAsync),
-            ("v10 two-round key derivation from one pool consumption", TestTwoRoundDerivationAsync),
-            ("salt and nonce for every single-round suite without prepared entropy", TestUnpreparedEncryptionParametersAsync),
-            ("v10 per-chunk nonces across a multi-chunk archive", TestPerChunkNoncesAsync),
-            ("MARS and SHACAL-2 published vectors and CTR behaviour", TestCascadeCipherVectorsAsync),
-            ("KPAR2-v3 repair, authentication and transplantation rejection", TestRecoveryAsync),
-            ("KPAR2-v3 accepts every catalogued suite, not just the first two", TestRecoveryAcrossSuitesAsync),
-            ("cryptographic erase ordering and hard-link refusal", TestCryptographicEraseAsync),
-            ("verified original deletion refuses on any mismatch", TestVerifiedOriginalDeletionAsync),
-            // The GUI groups run last: they drive the real window through
-            // Avalonia's headless backend and feed the shared entropy pools
-            // thousands of pointer samples, which the earlier groups should not
-            // inherit.
-            .. MacGuiTests.Tests,
-        ];
-
-        if (only is not null)
+        string[] args = only != null ? ["--full", "--no-smoke", "--only", only] : ["--full", "--no-smoke"];
+        int exitCode = await TestRunner.RunAsync(args, [], AllTests).ConfigureAwait(false);
+        if (exitCode != 0)
         {
-            tests = [.. tests.Where(test => test.Name.Contains(only, StringComparison.OrdinalIgnoreCase))];
-            if (tests.Length == 0)
-            {
-                throw new ArgumentException($"No comprehensive group matches '{only}'.", nameof(only));
-            }
+            throw new InvalidOperationException("Comprehensive test suite reported failures.");
         }
-
-        foreach ((string name, Func<Task> run) in tests)
-        {
-            Stopwatch stopwatch = Stopwatch.StartNew();
-            await run().ConfigureAwait(false);
-            Console.WriteLine($"FULL PASS {name} ({stopwatch.Elapsed.TotalSeconds:F1}s)");
-        }
-
-        Console.WriteLine($"{tests.Length} comprehensive macOS functional/cryptographic groups passed.");
     }
 
     private static Task TestProcessHardeningAsync()

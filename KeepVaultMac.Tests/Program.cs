@@ -5,68 +5,24 @@ using KalynaArchiver.Signing;
 
 [assembly: SupportedOSPlatform("macos14.0")]
 
-var tests = new List<(string Name, Func<Task> Run)>
+var smokeTests = new List<TestCase>
 {
-    ("SHA3-512 FIPS vector", TestSha3Async),
-    ("HMAC-SHA3-512 vector", TestHmacSha3Async),
-    ("descriptor identity", TestDescriptorIdentityAsync),
-    ("symlink rejection", TestSymlinkRejectionAsync),
-    ("archive-input symlink rejection", TestArchiveInputSymlinkRejectionAsync),
-    ("container-private archive-input snapshot", TestArchiveInputSnapshotLocationAsync),
-    ("overlapping archive-input normalization", TestOverlappingArchiveInputsAsync),
-    ("descriptor-bound private snapshot", TestDescriptorBoundPrivateSnapshotAsync),
-    ("private authenticated-input snapshot", TestPrivateSnapshotAsync),
-    ("Apple signature framework binding", TestAppleSignatureBindingAsync),
-    ("locked secret buffer lifecycle", TestLockedSecretBufferAsync),
-    ("password policy", TestPasswordPolicyAsync),
-    ("release companion version plumbing", TestReleaseCompanionVersionPlumbingAsync),
+    new("SHA3-512 FIPS vector", TestSha3Async, TestResource.Light, "Smoke", IsSmoke: true),
+    new("HMAC-SHA3-512 vector", TestHmacSha3Async, TestResource.Light, "Smoke", IsSmoke: true),
+    new("descriptor identity", TestDescriptorIdentityAsync, TestResource.Light, "Smoke", IsSmoke: true),
+    new("symlink rejection", TestSymlinkRejectionAsync, TestResource.Light, "Smoke", IsSmoke: true),
+    new("archive-input symlink rejection", TestArchiveInputSymlinkRejectionAsync, TestResource.Light, "Smoke", IsSmoke: true),
+    new("container-private archive-input snapshot", TestArchiveInputSnapshotLocationAsync, TestResource.Light, "Smoke", IsSmoke: true),
+    new("overlapping archive-input normalization", TestOverlappingArchiveInputsAsync, TestResource.Light, "Smoke", IsSmoke: true),
+    new("descriptor-bound private snapshot", TestDescriptorBoundPrivateSnapshotAsync, TestResource.Light, "Smoke", IsSmoke: true),
+    new("private authenticated-input snapshot", TestPrivateSnapshotAsync, TestResource.Light, "Smoke", IsSmoke: true),
+    new("Apple signature framework binding", TestAppleSignatureBindingAsync, TestResource.Light, "Smoke", IsSmoke: true),
+    new("locked secret buffer lifecycle", TestLockedSecretBufferAsync, TestResource.Light, "Smoke", IsSmoke: true),
+    new("password policy", TestPasswordPolicyAsync, TestResource.Light, "Smoke", IsSmoke: true),
+    new("release companion version plumbing", TestReleaseCompanionVersionPlumbingAsync, TestResource.Light, "Smoke", IsSmoke: true),
 };
 
-foreach ((string name, Func<Task> run) in tests)
-{
-    await run().ConfigureAwait(false);
-    Console.WriteLine($"PASS {name}");
-}
-
-Console.WriteLine($"{tests.Count} macOS smoke tests passed.");
-
-if (args.Contains("--full", StringComparer.Ordinal))
-{
-    int onlyIndex = Array.IndexOf(args, "--only");
-    string? only = onlyIndex >= 0 && onlyIndex + 1 < args.Length ? args[onlyIndex + 1] : null;
-    await MacComprehensiveTests.RunAsync(only).ConfigureAwait(false);
-}
-
-// Renders both language variants so the printed layout can be inspected as a
-// document rather than only asserted on.
-int sheetIndex = Array.IndexOf(args, "--dump-key-sheets");
-if (sheetIndex >= 0 && sheetIndex + 1 < args.Length)
-{
-    string outputDirectory = args[sheetIndex + 1];
-    Directory.CreateDirectory(outputDirectory);
-    string first = string.Concat(Enumerable.Range(0, 256).Select(i => "0123456789abcdef"[(i * 7) % 16]));
-    string second = string.Concat(Enumerable.Range(0, 256).Select(i => "0123456789abcdef"[(i * 11 + 3) % 16]));
-    foreach (bool english in new[] { false, true })
-    {
-        var service = new KeySheetService();
-        string suffix = english ? "en" : "de";
-        string firstTarget = Path.Combine(outputDirectory, $"key-sheet-a-{suffix}.pdf");
-        string secondTarget = Path.Combine(outputDirectory, $"key-sheet-b-{suffix}.pdf");
-        service.SaveTestPdf(
-            new KeySheetData(
-                Path.Combine(outputDirectory, "beispiel-archiv.kzpaq"),
-                EncryptionSuite.ParanoiaCascade,
-                first,
-                second,
-                DateTime.Now,
-                english,
-                string.Empty),
-            firstTarget,
-            secondTarget);
-        Console.WriteLine($"key_sheets={firstTarget}");
-        Console.WriteLine($"key_sheets={secondTarget}");
-    }
-}
+return await TestRunner.RunAsync(args, smokeTests, MacComprehensiveTests.AllTests).ConfigureAwait(false);
 
 static Task TestSha3Async()
 {
