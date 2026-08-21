@@ -1538,7 +1538,7 @@ public sealed partial class MainWindow : Window, IDisposable
     private string PinViolationText(PinPolicyViolation violation) => violation switch
     {
         PinPolicyViolation.TooShort => string.Format(CultureInfo.CurrentCulture, T("pinTooShort"), V10KeyDerivation.MinPinLength),
-        PinPolicyViolation.TooLong => string.Format(CultureInfo.CurrentCulture, T("pinTooLong"), V10KeyDerivation.MaxPinLength),
+        PinPolicyViolation.TooLong => string.Format(CultureInfo.CurrentCulture, T("pinTooLong"), V10KeyDerivation.MaxPinCreationLength),
         PinPolicyViolation.NonDigit => T("pinNonDigit"),
         PinPolicyViolation.NotEnoughDistinctDigits => string.Format(CultureInfo.CurrentCulture, T("pinDistinct"), V10KeyDerivation.MinDistinctPinDigits),
         PinPolicyViolation.RepeatedDigitsTriple => T("pinRepeatedTriple"),

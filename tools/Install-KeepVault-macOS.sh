@@ -474,27 +474,30 @@ fi
 installed_version=${candidate_version}
 
 if (( installed_version > recorded_version )) || [[ ! -f ${anchor_path} ]]; then
+  anchor_updated=1
   anchor_update_status=0
   ANCHOR_DIRECTORY=${anchor_directory} ANCHOR_PATH=${anchor_path} ANCHOR_VERSION=${installed_version} \
     osascript <<'APPLESCRIPT' || anchor_update_status=$?
 set anchorDirectory to system attribute "ANCHOR_DIRECTORY"
 set anchorPath to system attribute "ANCHOR_PATH"
 set anchorVersion to system attribute "ANCHOR_VERSION"
+set tempPath to anchorPath & ".tmp." & (do shell script "echo $$")
 set commandText to "/bin/mkdir -p " & quoted form of anchorDirectory & ¬
   " && /usr/sbin/chown root:wheel " & quoted form of anchorDirectory & ¬
   " && /bin/chmod 0755 " & quoted form of anchorDirectory & ¬
-  " && /usr/bin/printf '%s' " & quoted form of anchorVersion & " > " & quoted form of anchorPath & ¬
-  " && /usr/sbin/chown root:wheel " & quoted form of anchorPath & ¬
-  " && /bin/chmod 0644 " & quoted form of anchorPath
+  " && /usr/bin/printf '%s' " & quoted form of anchorVersion & " > " & quoted form of tempPath & ¬
+  " && /usr/sbin/chown root:wheel " & quoted form of tempPath & ¬
+  " && /bin/chmod 0644 " & quoted form of tempPath & ¬
+  " && /bin/mv -f " & quoted form of tempPath & " " & quoted form of anchorPath
 do shell script commandText with administrator privileges
 APPLESCRIPT
   anchor_owner=$(stat -f '%u' ${anchor_path} 2>/dev/null || print -1)
-  if (( anchor_update_status != 0 )) || [[ ${anchor_owner} != 0 || $(<${anchor_path}) != ${installed_version} ]]; then
-    print -u2 'The machine-wide installation record could not be written; rolling back installation.'
+  anchor_mode=$(stat -f '%Lp' ${anchor_path} 2>/dev/null || print 0)
+  if (( anchor_update_status != 0 || anchor_owner != 0 || (8#${anchor_mode} & 8#022) != 0 )) || [[ $(<${anchor_path}) != ${installed_version} ]]; then
+    print -u2 'The machine-wide installation record could not be written or has insecure permissions; rolling back installation.'
     execute_rollback
     exit 1
   fi
-  anchor_updated=1
   print "rollback_anchor=${anchor_path} (${installed_version})"
 else
   print "rollback_anchor=${anchor_path} (unveraendert ${recorded_version})"
@@ -519,8 +522,9 @@ ${launch_services} -f ${destination}
 if (( create_desktop_alias )); then
   temporary_alias_name=.Keep\ Vault.$RANDOM.$$.alias
   temporary_alias_path=${desktop_dir}/${temporary_alias_name}
+  alias_creation_status=0
   APP_TARGET=${destination} ALIAS_DIR=${desktop_dir} ALIAS_NAME=${temporary_alias_name} \
-    osascript <<'APPLESCRIPT'
+    osascript <<'APPLESCRIPT' || alias_creation_status=$?
 set targetPath to system attribute "APP_TARGET"
 set destinationPath to system attribute "ALIAS_DIR"
 set requestedName to system attribute "ALIAS_NAME"
@@ -529,12 +533,11 @@ tell application "Finder"
   set name of createdAlias to requestedName
 end tell
 APPLESCRIPT
-  if [[ ! -f ${temporary_alias_path} || -L ${temporary_alias_path} || $(file -b ${temporary_alias_path}) != 'MacOS Alias file' ]]; then
-    print -u2 'Finder did not create a valid Keep Vault alias.'
-    exit 1
-  fi
-  mv -f ${temporary_alias_path} ${alias_path}
-  resolved_alias=$(ALIAS_PATH=${alias_path} osascript <<'APPLESCRIPT'
+  if (( alias_creation_status != 0 )) || [[ ! -f ${temporary_alias_path} || -L ${temporary_alias_path} || $(file -b ${temporary_alias_path}) != 'MacOS Alias file' ]]; then
+    print -u2 'Warning: Finder did not create a valid Keep Vault alias.'
+  else
+    mv -f ${temporary_alias_path} ${alias_path}
+    resolved_alias=$(ALIAS_PATH=${alias_path} osascript <<'APPLESCRIPT'
 set aliasPath to system attribute "ALIAS_PATH"
 tell application "Finder"
   set originalItem to original item of (POSIX file aliasPath as alias)
@@ -542,11 +545,12 @@ tell application "Finder"
 end tell
 APPLESCRIPT
 )
-  [[ ${resolved_alias%/} == ${destination%/} ]] || {
-    print -u2 'The Desktop Finder alias does not resolve to the installed Keep Vault app.'
-    exit 1
-  }
-  print "desktop_alias=${alias_path}"
+    if [[ ${resolved_alias%/} == ${destination%/} ]]; then
+      print "desktop_alias=${alias_path}"
+    else
+      print -u2 'Warning: The Desktop Finder alias does not resolve to the installed Keep Vault app.'
+    fi
+  fi
 fi
 
 print "installed_app=${destination}"

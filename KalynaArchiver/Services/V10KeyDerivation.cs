@@ -19,7 +19,9 @@ namespace KalynaArchiver.Services;
 internal static class V10KeyDerivation
 {
     public const int MinPinLength = 6;
-    public const int MaxPinLength = 16;
+    public const int MaxPinSyntaxLength = 16;
+    public const int MaxPinCreationLength = 12;
+    public const int MaxPinLength = MaxPinSyntaxLength;
     public const int FactorHexLength = 256;
     public const int FactorBytes = 128;
 
@@ -58,10 +60,10 @@ internal static class V10KeyDerivation
             throw new ArgumentException("The PIN is required.", nameof(pin));
         }
 
-        if (pin.Length is < MinPinLength or > MaxPinLength)
+        if (pin.Length is < MinPinLength or > MaxPinSyntaxLength)
         {
             throw new ArgumentException(
-                $"The PIN must be {MinPinLength} to {MaxPinLength} digits.", nameof(pin));
+                $"The PIN must be {MinPinLength} to {MaxPinSyntaxLength} digits.", nameof(pin));
         }
 
         foreach (char c in pin)
@@ -103,7 +105,7 @@ internal static class V10KeyDerivation
         {
             violations.Add(PinPolicyViolation.TooShort);
         }
-        else if (raw.Length > MaxPinLength)
+        else if (raw.Length > MaxPinCreationLength)
         {
             violations.Add(PinPolicyViolation.TooLong);
         }
@@ -304,22 +306,49 @@ internal static class V10KeyDerivation
     public static LockedSensitiveBuffer ParseFactor(string factorHex, string name)
     {
         ArgumentNullException.ThrowIfNull(factorHex);
-        string normalized = PasswordKeyService.NormalizeGeneratedPassword(factorHex);
-        if (normalized.Length != FactorHexLength)
-        {
-            throw new ArgumentException(
-                $"{name} must be exactly {FactorHexLength} hexadecimal characters.", nameof(factorHex));
-        }
+        return ParseFactor(factorHex.AsSpan(), name);
+    }
 
+    public static LockedSensitiveBuffer ParseFactor(ReadOnlySpan<char> factorChars, string name)
+    {
         var buffer = LockedSensitiveBuffer.Create(FactorBytes);
         try
         {
-            // Decoded straight into the locked buffer. Convert.FromHexString
-            // would allocate an unlocked, uncleared copy of the factor first.
-            for (int i = 0; i < FactorBytes; i++)
+            int hexDigitCount = 0;
+            int currentHigh = -1;
+            int byteIndex = 0;
+
+            for (int i = 0; i < factorChars.Length; i++)
             {
-                buffer.Bytes[i] = (byte)((DecodeNibble(normalized[2 * i], name) << 4)
-                    | DecodeNibble(normalized[(2 * i) + 1], name));
+                char c = factorChars[i];
+                if (char.IsWhiteSpace(c))
+                {
+                    continue;
+                }
+
+                int nibble = DecodeNibble(c, name);
+                hexDigitCount++;
+
+                if (currentHigh < 0)
+                {
+                    currentHigh = nibble;
+                }
+                else
+                {
+                    if (byteIndex >= FactorBytes)
+                    {
+                        throw new ArgumentException(
+                            $"{name} must be exactly {FactorHexLength} hexadecimal characters.", nameof(factorChars));
+                    }
+                    buffer.Bytes[byteIndex++] = (byte)((currentHigh << 4) | nibble);
+                    currentHigh = -1;
+                }
+            }
+
+            if (hexDigitCount != FactorHexLength || byteIndex != FactorBytes)
+            {
+                throw new ArgumentException(
+                    $"{name} must be exactly {FactorHexLength} hexadecimal characters.", nameof(factorChars));
             }
 
             return buffer;

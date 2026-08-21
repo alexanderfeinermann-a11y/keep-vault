@@ -433,8 +433,12 @@ internal sealed class MacOriginalDeletionService
                 // Atomically move from parent directory to quarantine directory
                 MacSafeFileSystem.RenameAt(parentHandle, fileName, qDirHandle, fileName);
 
+                // Register rollback entry immediately following successful rename
+                var item = new QuarantinedItem(path, canonicalParent, quarantineDir, fileName, qDirHandle, default);
+                quarantined.Add(item);
+
                 MacFileIdentity qIdentity = MacSafeFileSystem.GetIdentityAt(qDirHandle, fileName);
-                quarantined.Add(new QuarantinedItem(path, canonicalParent, quarantineDir, fileName, qDirHandle, qIdentity));
+                item.Identity = qIdentity;
             }
 
             // Stage 2: Descriptor-bound verification of quarantined files before committing to unlink
@@ -622,7 +626,7 @@ internal sealed class MacOriginalDeletionService
         public string QuarantineDirectory { get; }
         public string QuarantineFileName { get; }
         public SafeFileHandle QuarantineDirHandle { get; }
-        public MacFileIdentity Identity { get; }
+        public MacFileIdentity Identity { get; set; }
 
         public QuarantinedItem(
             string originalPath,

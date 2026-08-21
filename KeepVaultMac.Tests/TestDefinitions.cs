@@ -31,53 +31,133 @@ internal static class TestRunner
         IReadOnlyList<TestCase> smokeTests,
         IReadOnlyList<TestCase> comprehensiveTests)
     {
-        bool listOnly = args.Contains("--list", StringComparer.OrdinalIgnoreCase);
-        bool fullRequested = args.Contains("--full", StringComparer.OrdinalIgnoreCase);
-        bool quickRequested = args.Contains("--quick", StringComparer.OrdinalIgnoreCase);
-        bool changedRequested = args.Contains("--changed", StringComparer.OrdinalIgnoreCase);
-        bool noSmokeRequested = args.Contains("--no-smoke", StringComparer.OrdinalIgnoreCase);
-
-        int onlyIndex = Array.IndexOf(args, "--only");
-        string? onlyFilter = onlyIndex >= 0 && onlyIndex + 1 < args.Length ? args[onlyIndex + 1] : null;
-
-        int smokeOnlyIndex = Array.IndexOf(args, "--smoke-only");
-        string? smokeOnlyFilter = smokeOnlyIndex >= 0 && smokeOnlyIndex + 1 < args.Length ? args[smokeOnlyIndex + 1] : null;
-
-        int categoryIndex = Array.IndexOf(args, "--category");
-        string? categoryFilter = categoryIndex >= 0 && categoryIndex + 1 < args.Length ? args[categoryIndex + 1] : null;
-
-        int repeatIndex = Array.IndexOf(args, "--repeat");
-        int repeatCount = repeatIndex >= 0 && repeatIndex + 1 < args.Length && int.TryParse(args[repeatIndex + 1], out int r) ? Math.Max(1, r) : 1;
-
-        int parallelIndex = Array.IndexOf(args, "--parallel");
+        bool listOnly = false;
+        bool fullRequested = false;
+        bool quickRequested = false;
+        bool changedRequested = false;
+        bool noSmokeRequested = false;
+        bool smokeRequested = false;
+        string? onlyFilter = null;
+        string? smokeOnlyFilter = null;
+        string? categoryFilter = null;
+        int repeatCount = 1;
         int? parallelOverride = null;
-        if (parallelIndex >= 0)
-        {
-            if (parallelIndex + 1 >= args.Length || !int.TryParse(args[parallelIndex + 1], out int p) || (p != -1 && (p < 1 || p > 128)))
-            {
-                Console.Error.WriteLine("Usage error: --parallel requires -1 or an integer between 1 and 128.");
-                return 64;
-            }
-            parallelOverride = p;
-        }
-
-        int seedIndex = Array.IndexOf(args, "--seed");
         uint? seedOverride = null;
-        if (seedIndex >= 0 && seedIndex + 1 < args.Length)
+        string? baseRef = null;
+        string? dumpKeySheetsDir = null;
+        string timingsPath = Path.Combine(AppContext.BaseDirectory, ".test-timings.json");
+
+        for (int i = 0; i < args.Length; i++)
         {
-            string seedStr = args[seedIndex + 1];
-            seedOverride = seedStr.StartsWith("0x", StringComparison.OrdinalIgnoreCase)
-                ? Convert.ToUInt32(seedStr[2..], 16)
-                : uint.TryParse(seedStr, out uint s) ? s : null;
+            string arg = args[i];
+            switch (arg.ToLowerInvariant())
+            {
+                case "--list":
+                    listOnly = true;
+                    break;
+                case "--full":
+                    fullRequested = true;
+                    break;
+                case "--quick":
+                    quickRequested = true;
+                    break;
+                case "--changed":
+                    changedRequested = true;
+                    break;
+                case "--no-smoke":
+                    noSmokeRequested = true;
+                    break;
+                case "--smoke":
+                    smokeRequested = true;
+                    break;
+                case "--only":
+                    if (i + 1 >= args.Length || args[i + 1].StartsWith("--"))
+                    {
+                        Console.Error.WriteLine("Usage error: Missing value for --only.");
+                        return 64;
+                    }
+                    onlyFilter = args[++i];
+                    break;
+                case "--smoke-only":
+                    if (i + 1 >= args.Length || args[i + 1].StartsWith("--"))
+                    {
+                        Console.Error.WriteLine("Usage error: Missing value for --smoke-only.");
+                        return 64;
+                    }
+                    smokeOnlyFilter = args[++i];
+                    break;
+                case "--category":
+                    if (i + 1 >= args.Length || args[i + 1].StartsWith("--"))
+                    {
+                        Console.Error.WriteLine("Usage error: Missing value for --category.");
+                        return 64;
+                    }
+                    categoryFilter = args[++i];
+                    break;
+                case "--repeat":
+                    if (i + 1 >= args.Length || !int.TryParse(args[i + 1], out int r) || r < 1)
+                    {
+                        Console.Error.WriteLine("Usage error: --repeat requires an integer >= 1.");
+                        return 64;
+                    }
+                    repeatCount = r;
+                    i++;
+                    break;
+                case "--parallel":
+                    if (i + 1 >= args.Length || !int.TryParse(args[i + 1], out int p) || (p != -1 && (p < 1 || p > 128)))
+                    {
+                        Console.Error.WriteLine("Usage error: --parallel requires -1 or an integer between 1 and 128.");
+                        return 64;
+                    }
+                    parallelOverride = p;
+                    i++;
+                    break;
+                case "--seed":
+                    if (i + 1 >= args.Length)
+                    {
+                        Console.Error.WriteLine("Usage error: Missing value for --seed.");
+                        return 64;
+                    }
+                    string seedStr = args[++i];
+                    uint? parsedSeed = seedStr.StartsWith("0x", StringComparison.OrdinalIgnoreCase)
+                        ? (uint.TryParse(seedStr[2..], System.Globalization.NumberStyles.HexNumber, null, out uint sHex) ? sHex : null)
+                        : (uint.TryParse(seedStr, out uint sDec) ? sDec : null);
+                    if (parsedSeed == null)
+                    {
+                        Console.Error.WriteLine($"Usage error: Invalid seed value '{seedStr}'. Expected 32-bit unsigned integer or hex (e.g. 0x12345678).");
+                        return 64;
+                    }
+                    seedOverride = parsedSeed;
+                    break;
+                case "--base":
+                    if (i + 1 >= args.Length || args[i + 1].StartsWith("--"))
+                    {
+                        Console.Error.WriteLine("Usage error: Missing value for --base.");
+                        return 64;
+                    }
+                    baseRef = args[++i];
+                    break;
+                case "--dump-key-sheets":
+                    if (i + 1 >= args.Length || args[i + 1].StartsWith("--"))
+                    {
+                        Console.Error.WriteLine("Usage error: Missing value for --dump-key-sheets.");
+                        return 64;
+                    }
+                    dumpKeySheetsDir = args[++i];
+                    break;
+                case "--timings":
+                    if (i + 1 >= args.Length || args[i + 1].StartsWith("--"))
+                    {
+                        Console.Error.WriteLine("Usage error: Missing value for --timings.");
+                        return 64;
+                    }
+                    timingsPath = args[++i];
+                    break;
+                default:
+                    Console.Error.WriteLine($"Usage error: Unrecognized argument '{arg}'.");
+                    return 64;
+            }
         }
-
-        int baseIndex = Array.IndexOf(args, "--base");
-        string? baseRef = baseIndex >= 0 && baseIndex + 1 < args.Length ? args[baseIndex + 1] : null;
-
-        int timingsIndex = Array.IndexOf(args, "--timings");
-        string timingsPath = timingsIndex >= 0 && timingsIndex + 1 < args.Length
-            ? args[timingsIndex + 1]
-            : Path.Combine(AppContext.BaseDirectory, ".test-timings.json");
 
         if (listOnly)
         {
@@ -133,7 +213,7 @@ internal static class TestRunner
         else
         {
             // Smoke test selection
-            if (!noSmokeRequested && (onlyFilter is null || smokeOnlyFilter is not null || args.Contains("--smoke", StringComparer.OrdinalIgnoreCase)))
+            if (!noSmokeRequested && (onlyFilter is null || smokeOnlyFilter is not null || smokeRequested))
             {
                 if (smokeOnlyFilter is not null)
                 {
@@ -226,10 +306,9 @@ internal static class TestRunner
         SaveTimings(timingsPath, currentRunTimings);
 
         // Process --dump-key-sheets if passed
-        int sheetIndex = Array.IndexOf(args, "--dump-key-sheets");
-        if (sheetIndex >= 0 && sheetIndex + 1 < args.Length)
+        if (!string.IsNullOrEmpty(dumpKeySheetsDir))
         {
-            DumpKeySheets(args[sheetIndex + 1]);
+            DumpKeySheets(dumpKeySheetsDir);
         }
 
         return 0;
@@ -457,8 +536,10 @@ internal static class TestRunner
 
             foreach (string file in allFiles)
             {
-                if (file.Contains("V10MasterKdf") || file.Contains("V10Primitives") || file.Contains("PasswordKeyService"))
+                bool matched = false;
+                if (file.Contains("V10MasterKdf") || file.Contains("V10Primitives") || file.Contains("PasswordKeyService") || file.Contains("V10KeyDerivation") || file.Contains("SecureMemory"))
                 {
+                    matched = true;
                     affected.Add("v10 primitives against independent second implementations");
                     affected.Add("v10 master KDF: credential binding, PMI range and round chaining");
                     affected.Add("Argon2id fixed 1 GiB profile and independent equivalence");
@@ -469,6 +550,7 @@ internal static class TestRunner
                 }
                 if (file.Contains("ZpaqService") || file.Contains("MacPlatformSecurity") || file.Contains("MacSecureFile") || file.Contains("MacOriginalDeletionService"))
                 {
+                    matched = true;
                     affected.Add("ZPAQ levels, streaming, traversal and malformed corpus");
                     affected.Add("verified original deletion refuses on any mismatch");
                     affected.Add("cryptographic erase ordering and hard-link refusal");
@@ -481,11 +563,13 @@ internal static class TestRunner
                 }
                 if (file.Contains("RecoveryService") || file.Contains("Kpar2"))
                 {
+                    matched = true;
                     affected.Add("KPAR2-v3 repair, authentication and transplantation rejection");
                     affected.Add("KPAR2-v3 accepts every catalogued suite, not just the first two");
                 }
                 if (file.Contains("MainWindow") || file.Contains("MacGuiTests") || file.Contains("Avalonia"))
                 {
+                    matched = true;
                     affected.Add("GUI entropy display beyond the 512 minimum");
                     affected.Add("GUI encryption toggle and target normalization");
                     affected.Add("GUI folder target lands beside the folder");
@@ -499,17 +583,20 @@ internal static class TestRunner
                 }
                 if (file.Contains("QrCodeScanner") || file.Contains("QR-Scanner") || file.Contains("Verify-QR-Scanner"))
                 {
+                    matched = true;
                     affected.Add("the companion QR scanner is checked against the pinned keys");
                     affected.Add("release companion version plumbing");
                 }
                 if (file.Contains("Packaging") || file.Contains("HybridSigner") || file.Contains("Integrity"))
                 {
+                    matched = true;
                     affected.Add("signed native trust and tamper rejection");
                     affected.Add("every Mach-O in the release bundle carries a hybrid signature");
                     affected.Add("ML-DSA-87 managed/reference interoperability");
                 }
                 if (file.Contains("Threefish") || file.Contains("Kalyna") || file.Contains("Sha3") || file.Contains("Skein") || file.Contains("Mars") || file.Contains("Shacal"))
                 {
+                    matched = true;
                     affected.Add("SHA3, Skein, Kalyna and Threefish reference vectors");
                     affected.Add("cascade layering: the outer layer alone reveals nothing");
                     affected.Add("v10 two-round key derivation from one pool consumption");
@@ -518,6 +605,12 @@ internal static class TestRunner
                     affected.Add("MARS and SHACAL-2 published vectors and CTR behaviour");
                     affected.Add("randomised differential testing against every reference library");
                 }
+
+                if (!matched && !IsBenignFile(file))
+                {
+                    affected.Add("ALL_SMOKE");
+                    affected.Add("ALL_COMPREHENSIVE");
+                }
             }
             return affected;
         }
@@ -525,6 +618,34 @@ internal static class TestRunner
         {
             return null;
         }
+    }
+
+    private static bool IsBenignFile(string file)
+    {
+        string normalized = file.Replace('\\', '/');
+        if (normalized.EndsWith(".md", StringComparison.OrdinalIgnoreCase) ||
+            normalized.EndsWith(".txt", StringComparison.OrdinalIgnoreCase) ||
+            normalized.EndsWith(".png", StringComparison.OrdinalIgnoreCase) ||
+            normalized.EndsWith(".icns", StringComparison.OrdinalIgnoreCase) ||
+            normalized.EndsWith(".ico", StringComparison.OrdinalIgnoreCase) ||
+            normalized.EndsWith(".svg", StringComparison.OrdinalIgnoreCase) ||
+            normalized.EndsWith(".gitignore", StringComparison.OrdinalIgnoreCase) ||
+            normalized.EndsWith(".gitattributes", StringComparison.OrdinalIgnoreCase) ||
+            normalized.EndsWith(".editorconfig", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        if (normalized.StartsWith("docs/", StringComparison.OrdinalIgnoreCase) ||
+            normalized.StartsWith("Documentation/", StringComparison.OrdinalIgnoreCase) ||
+            normalized.StartsWith(".github/", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(normalized, "LICENSE", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(normalized, "NOTICE", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        return false;
     }
 
     private static Dictionary<string, double> LoadTimings(string path)

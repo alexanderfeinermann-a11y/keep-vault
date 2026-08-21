@@ -16,6 +16,7 @@ internal static partial class SecureMemory
     private static nuint _originalMaximumWorkingSet;
     private static bool _originalWorkingSetAvailable;
     private static readonly Dictionary<nuint, int> MacLockedPages = [];
+    private static readonly Dictionary<nuint, int> WinLockedPages = [];
 
     internal static long LockedBytesForTests
     {
@@ -189,7 +190,7 @@ internal static partial class SecureMemory
     {
         private readonly int _length;
         private readonly long _reservedBytes;
-        private nuint[] _macPages = [];
+        private nuint[] _lockedPages = [];
         private GCHandle _handle;
         private bool _locked;
 
@@ -206,14 +207,22 @@ internal static partial class SecureMemory
                     bool lockSucceeded;
                     if (OperatingSystem.IsWindows())
                     {
-                        lockSucceeded = VirtualLock(_handle.AddrOfPinnedObject(), checked((nuint)buffer.Length));
+                        lockSucceeded = TryLockWinPages(
+                            _handle.AddrOfPinnedObject(),
+                            checked((nuint)buffer.Length),
+                            out _lockedPages,
+                            out int winError);
+                        if (!lockSucceeded)
+                        {
+                            Marshal.SetLastPInvokeError(winError);
+                        }
                     }
                     else
                     {
                         lockSucceeded = TryLockMacPages(
                             _handle.AddrOfPinnedObject(),
                             checked((nuint)buffer.Length),
-                            out _macPages,
+                            out _lockedPages,
                             out int macError);
                         if (!lockSucceeded)
                         {
@@ -253,12 +262,13 @@ internal static partial class SecureMemory
                 {
                     if (OperatingSystem.IsWindows())
                     {
-                        _ = VirtualUnlock(_handle.AddrOfPinnedObject(), checked((nuint)_length));
+                        UnlockWinPages(_lockedPages);
+                        _lockedPages = [];
                     }
                     else
                     {
-                        UnlockMacPages(_macPages);
-                        _macPages = [];
+                        UnlockMacPages(_lockedPages);
+                        _lockedPages = [];
                     }
                     _locked = false;
                     ReleaseWorkingSet(_reservedBytes);
@@ -340,6 +350,64 @@ internal static partial class SecureMemory
             {
                 _ = MacMemoryUnlock(checked((nint)page), pageSize);
                 MacLockedPages.Remove(page);
+            }
+        }
+    }
+
+    private static bool TryLockWinPages(
+        nint address,
+        nuint length,
+        out nuint[] pages,
+        out int error)
+    {
+        nuint pageSize = checked((nuint)Environment.SystemPageSize);
+        nuint first = checked((nuint)address) / pageSize * pageSize;
+        nuint lastExclusive = checked((checked((nuint)address) + length + pageSize - 1) / pageSize * pageSize);
+        var acquired = new List<nuint>(checked((int)((lastExclusive - first) / pageSize)));
+        error = 0;
+        for (nuint page = first; page < lastExclusive; page += pageSize)
+        {
+            if (WinLockedPages.TryGetValue(page, out int leases))
+            {
+                WinLockedPages[page] = checked(leases + 1);
+                acquired.Add(page);
+                continue;
+            }
+
+            if (!VirtualLock(checked((nint)page), pageSize))
+            {
+                error = Marshal.GetLastPInvokeError();
+                UnlockWinPages([.. acquired]);
+                pages = [];
+                return false;
+            }
+
+            WinLockedPages.Add(page, 1);
+            acquired.Add(page);
+        }
+
+        pages = [.. acquired];
+        return true;
+    }
+
+    private static void UnlockWinPages(nuint[] pages)
+    {
+        nuint pageSize = checked((nuint)Environment.SystemPageSize);
+        foreach (nuint page in pages)
+        {
+            if (!WinLockedPages.TryGetValue(page, out int leases))
+            {
+                continue;
+            }
+
+            if (leases > 1)
+            {
+                WinLockedPages[page] = leases - 1;
+            }
+            else
+            {
+                _ = VirtualUnlock(checked((nint)page), pageSize);
+                WinLockedPages.Remove(page);
             }
         }
     }

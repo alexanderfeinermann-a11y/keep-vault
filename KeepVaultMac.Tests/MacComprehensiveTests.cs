@@ -793,6 +793,23 @@ internal static partial class MacComprehensiveTests
             V10KeyDerivation.ValidatePinSyntax(pin);
         }
 
+        // 13..16 digit PINs: valid for syntax reading, but rejected by creation policy as TooLong
+        string[] longSyntaxPins = ["1948273645019", "92740183652847", "381940562718294", "4283179501628374"];
+        foreach (string pin in longSyntaxPins)
+        {
+            PinPolicyAnalysis analysis = V10KeyDerivation.AnalyzePinForCreation(pin);
+            Require(!analysis.IsAccepted, $"13..16 digit PIN '{pin}' was accepted by creation policy.");
+            Require(analysis.Violations.Contains(PinPolicyViolation.TooLong),
+                $"13..16 digit PIN '{pin}' did not report TooLong violation.");
+
+            bool threw = false;
+            try { V10KeyDerivation.ValidatePinForCreation(pin); } catch (PinPolicyException) { threw = true; }
+            Require(threw, $"ValidatePinForCreation did not throw PinPolicyException for 13..16 digit PIN '{pin}'.");
+
+            // Extraction syntax validation must pass (13-16 digits are valid syntax)
+            V10KeyDerivation.ValidatePinSyntax(pin);
+        }
+
         return Task.CompletedTask;
     }
 

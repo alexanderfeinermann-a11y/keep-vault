@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using KalynaArchiver.Signing;
 using Org.BouncyCastle.Crypto.Digests;
 using Org.BouncyCastle.Crypto.Generators;
 using Org.BouncyCastle.Crypto.Engines;
@@ -172,27 +173,44 @@ internal static class Sha3HkdfExpand
             throw new ArgumentOutOfRangeException(nameof(destination));
         }
 
+        const int hashLen = 64;
+        int n = (destination.Length + hashLen - 1) / hashLen;
+        if (n > 255)
+        {
+            throw new ArgumentOutOfRangeException(nameof(destination), "HKDF output length exceeds maximum allowable (255 * hashLen).");
+        }
+
         using var prkBuf = LockedSensitiveBuffer.Create(pseudoRandomKey.Length);
         pseudoRandomKey.CopyTo(prkBuf.Bytes);
-        using var infoBuf = LockedSensitiveBuffer.Create(info.Length);
-        info.CopyTo(infoBuf.Bytes);
-        try
-        {
-            var generator = new HkdfBytesGenerator(new Sha3Digest(512));
-            generator.Init(HkdfParameters.SkipExtractParameters(prkBuf.Bytes, infoBuf.Bytes));
 
-            using var outBuf = LockedSensitiveBuffer.Create(destination.Length);
-            int generated = generator.GenerateBytes(outBuf.Bytes);
-            if (generated != destination.Length)
+        using var hmac = new HmacSha3_512(prkBuf.Bytes);
+        using var tBuf = LockedSensitiveBuffer.Create(hashLen);
+        int generated = 0;
+
+        for (byte i = 1; i <= n; i++)
+        {
+            if (i > 1)
             {
-                throw new CryptographicException(
-                    $"HKDF-Expand produced {generated} bytes instead of {destination.Length}.");
+                hmac.AppendData(tBuf.Bytes);
             }
+            if (!info.IsEmpty)
+            {
+                hmac.AppendData(info);
+            }
+            hmac.AppendData([i]);
 
-            outBuf.Bytes.CopyTo(destination);
-        }
-        finally
-        {
+            byte[] t = hmac.GetHashAndReset();
+            try
+            {
+                t.CopyTo(tBuf.Bytes.AsSpan());
+                int toCopy = Math.Min(hashLen, destination.Length - generated);
+                tBuf.Bytes.AsSpan(0, toCopy).CopyTo(destination.Slice(generated, toCopy));
+                generated += toCopy;
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(t);
+            }
         }
     }
 }
