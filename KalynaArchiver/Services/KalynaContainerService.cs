@@ -16,7 +16,7 @@ public sealed partial class KalynaContainerService
     // There is deliberately no reader for v7: a format this app writes once and
     // reads years later is safer with one shape than with a compatibility path
     // that is exercised rarely and audited less.
-    private const int CurrentVersion = 10;
+    private const int CurrentVersion = 11;
 
     /// <summary>
     /// The width of the v10 master key. Every role key is cut from a value of
@@ -271,7 +271,7 @@ public sealed partial class KalynaContainerService
                 parameters.TweakBytes > 0 ? EncryptionSuiteCatalog.ThreefishTweakMode : "None",
                 tweak.Length == 0 ? null : Convert.ToBase64String(tweak),
                 hint,
-                // Zero on purpose. v10 derives the Argon2id memory cost from
+                // Zero on purpose. v11 derives the Argon2id memory cost from
                 // the credentials, so writing it here would publish the one
                 // parameter the derivation keeps secret. Iterations and
                 // parallelism are fixed constants and reveal nothing.
@@ -282,11 +282,11 @@ public sealed partial class KalynaContainerService
                 MasterKeyBits,
                 "Sequential",
                 "PMI16",
-                V10MasterKdf.PasswordMode,
-                V10MasterKdf.KdfInputMode,
+                V11MasterKdf.PasswordMode,
+                V11MasterKdf.KdfInputMode,
                 1024,
                 2,
-                V10MasterKdf.KdfMode,
+                V11MasterKdf.KdfMode,
                 secondNonce.Length == 0 ? 0 : parameters.NonceBytes * 8,
                 secondNonce.Length == 0 ? null : Convert.ToBase64String(secondNonce));
             byte[] headerBytes = JsonSerializer.SerializeToUtf8Bytes(header, ContainerJsonContext.Default.ContainerHeader);
@@ -352,7 +352,7 @@ public sealed partial class KalynaContainerService
                                 (byte[] aeadKey, byte[] aeadNonce) =
                                     SplitAeadMaterial(aeadLayout, keyMaterial.EncryptionKey, counter);
                                 byte[] associated =
-                                    BuildChunkAssociatedData(parameters, chunkNonceBase, chunkIndex, read);
+                                    BuildChunkAssociatedData(parameters, chunkNonceBase, chunkIndex, read, CurrentVersion);
                                 try
                                 {
                                     NativeChaChaPoly.Encrypt(
@@ -561,7 +561,8 @@ public sealed partial class KalynaContainerService
                 salt,
                 secondSalt,
                 progress,
-                cancellationToken).ConfigureAwait(false);
+                cancellationToken,
+                header.Version).ConfigureAwait(false);
 
             (actualSha3Tag, actualSkeinTag) = await ComputeCiphertextAuthenticationAsync(
                 input,
@@ -626,7 +627,7 @@ public sealed partial class KalynaContainerService
                         (byte[] aeadKey, byte[] aeadNonce) =
                             SplitAeadMaterial(aeadLayout, keyMaterial.EncryptionKey, counter);
                         byte[] associated =
-                            BuildChunkAssociatedData(parameters, chunkNonceBase, chunkIndex, payload);
+                            BuildChunkAssociatedData(parameters, chunkNonceBase, chunkIndex, payload, header.Version);
                         try
                         {
                             NativeChaChaPoly.Decrypt(
@@ -788,7 +789,8 @@ public sealed partial class KalynaContainerService
                     salt,
                     verifySecondSalt,
                     progress: null,
-                    cancellationToken).ConfigureAwait(false);
+                    cancellationToken,
+                    header.Version).ConfigureAwait(false);
             }
             finally
             {
@@ -1002,14 +1004,14 @@ public sealed partial class KalynaContainerService
                 CryptographicOperations.ZeroMemory(canonicalHeader);
             }
 
-            if (header.Version != CurrentVersion)
+            if (header.Version != 10 && header.Version != 11)
             {
                 throw new InvalidDataException(
-                    header.Version < CurrentVersion
+                    header.Version < 10
                         ? $"This archive uses container version {header.Version}. Keep Vault {CurrentVersion} "
                           + "derives its keys from four credentials including a PIN and cannot open it. "
                           + "Open it with the version that wrote it and create a new archive."
-                        : $"Only encrypted container version {CurrentVersion} is supported.");
+                        : $"Only encrypted container versions 10 and 11 are supported.");
             }
 
             ValidateHeader(header);
@@ -1355,7 +1357,8 @@ public sealed partial class KalynaContainerService
         EncryptionSuiteParameters parameters,
         ReadOnlySpan<byte> archiveNonce,
         long chunkIndex,
-        int length)
+        int length,
+        int version = CurrentVersion)
     {
         // The archive identity is a digest of the whole base nonce, not its
         // first bytes: nonces range from 12 bytes for ChaCha20-Poly1305 alone to
@@ -1366,7 +1369,7 @@ public sealed partial class KalynaContainerService
         _ = Sha3_512Compat.HashData(archiveNonce, identityDigest);
 
         byte[] associated = new byte[4 + 4 + identityBytes + sizeof(long) + sizeof(int)];
-        BinaryPrimitives.WriteInt32BigEndian(associated.AsSpan(0), CurrentVersion);
+        BinaryPrimitives.WriteInt32BigEndian(associated.AsSpan(0), version);
         BinaryPrimitives.WriteInt32BigEndian(associated.AsSpan(4), (int)parameters.Suite);
         identityDigest[..identityBytes].CopyTo(associated.AsSpan(8));
         BinaryPrimitives.WriteInt64BigEndian(associated.AsSpan(8 + identityBytes), chunkIndex);
@@ -1584,7 +1587,7 @@ public sealed partial class KalynaContainerService
     private static void ValidateHeader(ContainerHeader header)
     {
         EncryptionSuiteParameters parameters = EncryptionSuiteCatalog.FromAlgorithm(header.Algorithm);
-        if (header.Version != CurrentVersion
+        if ((header.Version != 10 && header.Version != 11)
             || header.BlockBits != parameters.BlockBytes * 8
             || !string.Equals(header.CounterEndian, EncryptionSuiteCatalog.CounterEndian, StringComparison.Ordinal)
             || header.EncryptionKeyBits != parameters.EncryptionKeyBytes * 8
@@ -1603,7 +1606,7 @@ public sealed partial class KalynaContainerService
             || !string.Equals(header.KdfExecutionMode, "Sequential", StringComparison.Ordinal)
             || !string.Equals(header.KdfMemoryMode, "PMI16", StringComparison.Ordinal))
         {
-            throw new InvalidDataException("Container header contains invalid v10 suite parameters.");
+            throw new InvalidDataException("Container header contains invalid suite parameters.");
         }
 
         ValidatePasswordMode(header);
@@ -1765,12 +1768,32 @@ public sealed partial class KalynaContainerService
     private static void ValidatePasswordMode(ContainerHeader header)
     {
         if (header.GeneratedPasswordFactorCount != 2
-            || header.GeneratedPasswordBits != 1024
-            || !string.Equals(header.PasswordMode, V10MasterKdf.PasswordMode, StringComparison.Ordinal)
-            || !string.Equals(header.KdfInputMode, V10MasterKdf.KdfInputMode, StringComparison.Ordinal)
-            || !string.Equals(header.KdfMode, V10MasterKdf.KdfMode, StringComparison.Ordinal))
+            || header.GeneratedPasswordBits != 1024)
         {
-            throw new InvalidDataException("Container header contains no valid v10 four-credential KDF model.");
+            throw new InvalidDataException("Container header contains no valid four-credential KDF model.");
+        }
+
+        if (header.Version == 10)
+        {
+            if (!string.Equals(header.PasswordMode, V10MasterKdf.PasswordMode, StringComparison.Ordinal)
+                || !string.Equals(header.KdfInputMode, V10MasterKdf.KdfInputMode, StringComparison.Ordinal)
+                || !string.Equals(header.KdfMode, V10MasterKdf.KdfMode, StringComparison.Ordinal))
+            {
+                throw new InvalidDataException("Container header contains no valid v10 four-credential KDF model.");
+            }
+        }
+        else if (header.Version == 11)
+        {
+            if (!string.Equals(header.PasswordMode, V11MasterKdf.PasswordMode, StringComparison.Ordinal)
+                || !string.Equals(header.KdfInputMode, V11MasterKdf.KdfInputMode, StringComparison.Ordinal)
+                || !string.Equals(header.KdfMode, V11MasterKdf.KdfMode, StringComparison.Ordinal))
+            {
+                throw new InvalidDataException("Container header contains no valid v11 four-credential KDF model.");
+            }
+        }
+        else
+        {
+            throw new InvalidDataException($"Unsupported container version: {header.Version}");
         }
     }
 
@@ -1813,7 +1836,8 @@ public sealed partial class KalynaContainerService
         byte[] salt,
         byte[] secondSalt,
         IProgress<string>? progress,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        int version = CurrentVersion)
     {
         ArgumentNullException.ThrowIfNull(salt);
         V10Salts salts = SplitSaltPairs(salt, secondSalt, parameters.UsesTwoKdfRounds);
@@ -1828,7 +1852,8 @@ public sealed partial class KalynaContainerService
                     secondGeneratedPassword,
                     salts,
                     progress,
-                    cancellationToken);
+                    cancellationToken,
+                    version);
                 return SuiteKeyMaterial.FromRoleKeys(roles, parameters);
             },
             cancellationToken);

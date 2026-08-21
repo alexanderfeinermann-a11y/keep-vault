@@ -376,8 +376,14 @@ internal static class V10KeyDerivation
         string factorBHex,
         V10Salts salts,
         IProgress<string>? progress,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        int version = 11)
     {
+        if (version != 10 && version != 11)
+        {
+            throw new ArgumentOutOfRangeException(nameof(version), $"Unsupported key derivation version: {version}");
+        }
+
         ArgumentNullException.ThrowIfNull(parameters);
         ArgumentNullException.ThrowIfNull(salts);
         ArgumentNullException.ThrowIfNull(userPassword);
@@ -396,23 +402,46 @@ internal static class V10KeyDerivation
         using LockedSensitiveBuffer sha3Credential = LockedSensitiveBuffer.Create(V10MasterKdf.CredentialHashBytes);
         using LockedSensitiveBuffer skeinCredential = LockedSensitiveBuffer.Create(V10MasterKdf.CredentialHashBytes);
 
-        V10MasterKdf.DeriveSha3CredentialHash(
-            algorithm, userPassword, pin, factorA.Bytes, factorB.Bytes, sha3Credential.Bytes);
-        V10MasterKdf.DeriveSkeinCredentialHash(
-            algorithm, userPassword, pin, factorA.Bytes, factorB.Bytes, skeinCredential.Bytes);
+        if (version == 10)
+        {
+            V10MasterKdf.DeriveSha3CredentialHash(
+                algorithm, userPassword, pin, factorA.Bytes, factorB.Bytes, sha3Credential.Bytes);
+            V10MasterKdf.DeriveSkeinCredentialHash(
+                algorithm, userPassword, pin, factorA.Bytes, factorB.Bytes, skeinCredential.Bytes);
+        }
+        else
+        {
+            V11MasterKdf.DeriveSha3CredentialHash(
+                algorithm, userPassword, pin, factorA.Bytes, factorB.Bytes, sha3Credential.Bytes);
+            V11MasterKdf.DeriveSkeinCredentialHash(
+                algorithm, userPassword, pin, factorA.Bytes, factorB.Bytes, skeinCredential.Bytes);
+        }
 
         cancellationToken.ThrowIfCancellationRequested();
-        (_, uint memory1) = V10MasterKdf.DerivePmi(
-            algorithm, 1, sha3Credential.Bytes, skeinCredential.Bytes,
-            ReadOnlySpan<byte>.Empty, salts.Sha3Round1, salts.SkeinRound1);
+        (_, uint memory1) = version == 10
+            ? V10MasterKdf.DerivePmi(
+                algorithm, 1, sha3Credential.Bytes, skeinCredential.Bytes,
+                ReadOnlySpan<byte>.Empty, salts.Sha3Round1, salts.SkeinRound1)
+            : V11MasterKdf.DerivePmi(
+                algorithm, 1, sha3Credential.Bytes, skeinCredential.Bytes,
+                ReadOnlySpan<byte>.Empty, salts.Sha3Round1, salts.SkeinRound1);
         progress?.Report(paranoia ? "Key derivation, round 1 of 2" : "Key derivation");
 
         LockedSensitiveBuffer? round1Master = LockedSensitiveBuffer.Create(V10MasterKdf.MasterBytes);
         try
         {
-            V10MasterKdf.DeriveRoundMaster(
-                algorithm, 1, sha3Credential.Bytes, skeinCredential.Bytes,
-                salts.Sha3Round1, salts.SkeinRound1, ReadOnlySpan<byte>.Empty, memory1, round1Master.Bytes);
+            if (version == 10)
+            {
+                V10MasterKdf.DeriveRoundMaster(
+                    algorithm, 1, sha3Credential.Bytes, skeinCredential.Bytes,
+                    salts.Sha3Round1, salts.SkeinRound1, ReadOnlySpan<byte>.Empty, memory1, round1Master.Bytes);
+            }
+            else
+            {
+                V11MasterKdf.DeriveRoundMaster(
+                    algorithm, 1, sha3Credential.Bytes, skeinCredential.Bytes,
+                    salts.Sha3Round1, salts.SkeinRound1, ReadOnlySpan<byte>.Empty, memory1, round1Master.Bytes);
+            }
 
             if (!paranoia)
             {
@@ -422,9 +451,13 @@ internal static class V10KeyDerivation
             }
 
             cancellationToken.ThrowIfCancellationRequested();
-            (_, uint memory2) = V10MasterKdf.DerivePmi(
-                algorithm, 2, sha3Credential.Bytes, skeinCredential.Bytes,
-                round1Master.Bytes, salts.Sha3Round2!, salts.SkeinRound2!);
+            (_, uint memory2) = version == 10
+                ? V10MasterKdf.DerivePmi(
+                    algorithm, 2, sha3Credential.Bytes, skeinCredential.Bytes,
+                    round1Master.Bytes, salts.Sha3Round2!, salts.SkeinRound2!)
+                : V11MasterKdf.DerivePmi(
+                    algorithm, 2, sha3Credential.Bytes, skeinCredential.Bytes,
+                    round1Master.Bytes, salts.Sha3Round2!, salts.SkeinRound2!);
             progress?.Report("Key derivation, round 2 of 2");
             // The first master is the Argon2id secret here, not the password:
             // it makes round two unreachable without round one, and it keeps
@@ -432,9 +465,18 @@ internal static class V10KeyDerivation
             LockedSensitiveBuffer? round2Master = LockedSensitiveBuffer.Create(V10MasterKdf.MasterBytes);
             try
             {
-                V10MasterKdf.DeriveRoundMaster(
-                    algorithm, 2, sha3Credential.Bytes, skeinCredential.Bytes,
-                    salts.Sha3Round2!, salts.SkeinRound2!, round1Master.Bytes, memory2, round2Master.Bytes);
+                if (version == 10)
+                {
+                    V10MasterKdf.DeriveRoundMaster(
+                        algorithm, 2, sha3Credential.Bytes, skeinCredential.Bytes,
+                        salts.Sha3Round2!, salts.SkeinRound2!, round1Master.Bytes, memory2, round2Master.Bytes);
+                }
+                else
+                {
+                    V11MasterKdf.DeriveRoundMaster(
+                        algorithm, 2, sha3Credential.Bytes, skeinCredential.Bytes,
+                        salts.Sha3Round2!, salts.SkeinRound2!, round1Master.Bytes, memory2, round2Master.Bytes);
+                }
                 var result = new MasterResult(round2Master, memory1, memory2);
                 round2Master = null; // ownership transferred to result
                 return result;
@@ -461,10 +503,11 @@ internal static class V10KeyDerivation
         string factorBHex,
         V10Salts salts,
         IProgress<string>? progress,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        int version = 11)
     {
         using MasterResult result = DeriveMaster(
-            parameters, userPassword, pin, factorAHex, factorBHex, salts, progress, cancellationToken);
+            parameters, userPassword, pin, factorAHex, factorBHex, salts, progress, cancellationToken, version);
         return SuiteKeySchedule.DeriveSuiteKeys(result.Master.Bytes, parameters);
     }
 }

@@ -88,6 +88,7 @@
     <Compile Include="../KalynaArchiver/Services/V10Primitives.cs" Link="Services/V10Primitives.cs" />
     <Compile Include="../KalynaArchiver/Services/SuiteKeySchedule.cs" Link="Services/SuiteKeySchedule.cs" />
     <Compile Include="../KalynaArchiver/Services/V10MasterKdf.cs" Link="Services/V10MasterKdf.cs" />
+    <Compile Include="../KalynaArchiver/Services/V11MasterKdf.cs" Link="Services/V11MasterKdf.cs" />
     <Compile Include="../KalynaArchiver/Services/V10KeyDerivation.cs" Link="Services/V10KeyDerivation.cs" />
     <Compile Include="../KalynaArchiver/Services/ZpaqService.cs" Link="Services/ZpaqService.cs" />
     <Compile Include="../KalynaArchiver/Services/SigningTrustPolicy.cs" Link="Services/SigningTrustPolicy.cs" />

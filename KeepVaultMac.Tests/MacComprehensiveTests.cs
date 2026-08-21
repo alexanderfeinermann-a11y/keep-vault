@@ -77,7 +77,11 @@ internal static partial class MacComprehensiveTests
         new("randomised differential testing against every reference library", TestReferenceDifferentialAsync, TestResource.CpuHeavy, "Crypto"),
         new("Argon2id fixed 1 GiB profile and independent equivalence", TestArgon2Async, TestResource.ArgonHeavy, "KDF"),
         new("ZPAQ levels, streaming, traversal and malformed corpus", TestZpaqAsync, TestResource.ZpaqGlobal, "ZPAQ"),
-        new("v10 suite roundtrips and manipulation rejection", TestContainersAsync, TestResource.EntropyGlobal, "Containers"),
+        new("v10/v11 suite roundtrips and manipulation rejection", TestContainersAsync, TestResource.EntropyGlobal, "Containers"),
+        new("v11 master KDF and 512/512 factor split mutation isolation", TestV11MasterKdfAsync, TestResource.ArgonHeavy, "KDF"),
+        new("v11 suite roundtrips and v10 backward compatibility", TestV11ContainersAsync, TestResource.EntropyGlobal, "Containers"),
+        new("quarantine rollback object binding and symlink-safe directory traversal", TestQuarantineAndSymlinkSafetyAsync, TestResource.Light, "Deletion"),
+        new("GeneratedArchiveEntropy exception safety and leak prevention", TestEntropyExceptionSafetyAsync, TestResource.Light, "Entropy"),
         new("cascade layering: the outer layer alone reveals nothing", TestCascadeLayeringAsync, TestResource.Light, "Crypto"),
         new("v10 two-round key derivation from one pool consumption", TestTwoRoundDerivationAsync, TestResource.EntropyGlobal, "Crypto"),
         new("salt and nonce for every single-round suite without prepared entropy", TestUnpreparedEncryptionParametersAsync, TestResource.EntropyGlobal, "Crypto"),
@@ -2155,7 +2159,7 @@ internal static partial class MacComprehensiveTests
         Require(!entropy.HasPendingEncryptionParameters, $"{suite} did not consume prepared entropy exactly once.");
         ValidateContainerHeader(path, suite);
         KalynaContainerInfo info = await containers.ReadContainerInfoAsync(path, CancellationToken.None).ConfigureAwait(false);
-        Require(info.Version == 10 && info.Suite == suite && info.GeneratedPasswordFactorCount == 2 && info.GeneratedPasswordBits == 1024, $"{suite} v10 header metadata mismatch.");
+        Require((info.Version == 10 || info.Version == 11) && info.Suite == suite && info.GeneratedPasswordFactorCount == 2 && info.GeneratedPasswordBits == 1024, $"{suite} header metadata mismatch.");
 
         using var output = new MemoryStream();
         await containers.DecryptToStreamAsync(path, UserPassword, UserPin, factorA, factorB, output, null, CancellationToken.None).ConfigureAwait(false);
@@ -2203,10 +2207,10 @@ internal static partial class MacComprehensiveTests
         // v10 is a clean break. A container claiming any other version must be
         // refused outright rather than read on a compatibility path, and the
         // refusal must not depend on the MACs noticing the edit afterwards.
-        foreach (int rejected in new[] { 8, 9, 11 })
+        foreach (int rejected in new[] { 8, 9, 12 })
         {
             string downgraded = CopyContainer(path, root, $"{suite}-version-{rejected}.kzpaq");
-            ReplaceHeaderToken(downgraded, "\"Version\":10", $"\"Version\":{rejected}");
+            ReplaceHeaderToken(downgraded, "\"Version\":11", $"\"Version\":{rejected}");
             await RequireThrowsAsync<InvalidDataException>(
                 () => containers.ReadContainerInfoAsync(downgraded, CancellationToken.None),
                 $"{suite} accepted a container claiming version {rejected}.").ConfigureAwait(false);
@@ -2813,7 +2817,8 @@ internal static partial class MacComprehensiveTests
             using JsonDocument document = JsonDocument.Parse(headerBytes);
             JsonElement header = document.RootElement;
             EncryptionSuiteParameters parameters = EncryptionSuiteCatalog.Get(suite);
-            Require(header.GetProperty("Version").GetInt32() == 10, "Container version is not v10.");
+            int version = header.GetProperty("Version").GetInt32();
+            Require(version is 10 or 11, "Container version is not v10 or v11.");
 
             // The second-round fields are always present. Present-and-null is
             // not cosmetic: the reader compares the header against its own
@@ -2874,7 +2879,10 @@ internal static partial class MacComprehensiveTests
             // credentials; a header that published it would give away the one
             // KDF parameter that is deliberately secret.
             Require(header.GetProperty("Argon2MemoryKiB").GetInt32() == 0, "Container header published the Argon2id memory cost.");
-            Require(header.GetProperty("KdfMode").GetString() == "DualArgon2id-SHA3+Skein1024-Sequential-Master1024", "Container KDF mode mismatch.");
+            string expectedKdfMode = version == 10
+                ? "DualArgon2id-SHA3+Skein1024-Sequential-Master1024"
+                : "DualArgon2id-SplitSHA3+Skein1024-Sequential-Master1024";
+            Require(header.GetProperty("KdfMode").GetString() == expectedKdfMode, "Container KDF mode mismatch.");
             Require(header.GetProperty("Argon2Iterations").GetInt32() == Argon2Profile.DefaultIterations, "Container Argon2 iterations mismatch.");
             Require(header.GetProperty("Argon2Parallelism").GetInt32() == Argon2Profile.DefaultParallelism, "Container Argon2 parallelism mismatch.");
             Require(header.GetProperty("GeneratedPasswordFactorCount").GetInt32() == 2, "Container factor count mismatch.");
@@ -3886,6 +3894,375 @@ internal static partial class MacComprehensiveTests
         public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
         public override void SetLength(long value) => throw new NotSupportedException();
         public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+    }
+
+    private static async Task TestV11MasterKdfAsync()
+    {
+        const string Algorithm = "Test-Suite-v11";
+        const string Password = "N!r7$Vq2#Lm8%Tx3&Jd9*Wp4+Kg5=Zu6?Ce";
+        const string Pin = "0428193";
+        byte[] factorA = RandomNumberGenerator.GetBytes(128);
+        byte[] factorB = RandomNumberGenerator.GetBytes(128);
+
+        // --- credential paths ----------------------------------------------
+        byte[] qs = V11MasterKdf.DeriveSha3CredentialHash(Algorithm, Password, Pin, factorA, factorB);
+        byte[] qk = V11MasterKdf.DeriveSkeinCredentialHash(Algorithm, Password, Pin, factorA, factorB);
+        Require(qs.Length == 128 && qk.Length == 128, "A v11 credential hash is not 1024 bits.");
+        Require(!FixedEqual(qs, qk), "Both credential paths produced the same value.");
+
+        // Domain separation: v10 vs v11
+        byte[] qsV10 = V10MasterKdf.DeriveSha3CredentialHash(Algorithm, Password, Pin, factorA, factorB);
+        byte[] qkV10 = V10MasterKdf.DeriveSkeinCredentialHash(Algorithm, Password, Pin, factorA, factorB);
+        Require(!FixedEqual(qs, qsV10), "v11 SHA3 credential path collides with v10.");
+        Require(!FixedEqual(qk, qkV10), "v11 Skein credential path collides with v10.");
+
+        // Factor role binding: (A, B) != (B, A)
+        byte[] qsSwapped = V11MasterKdf.DeriveSha3CredentialHash(Algorithm, Password, Pin, factorB, factorA);
+        byte[] qkSwapped = V11MasterKdf.DeriveSkeinCredentialHash(Algorithm, Password, Pin, factorB, factorA);
+        Require(!FixedEqual(qs, qsSwapped), "v11 SHA3 credential path is symmetric in factors (A,B) vs (B,A).");
+        Require(!FixedEqual(qk, qkSwapped), "v11 Skein credential path is symmetric in factors (A,B) vs (B,A).");
+
+        // --- Comprehensive 256-Byte Mutation Isolation Testing (512/512 Factor Split) ---
+        // Mutating each byte of factor A:
+        for (int i = 0; i < 128; i++)
+        {
+            byte[] mutA = (byte[])factorA.Clone();
+            mutA[i] ^= 0x5A;
+            byte[] mutQs = V11MasterKdf.DeriveSha3CredentialHash(Algorithm, Password, Pin, mutA, factorB);
+            if (i < 64)
+            {
+                // A1 slice: Q_S1 MUST change, Q_S2 MUST be 100% bit-exact identical
+                Require(!FixedEqual(qs[..64], mutQs[..64]), $"Factor A mutation at index {i} did not change Q_S1.");
+                Require(FixedEqual(qs[64..], mutQs[64..]), $"Factor A mutation at index {i} (A1) leaked into Q_S2.");
+            }
+            else
+            {
+                // A2 slice: Q_S1 MUST be 100% bit-exact identical, Q_S2 MUST change
+                Require(FixedEqual(qs[..64], mutQs[..64]), $"Factor A mutation at index {i} (A2) leaked into Q_S1.");
+                Require(!FixedEqual(qs[64..], mutQs[64..]), $"Factor A mutation at index {i} did not change Q_S2.");
+            }
+        }
+
+        // Mutating each byte of factor B:
+        for (int i = 0; i < 128; i++)
+        {
+            byte[] mutB = (byte[])factorB.Clone();
+            mutB[i] ^= 0xA5;
+            byte[] mutQs = V11MasterKdf.DeriveSha3CredentialHash(Algorithm, Password, Pin, factorA, mutB);
+            if (i < 64)
+            {
+                // B1 slice: Q_S1 MUST change, Q_S2 MUST be 100% bit-exact identical
+                Require(!FixedEqual(qs[..64], mutQs[..64]), $"Factor B mutation at index {i} did not change Q_S1.");
+                Require(FixedEqual(qs[64..], mutQs[64..]), $"Factor B mutation at index {i} (B1) leaked into Q_S2.");
+            }
+            else
+            {
+                // B2 slice: Q_S1 MUST be 100% bit-exact identical, Q_S2 MUST change
+                Require(FixedEqual(qs[..64], mutQs[..64]), $"Factor B mutation at index {i} (B2) leaked into Q_S1.");
+                Require(!FixedEqual(qs[64..], mutQs[64..]), $"Factor B mutation at index {i} did not change Q_S2.");
+            }
+        }
+
+        // Explicit boundary tests on 0, 63, 64, 127
+        foreach (int idx in new[] { 0, 63, 64, 127 })
+        {
+            byte[] mutA = (byte[])factorA.Clone();
+            mutA[idx] ^= 0xFF;
+            byte[] mutQs = V11MasterKdf.DeriveSha3CredentialHash(Algorithm, Password, Pin, mutA, factorB);
+            if (idx <= 63)
+            {
+                Require(!FixedEqual(qs[..64], mutQs[..64]) && FixedEqual(qs[64..], mutQs[64..]),
+                    $"Boundary test failed at factor A index {idx}");
+            }
+            else
+            {
+                Require(FixedEqual(qs[..64], mutQs[..64]) && !FixedEqual(qs[64..], mutQs[64..]),
+                    $"Boundary test failed at factor A index {idx}");
+            }
+        }
+
+        // --- Skein MAC Key integrity ---------------------------------------
+        // Skein key uses A || B (full 256 bytes) so ANY byte change changes full Skein credential
+        for (int i = 0; i < 128; i += 31)
+        {
+            byte[] mutA = (byte[])factorA.Clone();
+            mutA[i] ^= 0x33;
+            byte[] mutQk = V11MasterKdf.DeriveSkeinCredentialHash(Algorithm, Password, Pin, mutA, factorB);
+            Require(!FixedEqual(qk, mutQk), $"Skein MAC ignored mutation in factor A at index {i}.");
+        }
+
+        // --- PMI and memory cost -------------------------------------------
+        byte[] saltSha3 = Enumerable.Range(0, 64).Select(i => (byte)(i * 3 + 1)).ToArray();
+        byte[] saltSkein = Enumerable.Range(0, 64).Select(i => (byte)(i * 5 + 7)).ToArray();
+        (ushort pmi, uint memory) = V11MasterKdf.DerivePmi(
+            Algorithm, 1, qs, qk, [], saltSha3, saltSkein);
+        Require(
+            memory >= V11MasterKdf.MemoryMinKiB && memory <= V11MasterKdf.MemoryMaxKiB,
+            $"The derived memory cost {memory} KiB is outside 1 GiB..2 GiB-16 KiB.");
+        Require(
+            (memory - V11MasterKdf.MemoryMinKiB) % V11MasterKdf.MemoryStepKiB == 0,
+            "The derived memory cost is not on the 16 KiB grid.");
+        Require(
+            memory == V11MasterKdf.MemoryMinKiB + (16u * pmi),
+            "The memory cost does not follow m = 1 GiB + 16*PMI.");
+
+        // --- v11 master round derivation -----------------------------------
+        byte[] round1 = V11MasterKdf.DeriveRoundMaster(
+            Algorithm, 1, qs, qk, saltSha3, saltSkein, secret: null, memory);
+        Require(round1.Length == 128, "v11 round 1 master is not 1024 bits.");
+
+        byte[] saltSha3Round2 = RandomNumberGenerator.GetBytes(64);
+        byte[] saltSkeinRound2 = RandomNumberGenerator.GetBytes(64);
+        (_, uint memory2) = V11MasterKdf.DerivePmi(
+            Algorithm, 2, qs, qk, round1, saltSha3Round2, saltSkeinRound2);
+        byte[] round2 = V11MasterKdf.DeriveRoundMaster(
+            Algorithm, 2, qs, qk, saltSha3Round2, saltSkeinRound2, secret: round1, memory2);
+        Require(round2.Length == 128, "v11 round 2 master is not 1024 bits.");
+        Require(!FixedEqual(round1, round2), "v11 round 1 and round 2 masters are identical.");
+
+        await Task.CompletedTask.ConfigureAwait(false);
+        Zero(factorA, factorB, qs, qk, qsV10, qkV10, qsSwapped, qkSwapped, saltSha3, saltSkein,
+            round1, round2, saltSha3Round2, saltSkeinRound2);
+    }
+
+    private static async Task TestQuarantineAndSymlinkSafetyAsync()
+    {
+        string root = CreateTempRoot("keep-vault-quarantine-symlink-");
+        try
+        {
+            // 1. Symlink-safe directory traversal:
+            string safeDir = Path.Combine(root, "safe_dir");
+            string subDir = Path.Combine(safeDir, "subdir");
+            Directory.CreateDirectory(subDir);
+            string f1 = Path.Combine(safeDir, "file1.bin");
+            string f2 = Path.Combine(subDir, "file2.bin");
+            await File.WriteAllBytesAsync(f1, [1, 2, 3]).ConfigureAwait(false);
+            await File.WriteAllBytesAsync(f2, [4, 5, 6]).ConfigureAwait(false);
+
+            var items = MacSafeFileSystem.EnumerateDirectoryTreeNoFollow(safeDir);
+            Require(items.Count == 2, $"Expected 2 files from safe directory traversal, found {items.Count}");
+
+            // Inject symlink to file
+            string symlinkFile = Path.Combine(safeDir, "link_file");
+            File.CreateSymbolicLink(symlinkFile, f1);
+            bool caughtSymlinkFile = false;
+            try
+            {
+                MacSafeFileSystem.EnumerateDirectoryTreeNoFollow(safeDir);
+            }
+            catch (IOException ex) when (ex.Message.Contains("symbolischen Link", StringComparison.OrdinalIgnoreCase))
+            {
+                caughtSymlinkFile = true;
+            }
+            Require(caughtSymlinkFile, "EnumerateDirectoryTreeNoFollow did not throw on file symlink.");
+            File.Delete(symlinkFile);
+
+            // Inject symlink to directory
+            string symlinkDir = Path.Combine(safeDir, "link_dir");
+            Directory.CreateSymbolicLink(symlinkDir, subDir);
+            bool caughtSymlinkDir = false;
+            try
+            {
+                MacSafeFileSystem.EnumerateDirectoryTreeNoFollow(safeDir);
+            }
+            catch (IOException ex) when (ex.Message.Contains("symbolischen Link", StringComparison.OrdinalIgnoreCase))
+            {
+                caughtSymlinkDir = true;
+            }
+            Require(caughtSymlinkDir, "EnumerateDirectoryTreeNoFollow did not throw on directory symlink.");
+            Directory.Delete(symlinkDir);
+
+            // 2. Quarantine rollback object binding:
+            string origDir = Path.Combine(root, "originals");
+            string extDir = Path.Combine(root, "extracted");
+            Directory.CreateDirectory(origDir);
+            Directory.CreateDirectory(extDir);
+
+            string fileToDel = Path.Combine(origDir, "victim.bin");
+            byte[] content = RandomNumberGenerator.GetBytes(1024);
+            await File.WriteAllBytesAsync(fileToDel, content).ConfigureAwait(false);
+            await File.WriteAllBytesAsync(Path.Combine(extDir, "victim.bin"), content).ConfigureAwait(false);
+
+            string archivePath = Path.Combine(root, "archive.kzpaq");
+            await File.WriteAllBytesAsync(archivePath, RandomNumberGenerator.GetBytes(512)).ConfigureAwait(false);
+            MacOriginalDeletionService.ArchiveIdentity archiveId =
+                MacOriginalDeletionService.CaptureArchiveIdentity(archivePath);
+
+            MacOriginalDeletionService.VerificationResult ver =
+                await MacOriginalDeletionService.VerifyExtractionAsync([fileToDel], extDir, null, CancellationToken.None).ConfigureAwait(false);
+            Require(ver.Verified && ver.Originals != null, $"Verification failed for deletion test: {ver.Failure}");
+
+            // Corrupt archive so pre-commit stage fails and triggers rollback:
+            byte[] wrongArchive = RandomNumberGenerator.GetBytes(512);
+            await File.WriteAllBytesAsync(archivePath, wrongArchive).ConfigureAwait(false);
+
+            IReadOnlyList<string> failures = MacOriginalDeletionService.DeleteOriginals(
+                [fileToDel], archivePath, archiveId, ver.Originals!);
+            Require(failures.Count > 0, "Deletion should fail due to modified archive.");
+            Require(File.Exists(fileToDel), "File was not restored by rollback after pre-commit failure.");
+
+            Zero(content, wrongArchive);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    private static Task TestEntropyExceptionSafetyAsync()
+    {
+        long initialLocked = SecureMemory.LockedBytesForTests;
+
+        // 1. Invalid first factor (too short)
+        bool threw1 = false;
+        try
+        {
+            using var salt1 = LockedSensitiveBuffer.Create(EntropyMixer.SaltPairBytes);
+            using var nonce1 = LockedSensitiveBuffer.Create(EncryptionSuiteCatalog.MaxNonceBytes);
+            using var salt2 = LockedSensitiveBuffer.Create(EntropyMixer.SaltPairBytes);
+            using var nonce2 = LockedSensitiveBuffer.Create(EncryptionSuiteCatalog.MaxNonceBytes);
+            salt2.Bytes[0] ^= 0x01;
+            _ = new GeneratedArchiveEntropy("short_factor", GeneratedFactor('B'), salt1, nonce1, salt2, nonce2);
+        }
+        catch (ArgumentException)
+        {
+            threw1 = true;
+        }
+        Require(threw1, "GeneratedArchiveEntropy accepted short first factor.");
+        Require(SecureMemory.LockedBytesForTests == initialLocked,
+            $"Locked bytes leaked after first factor error: {SecureMemory.LockedBytesForTests} != {initialLocked}");
+
+        // 2. Invalid second factor (invalid characters)
+        bool threw2 = false;
+        try
+        {
+            using var salt1 = LockedSensitiveBuffer.Create(EntropyMixer.SaltPairBytes);
+            using var nonce1 = LockedSensitiveBuffer.Create(EncryptionSuiteCatalog.MaxNonceBytes);
+            using var salt2 = LockedSensitiveBuffer.Create(EntropyMixer.SaltPairBytes);
+            using var nonce2 = LockedSensitiveBuffer.Create(EncryptionSuiteCatalog.MaxNonceBytes);
+            salt2.Bytes[0] ^= 0x01;
+            _ = new GeneratedArchiveEntropy(GeneratedFactor('A'), new string('z', 256), salt1, nonce1, salt2, nonce2);
+        }
+        catch (ArgumentException)
+        {
+            threw2 = true;
+        }
+        Require(threw2, "GeneratedArchiveEntropy accepted invalid second factor.");
+        Require(SecureMemory.LockedBytesForTests == initialLocked,
+            $"Locked bytes leaked after second factor error: {SecureMemory.LockedBytesForTests} != {initialLocked}");
+
+        // 3. Identical salts
+        bool threw3 = false;
+        try
+        {
+            using var salt1 = LockedSensitiveBuffer.Create(EntropyMixer.SaltPairBytes);
+            using var nonce1 = LockedSensitiveBuffer.Create(EncryptionSuiteCatalog.MaxNonceBytes);
+            using var salt2 = LockedSensitiveBuffer.Create(EntropyMixer.SaltPairBytes);
+            using var nonce2 = LockedSensitiveBuffer.Create(EncryptionSuiteCatalog.MaxNonceBytes);
+            _ = new GeneratedArchiveEntropy(GeneratedFactor('A'), GeneratedFactor('B'), salt1, nonce1, salt2, nonce2);
+        }
+        catch (CryptographicException)
+        {
+            threw3 = true;
+        }
+        Require(threw3, "GeneratedArchiveEntropy accepted identical salts.");
+        Require(SecureMemory.LockedBytesForTests == initialLocked,
+            $"Locked bytes leaked after identical salts error: {SecureMemory.LockedBytesForTests} != {initialLocked}");
+
+        return Task.CompletedTask;
+    }
+
+    private static async Task TestV11ContainersAsync()
+    {
+        string root = CreateTempRoot("keep-vault-v11-containers-");
+        try
+        {
+            var containers = new KalynaContainerService();
+            string source = Path.Combine(root, "input.txt");
+            byte[] sourceBytes = "Keep Vault v11 container test payload with multiple blocks."u8.ToArray();
+            await File.WriteAllBytesAsync(source, sourceBytes).ConfigureAwait(false);
+
+            using var zpaqBytes = new MemoryStream();
+            ProcessResult zpaqResult = await new ZpaqService().AddStreamingAsync(
+                new[] { source },
+                1,
+                (stream, cancellationToken) => stream.CopyToAsync(zpaqBytes, cancellationToken),
+                null,
+                CancellationToken.None).ConfigureAwait(false);
+            Require(zpaqResult.Succeeded, "Could not create ZPAQ payload for v11 test.");
+            byte[] payload = zpaqBytes.ToArray();
+
+            // Test v11 container creation and reading for default suite and paranoia suite
+            foreach (EncryptionSuite suite in new[] { EncryptionSuite.ThreefishOverKalyna, EncryptionSuite.ParanoiaCascade })
+            {
+                AddMouseSamplesUntilReady();
+                using GeneratedArchiveEntropy entropy = EntropyMixer.CreateArchiveEntropy();
+                string factorA = entropy.FirstPassword;
+                string factorB = entropy.SecondPassword;
+                string path = Path.Combine(root, $"{suite}-v11.kzpaq");
+
+                await using (var memSource = new MemoryStream(payload, writable: false))
+                {
+                    await containers.EncryptZpaqStreamWithPreparedEntropyAsync(
+                        memSource,
+                        path,
+                        UserPassword,
+                        UserPin,
+                        factorA,
+                        factorB,
+                        suite,
+                        entropy,
+                        "v11-test",
+                        null,
+                        CancellationToken.None).ConfigureAwait(false);
+                }
+
+                // Verify header
+                byte[] headerBytes = ReadHeaderBytes(path);
+                using JsonDocument doc = JsonDocument.Parse(headerBytes);
+                JsonElement header = doc.RootElement;
+                Require(header.GetProperty("Version").GetInt32() == 11, "v11 container version != 11");
+                Require(header.GetProperty("PasswordMode").GetString() == V11MasterKdf.PasswordMode, "v11 PasswordMode mismatch");
+                Require(header.GetProperty("KdfInputMode").GetString() == V11MasterKdf.KdfInputMode, "v11 KdfInputMode mismatch");
+                Require(header.GetProperty("KdfMode").GetString() == V11MasterKdf.KdfMode, "v11 KdfMode mismatch");
+
+                // Decrypt and verify
+                using var outStream = new MemoryStream();
+                await containers.DecryptToStreamAsync(
+                    path, UserPassword, UserPin, factorA, factorB, outStream, null, CancellationToken.None).ConfigureAwait(false);
+                byte[] decrypted = outStream.ToArray();
+                Require(FixedEqual(payload, decrypted), $"v11 {suite} decrypted payload does not match original.");
+                CryptographicOperations.ZeroMemory(decrypted);
+
+                // Test KPAR2 recovery creation and verification with v11 container
+                var recoveryService = new RecoveryService();
+                string sidecar = await recoveryService.CreateAuthenticatedAsync(
+                    path,
+                    UserPassword,
+                    UserPin,
+                    factorA,
+                    factorB,
+                    null,
+                    CancellationToken.None).ConfigureAwait(false);
+                Require(File.Exists(sidecar), "Failed to create KPAR2 recovery file for v11 container.");
+
+                RecoveryRepairResult recResult = await recoveryService.VerifyAndRepairAuthenticatedAsync(
+                    path,
+                    UserPassword,
+                    UserPin,
+                    factorA,
+                    factorB,
+                    null,
+                    CancellationToken.None).ConfigureAwait(false);
+                Require(recResult.RecoveryAvailable && recResult.ArchiveHealthy && recResult.Authenticated, "KPAR2 verification of v11 container failed.");
+            }
+
+            Zero(sourceBytes, payload);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
     }
 
     private static partial class MacTestLinks

@@ -828,33 +828,70 @@ public sealed partial class RecoveryService
                         firstGeneratedPassword!,
                         secondGeneratedPassword!,
                         locator,
-                        cancellationToken).ConfigureAwait(false);
-                }
+                        cancellationToken,
+                        version: 11).ConfigureAwait(false);
 
-                (byte[] actualSha3, byte[] actualSkein) = ComputeMetadataCertification(
-                    locator,
-                    payload,
-                    recoveryKeys);
-                try
-                {
+                    (byte[] actualSha3, byte[] actualSkein) = ComputeMetadataCertification(
+                        locator,
+                        payload,
+                        recoveryKeys);
                     bool sha3Matches = CryptographicOperations.FixedTimeEquals(expectedSha3, actualSha3);
                     bool skeinMatches = CryptographicOperations.FixedTimeEquals(expectedSkein, actualSkein);
-                    if (!(sha3Matches & skeinMatches))
-                    {
-                        throw locator.ProtectionMode == RecoveryProtectionMode.DualAuthenticatedEncrypted
-                            ? new CryptographicException(
-                                "Wrong password factors or manipulated dual-authenticated KPAR2 metadata.")
-                            : new InvalidDataException(
-                                "KPAR2 metadata checksum mismatch. This unencrypted profile does not provide authenticity.");
-                    }
-
-                    authenticationVerified = locator.ProtectionMode
-                        == RecoveryProtectionMode.DualAuthenticatedEncrypted;
-                }
-                finally
-                {
                     CryptographicOperations.ZeroMemory(actualSha3);
                     CryptographicOperations.ZeroMemory(actualSkein);
+
+                    if (!(sha3Matches & skeinMatches))
+                    {
+                        recoveryKeys.Dispose();
+                        // Try v10 backward compatibility
+                        recoveryKeys = await DeriveRecoveryKeysAsync(
+                            userPassword!,
+                            pin!,
+                            firstGeneratedPassword!,
+                            secondGeneratedPassword!,
+                            locator,
+                            cancellationToken,
+                            version: 10).ConfigureAwait(false);
+
+                        (byte[] actualSha3V10, byte[] actualSkeinV10) = ComputeMetadataCertification(
+                            locator,
+                            payload,
+                            recoveryKeys);
+                        sha3Matches = CryptographicOperations.FixedTimeEquals(expectedSha3, actualSha3V10);
+                        skeinMatches = CryptographicOperations.FixedTimeEquals(expectedSkein, actualSkeinV10);
+                        CryptographicOperations.ZeroMemory(actualSha3V10);
+                        CryptographicOperations.ZeroMemory(actualSkeinV10);
+
+                        if (!(sha3Matches & skeinMatches))
+                        {
+                            throw new CryptographicException(
+                                "Wrong password factors or manipulated dual-authenticated KPAR2 metadata.");
+                        }
+                    }
+
+                    authenticationVerified = true;
+                }
+                else
+                {
+                    (byte[] actualSha3, byte[] actualSkein) = ComputeMetadataCertification(
+                        locator,
+                        payload,
+                        null);
+                    try
+                    {
+                        bool sha3Matches = CryptographicOperations.FixedTimeEquals(expectedSha3, actualSha3);
+                        bool skeinMatches = CryptographicOperations.FixedTimeEquals(expectedSkein, actualSkein);
+                        if (!(sha3Matches & skeinMatches))
+                        {
+                            throw new InvalidDataException(
+                                "KPAR2 metadata checksum mismatch. This unencrypted profile does not provide authenticity.");
+                        }
+                    }
+                    finally
+                    {
+                        CryptographicOperations.ZeroMemory(actualSha3);
+                        CryptographicOperations.ZeroMemory(actualSkein);
+                    }
                 }
             }
 
@@ -888,7 +925,8 @@ public sealed partial class RecoveryService
         string firstGeneratedPassword,
         string secondGeneratedPassword,
         RecoveryLocator locator,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        int version = 11)
     {
         if (locator.ProtectionMode != RecoveryProtectionMode.DualAuthenticatedEncrypted
             || !IsKnownLocatorSuite(locator.EncryptionSuite)
@@ -924,7 +962,8 @@ public sealed partial class RecoveryService
                 secondGeneratedPassword,
                 salts,
                 progress: null,
-                cancellationToken),
+                cancellationToken,
+                version),
             cancellationToken).ConfigureAwait(false);
 
         byte[] parentSha3Key = SuiteKeySchedule.DeriveGlobalKey(
