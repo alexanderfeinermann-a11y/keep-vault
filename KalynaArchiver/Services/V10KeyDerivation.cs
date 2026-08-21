@@ -20,8 +20,8 @@ internal static class V10KeyDerivation
 {
     public const int MinPinLength = 6;
     public const int MaxPinSyntaxLength = 16;
-    public const int MaxPinCreationLength = 12;
-    public const int MaxPinLength = MaxPinSyntaxLength;
+    public const int MaxPinCreationLength = 16;
+    public const int MaxPinLength = 16;
     public const int FactorHexLength = 256;
     public const int FactorBytes = 128;
 

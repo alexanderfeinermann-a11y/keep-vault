@@ -507,13 +507,32 @@ fi
 transaction_committed=1
 
 recovery_path=''
-if [[ -d ${backup_path} && ! -L ${backup_path} ]]; then
+if [[ -d ${backup_path} && ! -L ${backup_path} ]] || [[ -d ${scanner_backup_path} && ! -L ${scanner_backup_path} ]]; then
   trash_dir=${HOME}/.Trash
   mkdir -p ${trash_dir}
-  recovery_path=${trash_dir}/Keep\ Vault\ previous\ $(date -u +%Y%m%dT%H%M%SZ).app
-  if ! mv ${backup_path} ${recovery_path}; then
-    recovery_path=${backup_path}
+  recovery_dir=${trash_dir}/Keep\ Vault\ previous\ $(date -u +%Y%m%dT%H%M%SZ)
+  mkdir -p ${recovery_dir}
+
+  if [[ -d ${backup_path} && ! -L ${backup_path} ]]; then
+    mv ${backup_path} ${recovery_dir}/Keep\ Vault.app
+    for launcher_sidecar_suffix in .sha3 .skein .khsig .sha3.khsig .skein.khsig; do
+      old_sidecar=${backup_dir}/Keep\ Vault.app.launcher${launcher_sidecar_suffix}
+      if [[ -f ${old_sidecar} && ! -L ${old_sidecar} ]]; then
+        mv ${old_sidecar} ${recovery_dir}/Keep\ Vault.app.launcher${launcher_sidecar_suffix}
+      fi
+    done
   fi
+
+  if [[ -d ${scanner_backup_path} && ! -L ${scanner_backup_path} ]]; then
+    mv ${scanner_backup_path} ${recovery_dir}/QR-Scanner.app
+    for scanner_sidecar_suffix in .sha3 .skein .khsig .sha3.khsig .skein.khsig; do
+      old_scanner_sidecar=${backup_dir}/QR-Scanner.app${scanner_sidecar_suffix}
+      if [[ -f ${old_scanner_sidecar} && ! -L ${old_scanner_sidecar} ]]; then
+        mv ${old_scanner_sidecar} ${recovery_dir}/QR-Scanner.app${scanner_sidecar_suffix}
+      fi
+    done
+  fi
+  recovery_path=${recovery_dir}
 fi
 
 launch_services='/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister'

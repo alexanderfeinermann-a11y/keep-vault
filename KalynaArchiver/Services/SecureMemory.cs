@@ -197,8 +197,12 @@ internal static partial class SecureMemory
         public LockedArray(byte[] buffer)
         {
             _length = buffer.Length;
-            _reservedBytes = RoundedPageBytes(buffer.Length);
             _handle = GCHandle.Alloc(buffer, GCHandleType.Pinned);
+            nint address = _handle.AddrOfPinnedObject();
+            nuint pageSize = checked((nuint)Environment.SystemPageSize);
+            nuint first = checked((nuint)address) / pageSize * pageSize;
+            nuint lastExclusive = checked((checked((nuint)address) + checked((nuint)buffer.Length) + pageSize - 1) / pageSize * pageSize);
+            _reservedBytes = checked((long)(lastExclusive - first));
             try
             {
                 lock (WorkingSetGate)

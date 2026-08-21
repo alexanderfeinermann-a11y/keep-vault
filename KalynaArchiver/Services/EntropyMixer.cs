@@ -964,8 +964,8 @@ internal sealed class GeneratedArchiveEntropy : IDisposable
     private LockedSensitiveBuffer? _fullNonce;
     private LockedSensitiveBuffer? _secondSalt;
     private LockedSensitiveBuffer? _secondFullNonce;
-    private string? _firstPassword;
-    private string? _secondPassword;
+    private LockedSensitiveBuffer? _firstFactor;
+    private LockedSensitiveBuffer? _secondFactor;
 
     /// <remarks>
     /// Both rounds are prepared here, from one consumption of the pools, because
@@ -981,8 +981,10 @@ internal sealed class GeneratedArchiveEntropy : IDisposable
         LockedSensitiveBuffer secondSalt,
         LockedSensitiveBuffer secondFullNonce)
     {
-        _firstPassword = firstPassword ?? throw new ArgumentNullException(nameof(firstPassword));
-        _secondPassword = secondPassword ?? throw new ArgumentNullException(nameof(secondPassword));
+        ArgumentNullException.ThrowIfNull(firstPassword);
+        ArgumentNullException.ThrowIfNull(secondPassword);
+        _firstFactor = V10KeyDerivation.ParseFactor(firstPassword, nameof(firstPassword));
+        _secondFactor = V10KeyDerivation.ParseFactor(secondPassword, nameof(secondPassword));
         _salt = salt ?? throw new ArgumentNullException(nameof(salt));
         _fullNonce = fullNonce ?? throw new ArgumentNullException(nameof(fullNonce));
         _secondSalt = secondSalt ?? throw new ArgumentNullException(nameof(secondSalt));
@@ -1023,8 +1025,15 @@ internal sealed class GeneratedArchiveEntropy : IDisposable
         LockedSensitiveBuffer secondFullNonce;
         lock (_gate)
         {
-            if (!string.Equals(_firstPassword, firstPassword, StringComparison.Ordinal)
-                || !string.Equals(_secondPassword, secondPassword, StringComparison.Ordinal))
+            if (_firstFactor is null || _secondFactor is null)
+            {
+                throw new ObjectDisposedException(nameof(GeneratedArchiveEntropy));
+            }
+
+            using var suppliedFirst = V10KeyDerivation.ParseFactor(firstPassword, nameof(firstPassword));
+            using var suppliedSecond = V10KeyDerivation.ParseFactor(secondPassword, nameof(secondPassword));
+            if (!CryptographicOperations.FixedTimeEquals(_firstFactor.Bytes, suppliedFirst.Bytes)
+                || !CryptographicOperations.FixedTimeEquals(_secondFactor.Bytes, suppliedSecond.Bytes))
             {
                 throw new InvalidOperationException(
                     "Prepared salt and nonce parameters do not belong to the supplied generated password factors.");
@@ -1094,7 +1103,11 @@ internal sealed class GeneratedArchiveEntropy : IDisposable
         {
             lock (_gate)
             {
-                return _firstPassword ?? throw new ObjectDisposedException(nameof(GeneratedArchiveEntropy));
+                if (_firstFactor is null)
+                {
+                    throw new ObjectDisposedException(nameof(GeneratedArchiveEntropy));
+                }
+                return Convert.ToHexString(_firstFactor.Bytes);
             }
         }
     }
@@ -1105,7 +1118,11 @@ internal sealed class GeneratedArchiveEntropy : IDisposable
         {
             lock (_gate)
             {
-                return _secondPassword ?? throw new ObjectDisposedException(nameof(GeneratedArchiveEntropy));
+                if (_secondFactor is null)
+                {
+                    throw new ObjectDisposedException(nameof(GeneratedArchiveEntropy));
+                }
+                return Convert.ToHexString(_secondFactor.Bytes);
             }
         }
     }
@@ -1139,8 +1156,15 @@ internal sealed class GeneratedArchiveEntropy : IDisposable
         LockedSensitiveBuffer fullNonce;
         lock (_gate)
         {
-            if (!string.Equals(_firstPassword, firstPassword, StringComparison.Ordinal)
-                || !string.Equals(_secondPassword, secondPassword, StringComparison.Ordinal))
+            if (_firstFactor is null || _secondFactor is null)
+            {
+                throw new ObjectDisposedException(nameof(GeneratedArchiveEntropy));
+            }
+
+            using var suppliedFirst = V10KeyDerivation.ParseFactor(firstPassword, nameof(firstPassword));
+            using var suppliedSecond = V10KeyDerivation.ParseFactor(secondPassword, nameof(secondPassword));
+            if (!CryptographicOperations.FixedTimeEquals(_firstFactor.Bytes, suppliedFirst.Bytes)
+                || !CryptographicOperations.FixedTimeEquals(_secondFactor.Bytes, suppliedSecond.Bytes))
             {
                 throw new InvalidOperationException(
                     "Prepared salt and nonce parameters do not belong to the supplied generated password factors.");
@@ -1188,23 +1212,29 @@ internal sealed class GeneratedArchiveEntropy : IDisposable
         LockedSensitiveBuffer? fullNonce;
         LockedSensitiveBuffer? secondSalt;
         LockedSensitiveBuffer? secondFullNonce;
+        LockedSensitiveBuffer? firstFactor;
+        LockedSensitiveBuffer? secondFactor;
         lock (_gate)
         {
             salt = _salt;
             fullNonce = _fullNonce;
             secondSalt = _secondSalt;
             secondFullNonce = _secondFullNonce;
+            firstFactor = _firstFactor;
+            secondFactor = _secondFactor;
             _salt = null;
             _fullNonce = null;
             _secondSalt = null;
             _secondFullNonce = null;
-            _firstPassword = null;
-            _secondPassword = null;
+            _firstFactor = null;
+            _secondFactor = null;
         }
 
         secondFullNonce?.Dispose();
         secondSalt?.Dispose();
         fullNonce?.Dispose();
         salt?.Dispose();
+        firstFactor?.Dispose();
+        secondFactor?.Dispose();
     }
 }

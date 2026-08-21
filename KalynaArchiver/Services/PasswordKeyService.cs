@@ -88,11 +88,16 @@ public sealed class PasswordKeyService
 
     public static void ValidateUserPasswordForCreation(string userPassword, string firstGeneratedPassword, string secondGeneratedPassword)
     {
-        string normalizedFirst = NormalizeGeneratedPassword(firstGeneratedPassword);
-        string normalizedSecond = NormalizeGeneratedPassword(secondGeneratedPassword);
-        if (string.Equals(normalizedFirst, normalizedSecond, StringComparison.Ordinal))
+        ArgumentNullException.ThrowIfNull(firstGeneratedPassword);
+        ArgumentNullException.ThrowIfNull(secondGeneratedPassword);
+
+        using (var firstBuf = V10KeyDerivation.ParseFactor(firstGeneratedPassword, nameof(firstGeneratedPassword)))
+        using (var secondBuf = V10KeyDerivation.ParseFactor(secondGeneratedPassword, nameof(secondGeneratedPassword)))
         {
-            throw new ArgumentException("Die beiden generierten Passwortfaktoren müssen verschieden sein.", nameof(secondGeneratedPassword));
+            if (CryptographicOperations.FixedTimeEquals(firstBuf.Bytes, secondBuf.Bytes))
+            {
+                throw new ArgumentException("Die beiden generierten Passwortfaktoren müssen verschieden sein.", nameof(secondGeneratedPassword));
+            }
         }
 
         ValidateUserPasswordAnalysis(AnalyzeUserPassword(userPassword, firstGeneratedPassword, secondGeneratedPassword));
@@ -176,34 +181,45 @@ public sealed class PasswordKeyService
             return false;
         }
 
-        string normalizedUser = new(userPassword.Where(c => !char.IsWhiteSpace(c)).ToArray());
-        if (normalizedUser.Length != GeneratedPasswordLength || normalizedUser.Any(c => !IsAsciiHexDigit(c)))
+        LockedSensitiveBuffer? userBuf = null;
+        try
         {
-            return false;
-        }
-
-        foreach (string? generatedPassword in generatedPasswords)
-        {
-            if (string.IsNullOrWhiteSpace(generatedPassword))
-            {
-                continue;
-            }
-
             try
             {
-                if (string.Equals(normalizedUser, NormalizeGeneratedPassword(generatedPassword), StringComparison.OrdinalIgnoreCase))
+                userBuf = V10KeyDerivation.ParseFactor(userPassword, nameof(userPassword));
+            }
+            catch (ArgumentException)
+            {
+                return false;
+            }
+
+            foreach (string? generatedPassword in generatedPasswords)
+            {
+                if (string.IsNullOrWhiteSpace(generatedPassword))
                 {
-                    return true;
+                    continue;
+                }
+
+                try
+                {
+                    using var genBuf = V10KeyDerivation.ParseFactor(generatedPassword, nameof(generatedPassword));
+                    if (CryptographicOperations.FixedTimeEquals(userBuf.Bytes, genBuf.Bytes))
+                    {
+                        return true;
+                    }
+                }
+                catch (ArgumentException)
+                {
+                    // A malformed generated factor cannot match
                 }
             }
-            catch (ArgumentOutOfRangeException)
-            {
-                // A malformed generated factor is handled by the caller; it cannot match a
-                // valid generated factor for this policy check.
-            }
-        }
 
-        return false;
+            return false;
+        }
+        finally
+        {
+            userBuf?.Dispose();
+        }
     }
 
     private static void ValidateUserPasswordAnalysis(PasswordPolicyAnalysis analysis)

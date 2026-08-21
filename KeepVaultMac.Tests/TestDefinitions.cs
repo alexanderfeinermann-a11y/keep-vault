@@ -320,50 +320,46 @@ internal static class TestRunner
         Dictionary<string, double> cachedTimings,
         ConcurrentDictionary<string, double> currentTimings)
     {
-        // Sort LPT
         var sorted = tests
             .OrderByDescending(t => cachedTimings.GetValueOrDefault(t.Name, 0.0))
             .ToList();
 
         bool allPassed = true;
 
-        await Parallel.ForEachAsync(
-            sorted,
-            new ParallelOptions { MaxDegreeOfParallelism = workerCount },
-            async (test, ct) =>
+        foreach (TestCase test in sorted)
+        {
+            Stopwatch sw = Stopwatch.StartNew();
+            try
             {
-                Stopwatch sw = Stopwatch.StartNew();
-                try
-                {
-                    await test.Run().ConfigureAwait(false);
-                    sw.Stop();
-                    currentTimings[test.Name] = sw.Elapsed.TotalSeconds;
+                await test.Run().ConfigureAwait(false);
+                sw.Stop();
+                currentTimings[test.Name] = sw.Elapsed.TotalSeconds;
 
-                    lock (ConsoleLock)
-                    {
-                        Console.WriteLine($"PASS {test.Name}");
-                    }
-                }
-                catch (Exception ex)
+                lock (ConsoleLock)
                 {
-                    sw.Stop();
-                    allPassed = false;
-                    lock (ConsoleLock)
-                    {
-                        Console.WriteLine();
-                        Console.WriteLine($"FAIL Smoke: {test.Name}");
-                        Console.WriteLine($"  {ex.GetType().Name}: {ex.Message}");
-                        if (ex.InnerException != null)
-                        {
-                            Console.WriteLine($"  Inner: {ex.InnerException.Message}");
-                        }
-                        Console.WriteLine();
-                        Console.WriteLine("Re-run:");
-                        Console.WriteLine($"  dotnet run --no-build --no-restore --project KeepVaultMac.Tests -c Release -- --smoke-only \"{test.Name}\"");
-                        Console.WriteLine();
-                    }
+                    Console.WriteLine($"PASS {test.Name}");
                 }
-            });
+            }
+            catch (Exception ex)
+            {
+                sw.Stop();
+                allPassed = false;
+                lock (ConsoleLock)
+                {
+                    Console.WriteLine();
+                    Console.WriteLine($"FAIL Smoke: {test.Name}");
+                    Console.WriteLine($"  {ex.GetType().Name}: {ex.Message}");
+                    if (ex.InnerException != null)
+                    {
+                        Console.WriteLine($"  Inner: {ex.InnerException.Message}");
+                    }
+                    Console.WriteLine();
+                    Console.WriteLine("Re-run:");
+                    Console.WriteLine($"  dotnet run --no-build --no-restore --project KeepVaultMac.Tests -c Release -- --smoke-only \"{test.Name}\"");
+                    Console.WriteLine();
+                }
+            }
+        }
 
         return allPassed;
     }
@@ -623,24 +619,32 @@ internal static class TestRunner
     private static bool IsBenignFile(string file)
     {
         string normalized = file.Replace('\\', '/');
-        if (normalized.EndsWith(".md", StringComparison.OrdinalIgnoreCase) ||
-            normalized.EndsWith(".txt", StringComparison.OrdinalIgnoreCase) ||
-            normalized.EndsWith(".png", StringComparison.OrdinalIgnoreCase) ||
-            normalized.EndsWith(".icns", StringComparison.OrdinalIgnoreCase) ||
-            normalized.EndsWith(".ico", StringComparison.OrdinalIgnoreCase) ||
-            normalized.EndsWith(".svg", StringComparison.OrdinalIgnoreCase) ||
-            normalized.EndsWith(".gitignore", StringComparison.OrdinalIgnoreCase) ||
-            normalized.EndsWith(".gitattributes", StringComparison.OrdinalIgnoreCase) ||
-            normalized.EndsWith(".editorconfig", StringComparison.OrdinalIgnoreCase))
+
+        // Explicit root documentation / licensing
+        if (string.Equals(normalized, "README.md", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(normalized, "LICENSE", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(normalized, "LICENSE.txt", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(normalized, "NOTICE", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(normalized, "NOTICE.txt", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(normalized, ".gitignore", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(normalized, ".gitattributes", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(normalized, ".editorconfig", StringComparison.OrdinalIgnoreCase))
         {
             return true;
         }
 
+        // Dedicated documentation directories
         if (normalized.StartsWith("docs/", StringComparison.OrdinalIgnoreCase) ||
-            normalized.StartsWith("Documentation/", StringComparison.OrdinalIgnoreCase) ||
-            normalized.StartsWith(".github/", StringComparison.OrdinalIgnoreCase) ||
-            string.Equals(normalized, "LICENSE", StringComparison.OrdinalIgnoreCase) ||
-            string.Equals(normalized, "NOTICE", StringComparison.OrdinalIgnoreCase))
+            normalized.StartsWith("Documentation/", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        // Purely visual graphic assets
+        if (normalized.EndsWith(".png", StringComparison.OrdinalIgnoreCase) ||
+            normalized.EndsWith(".icns", StringComparison.OrdinalIgnoreCase) ||
+            normalized.EndsWith(".ico", StringComparison.OrdinalIgnoreCase) ||
+            normalized.EndsWith(".svg", StringComparison.OrdinalIgnoreCase))
         {
             return true;
         }

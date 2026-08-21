@@ -154,11 +154,16 @@ internal static class KeyedSkein1024
 /// </remarks>
 internal static class Sha3HkdfExpand
 {
+    public const int HashBytes = 64;
+    public const int MaxOutputBytes = 255 * HashBytes; // 16,320 bytes
+
     public static byte[] Expand(ReadOnlySpan<byte> pseudoRandomKey, ReadOnlySpan<byte> info, int outputBytes)
     {
-        if (outputBytes <= 0)
+        if (outputBytes <= 0 || outputBytes > MaxOutputBytes)
         {
-            throw new ArgumentOutOfRangeException(nameof(outputBytes));
+            throw new ArgumentOutOfRangeException(
+                nameof(outputBytes),
+                $"HKDF output bytes must be between 1 and {MaxOutputBytes}.");
         }
 
         byte[] output = new byte[outputBytes];
@@ -170,26 +175,29 @@ internal static class Sha3HkdfExpand
     {
         if (destination.IsEmpty)
         {
-            throw new ArgumentOutOfRangeException(nameof(destination));
+            throw new ArgumentOutOfRangeException(nameof(destination), "Destination span cannot be empty.");
         }
 
-        const int hashLen = 64;
-        int n = (destination.Length + hashLen - 1) / hashLen;
-        if (n > 255)
+        if (destination.Length > MaxOutputBytes)
         {
-            throw new ArgumentOutOfRangeException(nameof(destination), "HKDF output length exceeds maximum allowable (255 * hashLen).");
+            throw new ArgumentOutOfRangeException(
+                nameof(destination),
+                $"HKDF output length ({destination.Length} bytes) exceeds maximum allowable ({MaxOutputBytes} bytes).");
         }
+
+        int n = (destination.Length + HashBytes - 1) / HashBytes;
 
         using var prkBuf = LockedSensitiveBuffer.Create(pseudoRandomKey.Length);
         pseudoRandomKey.CopyTo(prkBuf.Bytes);
 
         using var hmac = new HmacSha3_512(prkBuf.Bytes);
-        using var tBuf = LockedSensitiveBuffer.Create(hashLen);
+        using var tBuf = LockedSensitiveBuffer.Create(HashBytes);
         int generated = 0;
+        Span<byte> counterBuf = stackalloc byte[1];
 
-        for (byte i = 1; i <= n; i++)
+        for (int block = 1; block <= n; block++)
         {
-            if (i > 1)
+            if (block > 1)
             {
                 hmac.AppendData(tBuf.Bytes);
             }
@@ -197,20 +205,13 @@ internal static class Sha3HkdfExpand
             {
                 hmac.AppendData(info);
             }
-            hmac.AppendData([i]);
+            counterBuf[0] = checked((byte)block);
+            hmac.AppendData(counterBuf);
 
-            byte[] t = hmac.GetHashAndReset();
-            try
-            {
-                t.CopyTo(tBuf.Bytes.AsSpan());
-                int toCopy = Math.Min(hashLen, destination.Length - generated);
-                tBuf.Bytes.AsSpan(0, toCopy).CopyTo(destination.Slice(generated, toCopy));
-                generated += toCopy;
-            }
-            finally
-            {
-                CryptographicOperations.ZeroMemory(t);
-            }
+            hmac.GetHashAndReset(tBuf.Bytes);
+            int toCopy = Math.Min(HashBytes, destination.Length - generated);
+            tBuf.Bytes.AsSpan(0, toCopy).CopyTo(destination.Slice(generated, toCopy));
+            generated += toCopy;
         }
     }
 }

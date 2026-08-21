@@ -82,25 +82,22 @@ public sealed class Sha3_512Incremental : IDisposable
 public sealed class HmacSha3_512 : IDisposable
 {
     private HMac? _mac;
-    private byte[]? _key;
 
     public HmacSha3_512(ReadOnlySpan<byte> key)
     {
-        _key = key.ToArray();
+        byte[] tempKey = key.ToArray();
         try
         {
             _mac = new HMac(new Sha3Digest(512));
-            _mac.Init(new KeyParameter(_key));
+            _mac.Init(new KeyParameter(tempKey));
             if (_mac.GetMacSize() != Sha3_512Compat.HashSizeInBytes)
             {
                 throw new CryptographicException("The HMAC-SHA3-512 provider returned an invalid tag length.");
             }
         }
-        catch
+        finally
         {
-            CryptographicOperations.ZeroMemory(_key);
-            _key = null;
-            throw;
+            CryptographicOperations.ZeroMemory(tempKey);
         }
     }
 
@@ -109,18 +106,28 @@ public sealed class HmacSha3_512 : IDisposable
         (_mac ?? throw new ObjectDisposedException(nameof(HmacSha3_512))).BlockUpdate(data);
     }
 
-    public byte[] GetHashAndReset()
+    public int GetHashAndReset(Span<byte> destination)
     {
-        HMac mac = _mac ?? throw new ObjectDisposedException(nameof(HmacSha3_512));
-        byte[] result = new byte[Sha3_512Compat.HashSizeInBytes];
-        int written = mac.DoFinal(result);
-        if (written != result.Length)
+        if (destination.Length < Sha3_512Compat.HashSizeInBytes)
         {
-            CryptographicOperations.ZeroMemory(result);
+            throw new ArgumentException("Destination span is too short for HMAC-SHA3-512 tag.", nameof(destination));
+        }
+
+        HMac mac = _mac ?? throw new ObjectDisposedException(nameof(HmacSha3_512));
+        int written = mac.DoFinal(destination);
+        if (written != Sha3_512Compat.HashSizeInBytes)
+        {
             throw new CryptographicException("The HMAC-SHA3-512 provider returned an invalid tag length.");
         }
 
         mac.Reset();
+        return written;
+    }
+
+    public byte[] GetHashAndReset()
+    {
+        byte[] result = new byte[Sha3_512Compat.HashSizeInBytes];
+        GetHashAndReset(result);
         return result;
     }
 
@@ -128,10 +135,5 @@ public sealed class HmacSha3_512 : IDisposable
     {
         _mac?.Reset();
         _mac = null;
-        if (_key is not null)
-        {
-            CryptographicOperations.ZeroMemory(_key);
-            _key = null;
-        }
     }
 }

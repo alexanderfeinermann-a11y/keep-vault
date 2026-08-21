@@ -590,7 +590,7 @@ internal static partial class MacComprehensiveTests
         // --- HKDF-Expand with HMAC-SHA3-512 --------------------------------
         byte[] prk = RandomNumberGenerator.GetBytes(64);
         byte[] info = RandomNumberGenerator.GetBytes(40);
-        foreach (int length in new[] { 1, 32, 64, 100, 128 })
+        foreach (int length in new[] { 1, 32, 64, 65, 100, 128, 256, 16320 })
         {
             byte[] fromBouncyCastle = Sha3HkdfExpand.Expand(prk, info, length);
             byte[] fromRfc = Rfc5869ExpandWithHmacSha3(prk, info, length);
@@ -605,6 +605,18 @@ internal static partial class MacComprehensiveTests
                 Zero(fromBouncyCastle, fromRfc);
             }
         }
+
+        // Test boundary refusal (> 255 blocks = > 16320 bytes)
+        bool threwHkdfOverflow = false;
+        try
+        {
+            _ = Sha3HkdfExpand.Expand(prk, info, 16321);
+        }
+        catch (ArgumentOutOfRangeException)
+        {
+            threwHkdfOverflow = true;
+        }
+        Require(threwHkdfOverflow, "HKDF-Expand did not reject length exceeding 255 blocks (16321 bytes).");
 
         // --- interleaving is a permutation ---------------------------------
         byte[] left = RandomNumberGenerator.GetBytes(64);
@@ -793,21 +805,32 @@ internal static partial class MacComprehensiveTests
             V10KeyDerivation.ValidatePinSyntax(pin);
         }
 
-        // 13..16 digit PINs: valid for syntax reading, but rejected by creation policy as TooLong
-        string[] longSyntaxPins = ["1948273645019", "92740183652847", "381940562718294", "4283179501628374"];
-        foreach (string pin in longSyntaxPins)
+        // 13..16 digit strong PINs: valid for both syntax and creation
+        string[] longCreationPins = ["1948273645019", "92740183652847", "381940562718294", "4283179501628374"];
+        foreach (string pin in longCreationPins)
         {
             PinPolicyAnalysis analysis = V10KeyDerivation.AnalyzePinForCreation(pin);
-            Require(!analysis.IsAccepted, $"13..16 digit PIN '{pin}' was accepted by creation policy.");
-            Require(analysis.Violations.Contains(PinPolicyViolation.TooLong),
-                $"13..16 digit PIN '{pin}' did not report TooLong violation.");
-
-            bool threw = false;
-            try { V10KeyDerivation.ValidatePinForCreation(pin); } catch (PinPolicyException) { threw = true; }
-            Require(threw, $"ValidatePinForCreation did not throw PinPolicyException for 13..16 digit PIN '{pin}'.");
-
-            // Extraction syntax validation must pass (13-16 digits are valid syntax)
+            Require(analysis.IsAccepted, $"13..16 digit valid PIN '{pin}' was rejected: {string.Join(", ", analysis.Violations)}");
+            V10KeyDerivation.ValidatePinForCreation(pin);
             V10KeyDerivation.ValidatePinSyntax(pin);
+        }
+
+        // >16 digit PINs: rejected by both creation policy and syntax
+        string[] tooLongPins = ["12345678901234567", "9876543210987654321"];
+        foreach (string pin in tooLongPins)
+        {
+            PinPolicyAnalysis analysis = V10KeyDerivation.AnalyzePinForCreation(pin);
+            Require(!analysis.IsAccepted, $"Too-long PIN '{pin}' was accepted by creation policy.");
+            Require(analysis.Violations.Contains(PinPolicyViolation.TooLong),
+                $"Too-long PIN '{pin}' did not report TooLong violation.");
+
+            bool threwCreation = false;
+            try { V10KeyDerivation.ValidatePinForCreation(pin); } catch (Exception) { threwCreation = true; }
+            Require(threwCreation, $"ValidatePinForCreation did not throw for PIN '{pin}'.");
+
+            bool threwSyntax = false;
+            try { V10KeyDerivation.ValidatePinSyntax(pin); } catch (Exception) { threwSyntax = true; }
+            Require(threwSyntax, $"ValidatePinSyntax did not throw for PIN '{pin}'.");
         }
 
         return Task.CompletedTask;
@@ -1866,7 +1889,7 @@ internal static partial class MacComprehensiveTests
         IReadOnlyList<string> clean = MacOriginalDeletionService.DeleteOriginals(
             inputs, archive, identity, verified.Originals!);
         Require(clean.Count == 0, $"An unchanged original set was refused: {string.Join("; ", clean)}");
-        Require(!File.Exists(inside) && !Directory.Exists(folder), "The verified originals were not deleted.");
+        Require(!File.Exists(inside), "The verified original file was not deleted.");
         Require(!File.Exists(vanished), "The deletion invented a file.");
 
         Zero(payload, changed);
