@@ -319,20 +319,178 @@ else
   print "notarization=stapled (${notary_profile})"
 fi
 
+# --- Hybrid Signatures --------------------------------------------------------
+repo_root=${project_root:h}
+dotnet_command=${KEEPVAULT_DOTNET:-/Users/michael/.dotnet-keepvault/dotnet}
+pfx_path=${KEEPVAULT_SIGNING_PFX:-}
+if [[ -z ${pfx_path} ]]; then
+  for candidate in /Volumes/*/Keep\ Vault\ ReleaseKeys*/*.pfx(N); do
+    [[ -f ${candidate} && ! -L ${candidate} ]] || continue
+    pfx_path=${candidate}
+    break
+  done
+fi
+
+mldsa_private_key=${KEEPVAULT_MLDSA_PRIVATE_KEY:-}
+if [[ -z ${mldsa_private_key} ]]; then
+  for candidate in /Volumes/*/Keep\ Vault\ ReleaseKeys*/mldsa87-private.key(N); do
+    [[ -f ${candidate} && ! -L ${candidate} ]] || continue
+    mldsa_private_key=${candidate}
+    break
+  done
+fi
+mldsa_private_key_encrypted=${KEEPVAULT_MLDSA_PRIVATE_KEY_ENCRYPTED:-${mldsa_private_key}.enc}
+mldsa_keychain_service=${KEEPVAULT_MLDSA_KEYCHAIN_SERVICE:-de.michael-feinermann.keep-vault.hybrid-wrapping-key}
+mldsa_keychain_account=${KEEPVAULT_MLDSA_KEYCHAIN_ACCOUNT:-${USER:-}}
+
+mldsa_key_arguments=(--mldsa-private-key ${mldsa_private_key})
+if [[ -f ${mldsa_private_key_encrypted} && ! -L ${mldsa_private_key_encrypted} ]]; then
+  mldsa_key_arguments=(
+    --mldsa-private-key-encrypted ${mldsa_private_key_encrypted}
+    --mldsa-key-keychain-service ${mldsa_keychain_service}
+    --mldsa-key-keychain-account ${mldsa_keychain_account}
+  )
+fi
+
+wrapping_key_file=${KEEPVAULT_WRAPPING_KEY_FILE:-}
+if [[ -z ${wrapping_key_file} ]]; then
+  for candidate in /Volumes/*/Keep\ Vault\ ReleaseKeys*/wrapping-key.b64(N); do
+    [[ -f ${candidate} && ! -L ${candidate} ]] || continue
+    wrapping_key_file=${candidate}
+    break
+  done
+fi
+if [[ -n ${wrapping_key_file} && -f ${wrapping_key_file} && ! -L ${wrapping_key_file} ]]; then
+  mldsa_key_arguments+=(--wrapping-key-file ${wrapping_key_file})
+fi
+
+mldsa_public_key=${KEEPVAULT_MLDSA_PUBLIC_KEY:-${repo_root}/KeepVaultMac/Packaging/Keys/mldsa87-public.key}
+pfx_password_encrypted=${KEEPVAULT_PFX_PASSWORD_ENCRYPTED:-${pfx_path}.password.enc}
+pfx_password_arguments=()
+if [[ -f ${pfx_password_encrypted} && ! -L ${pfx_password_encrypted} ]]; then
+  pfx_password_arguments=(--pfx-password-encrypted ${pfx_password_encrypted})
+fi
+pfx_password_service=${KEEPVAULT_PFX_KEYCHAIN_SERVICE:-de.michael-feinermann.keep-vault.hybrid-pfx}
+pfx_password_account=${KEEPVAULT_PFX_KEYCHAIN_ACCOUNT:-${USER:-}}
+pfx_password_environment=${KEEPVAULT_PFX_PASSWORD_ENV:-KEEPVAULT_HYBRID_PFX_PASSWORD}
+
+if [[ -n ${pfx_path} && -f ${pfx_path} && -n ${mldsa_private_key} && -f ${mldsa_private_key} && -x ${dotnet_command} ]]; then
+  signer_dll=${repo_root}/KeepVaultMac/Packaging/HybridSigner/bin/Release/net10.0/KeepVaultMac.HybridSigner.dll
+  (
+    cd ${repo_root}/KeepVaultMac
+    ${dotnet_command} restore Packaging/HybridSigner/KeepVaultMac.HybridSigner.csproj --locked-mode --nologo
+    ${dotnet_command} build Packaging/HybridSigner/KeepVaultMac.HybridSigner.csproj -c Release --no-restore --nologo
+  )
+  
+  hybrid_arguments=(
+    ${signer_dll}
+    sign
+    --pfx ${pfx_path}
+    ${pfx_password_arguments[@]}
+    ${mldsa_key_arguments[@]}
+    --mldsa-public-key ${mldsa_public_key}
+    --reference-library ${repo_root}/KeepVaultMac/Native/osx-arm64/libmldsa87_ref.dylib
+    --policy ${repo_root}/KeepVaultMac/Directory.Build.props
+    --launcher-pins ${build_root}/ScannerPins.swift
+    --target ${app_bundle}/Contents/MacOS/QR-Scanner
+  )
+  if [[ ${#pfx_password_arguments[@]} -eq 0 ]]; then
+    if [[ -n ${pfx_password_service} ]]; then
+      hybrid_arguments+=(--pfx-password-keychain-service ${pfx_password_service})
+      [[ -n ${pfx_password_account} ]] && hybrid_arguments+=(--pfx-keychain-account ${pfx_password_account})
+    else
+      hybrid_arguments+=(--pfx-password-env ${pfx_password_environment})
+    fi
+  fi
+
+  hybrid_keychain_tmp=${build_root}/hybrid-keychain-tmp
+  mkdir -p -m 0700 ${hybrid_keychain_tmp}
+  (
+    cd ${repo_root}/KeepVaultMac
+    TMPDIR=${hybrid_keychain_tmp} \
+      KEEPVAULT_KEYCHAIN_TEMP_ROOT=${hybrid_keychain_tmp} \
+      DOTNET_EnableDiagnostics=0 \
+      ${dotnet_command} ${hybrid_arguments[@]}
+  )
+  rm -rf -- ${hybrid_keychain_tmp}
+
+  scanner_bin=${app_bundle}/Contents/MacOS/QR-Scanner
+  for sidecar_suffix in .sha3 .skein .khsig .sha3.khsig .skein.khsig; do
+    if [[ -f ${scanner_bin}${sidecar_suffix} ]]; then
+      mv -f -- ${scanner_bin}${sidecar_suffix} ${app_bundle}${sidecar_suffix}
+    fi
+  done
+  codesign --verify --strict --verbose=2 ${app_bundle}
+  print "scanner_dual_signature=${app_bundle}.khsig"
+fi
+
 if (( install_app )); then
   destination=/Applications/${app_name}.app
-  if [[ -e ${destination} ]]; then
-    rm -rf ${destination}
+  backup_dir=$(mktemp -d "${TMPDIR:-/tmp}/qr-scanner-backup.XXXXXXXX")
+  cleanup_backup() { rm -rf -- ${backup_dir}; }
+  trap cleanup_backup EXIT INT TERM
+
+  has_existing=0
+  if [[ -e ${destination} || -L ${destination} ]]; then
+    if [[ ! -d ${destination} || -L ${destination} ]]; then
+      print -u2 "Refusing to replace a non-directory object: ${destination}"
+      exit 1
+    fi
+    existing_id=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' ${destination}/Contents/Info.plist 2>/dev/null || true)
+    if [[ ${existing_id} != ${bundle_identifier} ]]; then
+      print -u2 "Refusing to replace foreign app at ${destination} (bundle id: ${existing_id})"
+      exit 1
+    fi
+    has_existing=1
+    ditto ${destination} ${backup_dir}/QR-Scanner.app
+    for suffix in .sha3 .skein .khsig .sha3.khsig .skein.khsig; do
+      if [[ -f ${destination}${suffix} ]]; then
+        ditto ${destination}${suffix} ${backup_dir}/QR-Scanner.app${suffix}
+      fi
+    done
   fi
-  ditto ${app_bundle} ${destination}
-  # The umask at the top of this script keeps build output private, which is
-  # right for a build directory and wrong for /Applications: an app there is
-  # readable by every account on the Mac. Restore that, without granting write
-  # access to anyone but the owner.
+
+  # Atomic replace
+  if (( has_existing )); then
+    backup_name=.QR-Scanner.previous.$RANDOM.$$.app
+    DESTINATION_PATH=${destination} NEW_ITEM_PATH=${app_bundle} BACKUP_ITEM_NAME=${backup_name} \
+      osascript -l JavaScript <<'JAVASCRIPT'
+ObjC.import('Foundation')
+const env = $.NSProcessInfo.processInfo.environment
+const dest = $.NSURL.fileURLWithPath(ObjC.unwrap(env.objectForKey('DESTINATION_PATH')))
+const newItem = $.NSURL.fileURLWithPath(ObjC.unwrap(env.objectForKey('NEW_ITEM_PATH')))
+const bName = ObjC.unwrap(env.objectForKey('BACKUP_ITEM_NAME'))
+const err = Ref()
+const replaced = $.NSFileManager.defaultManager.replaceItemAtURLWithItemAtURLBackupItemNameOptionsResultingItemURLError(
+  dest, newItem, bName, $.NSFileManagerItemReplacementWithoutDeletingBackupItem, Ref(), err)
+if (!replaced) throw new Error(err[0] ? ObjC.unwrap(err[0].localizedDescription) : 'replace failed')
+JAVASCRIPT
+  else
+    ditto ${app_bundle} ${destination}
+  fi
+
+  # Copy sidecars
+  for suffix in .sha3 .skein .khsig .sha3.khsig .skein.khsig; do
+    if [[ -f ${app_bundle}${suffix} ]]; then
+      ditto ${app_bundle}${suffix} ${destination}${suffix}
+    fi
+  done
+
+  # Verify installed scanner
+  if ! ${repo_root}/tools/Verify-QR-Scanner-macOS.sh --app ${destination} --allow-development; then
+    print -u2 "Installed QR-Scanner verification failed; restoring previous version..."
+    if (( has_existing )) && [[ -d ${backup_dir}/QR-Scanner.app ]]; then
+      ditto ${backup_dir}/QR-Scanner.app ${destination}
+      for suffix in .sha3 .skein .khsig .sha3.khsig .skein.khsig; do
+        if [[ -f ${backup_dir}/QR-Scanner.app${suffix} ]]; then
+          ditto ${backup_dir}/QR-Scanner.app${suffix} ${destination}${suffix}
+        fi
+      done
+    fi
+    exit 1
+  fi
+
   chmod -R go+rX ${destination}
-  # LaunchServices is told about the bundle directly, so it appears in Finder,
-  # Spotlight and Launchpad now instead of whenever the next scan happens to
-  # run.
   /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister \
     -f ${destination} > /dev/null 2>&1 || true
   print "installed=${destination}"

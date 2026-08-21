@@ -849,6 +849,42 @@ final_symbols=${dist_stage}/Keep\ Vault-macOS-${architecture}.dSYMs
 rm -rf -- ${final_symbols}
 ditto ${symbols_dir} ${final_symbols}
 
+# --- Companion QR Scanner -----------------------------------------------------
+scanner_build_script=${repo_root}/QrCodeScanner/tools/Build-QrScanner-macOS.sh
+scanner_dist=${repo_root}/QrCodeScanner/dist/QR-Scanner.app
+if [[ -f ${scanner_build_script} ]]; then
+  scanner_args=(
+    --identity "${identity_label}"
+    --arch ${architecture}
+    --version "${marketing_version}"
+    --build-number "${build_version}"
+  )
+  if [[ -n ${notary_profile:-} && ${identity_label} == 'Developer ID Application:'* ]]; then
+    scanner_args+=(--notary-profile "${notary_profile}")
+  fi
+  ${scanner_build_script} ${scanner_args[@]}
+
+  # Verify release pair metadata and hybrid integrity
+  ${script_dir}/Verify-ReleasePairMetadata-macOS.sh --app ${final_app} --scanner ${scanner_dist}
+  scanner_verify_args=(--app ${scanner_dist})
+  if [[ ${identity_label} == 'Apple Development:'* ]]; then
+    scanner_verify_args+=(--allow-development)
+  fi
+  if [[ -n ${notary_profile:-} && ${identity_label} == 'Developer ID Application:'* ]]; then
+    scanner_verify_args+=(--require-notarization)
+  fi
+  ${script_dir}/Verify-QR-Scanner-macOS.sh ${scanner_verify_args[@]}
+
+  ditto ${scanner_dist} ${dist_stage}/QR-Scanner.app
+  for sidecar_suffix in .sha3 .skein .khsig .sha3.khsig .skein.khsig; do
+    if [[ ! -f ${scanner_dist}${sidecar_suffix} || -L ${scanner_dist}${sidecar_suffix} ]]; then
+      print -u2 "QR-Scanner hybrid sidecar is missing: ${sidecar_suffix}"
+      exit 1
+    fi
+    ditto ${scanner_dist}${sidecar_suffix} ${dist_stage}/QR-Scanner.app${sidecar_suffix}
+  done
+fi
+
 # The launcher will not start without its own dual signature, so the sidecars
 # have to be inside the distribution archive as well. Archiving the contents of
 # a staging directory (rather than --keepParent on the bundle) keeps the app at
@@ -860,6 +896,14 @@ ditto ${final_app} ${zip_stage}/Keep\ Vault.app
 for sidecar_suffix in .sha3 .skein .khsig .sha3.khsig .skein.khsig; do
   ditto ${final_app}.launcher${sidecar_suffix} ${zip_stage}/Keep\ Vault.app.launcher${sidecar_suffix}
 done
+
+if [[ -d ${dist_stage}/QR-Scanner.app ]]; then
+  ditto ${dist_stage}/QR-Scanner.app ${zip_stage}/QR-Scanner.app
+  for sidecar_suffix in .sha3 .skein .khsig .sha3.khsig .skein.khsig; do
+    ditto ${dist_stage}/QR-Scanner.app${sidecar_suffix} ${zip_stage}/QR-Scanner.app${sidecar_suffix}
+  done
+fi
+
 ditto -c -k --sequesterRsrc ${zip_stage} ${final_zip}
 
 archive_common=(
@@ -886,6 +930,7 @@ fi
 )
 
 archive_check=${build_root}/archive-check
+rm -rf -- ${archive_check}
 mkdir -p ${archive_check}
 ditto -x -k ${final_zip} ${archive_check}
 if [[ ! -d ${archive_check}/Keep\ Vault.app || -L ${archive_check}/Keep\ Vault.app ]]; then
@@ -897,6 +942,12 @@ ${script_dir}/Verify-KeepVault-macOS.sh \
   --allow-development \
   --require-launcher-signature \
   --mldsa-public-key ${mldsa_public_key}
+
+if [[ -d ${archive_check}/QR-Scanner.app ]]; then
+  ${script_dir}/Verify-QR-Scanner-macOS.sh \
+    --app ${archive_check}/QR-Scanner.app \
+    --allow-development
+fi
 
 ${script_dir}/Verify-KeepVault-macOS.sh \
   --app ${final_app} \
@@ -960,6 +1011,12 @@ else
   for sidecar_suffix in .sha3 .skein .khsig .sha3.khsig .skein.khsig; do
     ditto ${final_app}.launcher${sidecar_suffix} ${zip_stage}/Keep\ Vault.app.launcher${sidecar_suffix}
   done
+  if [[ -d ${dist_stage}/QR-Scanner.app ]]; then
+    ditto ${dist_stage}/QR-Scanner.app ${zip_stage}/QR-Scanner.app
+    for sidecar_suffix in .sha3 .skein .khsig .sha3.khsig .skein.khsig; do
+      ditto ${dist_stage}/QR-Scanner.app${sidecar_suffix} ${zip_stage}/QR-Scanner.app${sidecar_suffix}
+    done
+  fi
   ditto -c -k --sequesterRsrc ${zip_stage} ${final_zip}
   (
     cd ${mac_project}
@@ -990,17 +1047,6 @@ else
   print "publish_mode=development (outputs placed in build/dev/; dist/ is reserved for Developer ID + notarized production releases)"
 fi
 
-# Include companion QR-Scanner and sidecars if built
-scanner_dist=${repo_root}/QrCodeScanner/dist/QR-Scanner.app
-if [[ -d ${scanner_dist} && ! -L ${scanner_dist} ]]; then
-  ditto ${scanner_dist} ${dist_stage}/QR-Scanner.app
-  for sidecar_suffix in .sha3 .skein .khsig .sha3.khsig .skein.khsig; do
-    if [[ -f ${scanner_dist}${sidecar_suffix} && ! -L ${scanner_dist}${sidecar_suffix} ]]; then
-      ditto ${scanner_dist}${sidecar_suffix} ${dist_stage}/QR-Scanner.app${sidecar_suffix}
-    fi
-  done
-fi
-
 publish_parent=${publish_target_dir:h}
 mkdir -p ${publish_parent}
 
@@ -1009,14 +1055,35 @@ rm -rf -- ${publish_stage}
 ditto ${dist_stage} ${publish_stage}
 
 if [[ -e ${publish_target_dir} ]]; then
-  publish_old=${publish_parent}/.publish_old.$$.$RANDOM
-  mv ${publish_target_dir} ${publish_old}
-  if ! mv ${publish_stage} ${publish_target_dir}; then
-    print -u2 "Publish stage move failed; restoring previous target from ${publish_old}..."
-    mv ${publish_old} ${publish_target_dir} || true
-    exit 1
+  swap_bin=${build_root}/rename_swap
+  if [[ ! -x ${swap_bin} ]]; then
+    xcrun clang -O2 -x c - -o ${swap_bin} <<'EOF' 2>/dev/null || true
+#include <unistd.h>
+#include <stdio.h>
+#include <fcntl.h>
+int main(int argc, char** argv) {
+  if (argc < 3) return 1;
+  return renameatx_np(AT_FDCWD, argv[1], AT_FDCWD, argv[2], 0x00000002);
+}
+EOF
   fi
-  rm -rf -- ${publish_old}
+  swap_status=1
+  if [[ -x ${swap_bin} ]]; then
+    "${swap_bin}" "${publish_stage}" "${publish_target_dir}" 2>/dev/null && swap_status=0 || swap_status=$?
+  fi
+  if (( swap_status != 0 )); then
+    print -u2 "Crash-atomic directory swap unavailable; falling back to transactional rename..."
+    publish_old=${publish_parent}/.publish_old.$$.$RANDOM
+    mv ${publish_target_dir} ${publish_old}
+    if ! mv ${publish_stage} ${publish_target_dir}; then
+      print -u2 "Publish stage move failed; restoring previous target from ${publish_old}..."
+      mv ${publish_old} ${publish_target_dir} || true
+      exit 1
+    fi
+    rm -rf -- ${publish_old}
+  else
+    rm -rf -- ${publish_stage}
+  fi
 else
   mv ${publish_stage} ${publish_target_dir}
 fi

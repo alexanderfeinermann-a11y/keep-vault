@@ -110,13 +110,12 @@ internal static class KeyedSkein1024
         }
 
         var mac = new SkeinMac(SkeinEngine.SKEIN_1024, OutputBytes * 8);
-        using var paramKeyBuf = LockedSensitiveBuffer.Create(key.Length);
-        key.CopyTo(paramKeyBuf.Bytes);
+        byte[] bcKey = key.ToArray();
         byte[] personalisationBytes = Encoding.UTF8.GetBytes(personalisation);
         try
         {
             SkeinParameters parameters = new SkeinParameters.Builder()
-                .SetKey(paramKeyBuf.Bytes.ToArray())
+                .SetKey(bcKey)
                 .SetPersonalisation(personalisationBytes)
                 .Build();
             mac.Init(parameters);
@@ -134,6 +133,7 @@ internal static class KeyedSkein1024
         }
         finally
         {
+            CryptographicOperations.ZeroMemory(bcKey);
             CryptographicOperations.ZeroMemory(personalisationBytes);
             mac.Reset();
         }
@@ -171,19 +171,26 @@ internal static class Sha3HkdfExpand
             throw new ArgumentOutOfRangeException(nameof(destination));
         }
 
-        using var prkBuf = LockedSensitiveBuffer.Create(pseudoRandomKey.Length);
-        pseudoRandomKey.CopyTo(prkBuf.Bytes);
+        byte[] prkBytes = pseudoRandomKey.ToArray();
         byte[] infoBytes = info.ToArray();
         try
         {
             var generator = new HkdfBytesGenerator(new Sha3Digest(512));
-            generator.Init(HkdfParameters.SkipExtractParameters(prkBuf.Bytes.ToArray(), infoBytes));
+            generator.Init(HkdfParameters.SkipExtractParameters(prkBytes, infoBytes));
+
             using var outBuf = LockedSensitiveBuffer.Create(destination.Length);
-            generator.GenerateBytes(outBuf.Bytes);
+            int generated = generator.GenerateBytes(outBuf.Bytes);
+            if (generated != destination.Length)
+            {
+                throw new CryptographicException(
+                    $"HKDF-Expand produced {generated} bytes instead of {destination.Length}.");
+            }
+
             outBuf.Bytes.CopyTo(destination);
         }
         finally
         {
+            CryptographicOperations.ZeroMemory(prkBytes);
             CryptographicOperations.ZeroMemory(infoBytes);
         }
     }

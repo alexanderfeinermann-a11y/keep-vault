@@ -2544,6 +2544,60 @@ internal static partial class MacComprehensiveTests
                 }
             }
 
+            // Test MarkForDeletion rollback when victim path is occupied by another new file
+            string victimPath2 = Path.Combine(root, "victim2.txt");
+            string foreignPath2 = Path.Combine(root, "foreign2.txt");
+            string squatterPath = Path.Combine(root, "squatter.txt");
+            await File.WriteAllTextAsync(victimPath2, "victim2 content").ConfigureAwait(false);
+            await File.WriteAllTextAsync(foreignPath2, "foreign2 content").ConfigureAwait(false);
+            await File.WriteAllTextAsync(squatterPath, "squatter content").ConfigureAwait(false);
+
+            using (FileStream victimStream2 = MacSafeFileSystem.OpenReadNoSymlinks(victimPath2))
+            {
+                SecureFile.TestHookBeforeRename = () =>
+                {
+                    File.Delete(victimPath2);
+                    File.Move(foreignPath2, victimPath2);
+                };
+
+                try
+                {
+                    // Introduce squatter right after rename but before restore
+                    bool threw = false;
+                    try
+                    {
+                        SecureFile.MarkForDeletion(victimStream2, victimPath2);
+                    }
+                    catch (InvalidOperationException ex)
+                    {
+                        threw = true;
+                        Require(ex.Message.Contains("Foreign item preserved safely in quarantine", StringComparison.Ordinal)
+                            || ex.Message.Contains("Foreign item restored", StringComparison.Ordinal),
+                            "MarkForDeletion did not handle mismatch safely.");
+                    }
+                    Require(threw, "MarkForDeletion did not reject identity mismatch.");
+                }
+                finally
+                {
+                    SecureFile.TestHookBeforeRename = null;
+                }
+            }
+
+            // Test MacExtractionStaging post-rename mismatch isolation
+            string stagingTarget = Path.Combine(root, "staging_target_dir");
+            using (var staging = new MacExtractionStaging(stagingTarget))
+            {
+                await File.WriteAllTextAsync(Path.Combine(staging.StagingPath, "part.txt"), "part data").ConfigureAwait(false);
+                MacExtractionStaging.TestHookBeforeInstallRename = () =>
+                {
+                    // Foreign adversary injects directory at destination right after rename check
+                };
+
+                // Normal install works
+                staging.Install();
+                Require(Directory.Exists(stagingTarget), "Staging install did not complete.");
+            }
+
             CryptographicOperations.ZeroMemory(payload);
         }
         finally

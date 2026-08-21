@@ -94,6 +94,11 @@ else
 fi
 
 # Verify Hardened Runtime and Entitlements
+if [[ ${app_signature} != *'flags='*'runtime'* ]]; then
+  print -u2 'The QR-Scanner is missing the hardened runtime flag.'
+  exit 1
+fi
+
 if ! codesign -d --entitlements - ${app_path} >/dev/null 2>&1; then
   print -u2 'Could not read entitlements from QR-Scanner.'
   exit 1
@@ -104,6 +109,19 @@ cleanup() { rm -f -- ${entitlements_xml}; }
 trap cleanup EXIT INT TERM
 
 codesign -d --entitlements :${entitlements_xml} ${app_path} >/dev/null 2>&1
+
+sandbox_val=$(/usr/libexec/PlistBuddy -c 'Print :com.apple.security.app-sandbox' ${entitlements_xml} 2>/dev/null || true)
+camera_val=$(/usr/libexec/PlistBuddy -c 'Print :com.apple.security.device.camera' ${entitlements_xml} 2>/dev/null || true)
+
+if [[ ${sandbox_val} != 'true' ]]; then
+  print -u2 'The QR-Scanner is missing mandatory entitlement: com.apple.security.app-sandbox'
+  exit 1
+fi
+
+if [[ ${camera_val} != 'true' ]]; then
+  print -u2 'The QR-Scanner is missing mandatory entitlement: com.apple.security.device.camera'
+  exit 1
+fi
 
 disallowed_entitlements=(
   com.apple.security.get-task-allow

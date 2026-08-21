@@ -291,7 +291,8 @@ public sealed partial class ZpaqService
                 writeArchive,
                 progress,
                 cancellationToken,
-                monitorStagingDirectory: staging.StagingPath).ConfigureAwait(false);
+                monitorStagingDirectory: staging.StagingPath,
+                expectedDirectoryIdentity: staging.StagingIdentity).ConfigureAwait(false);
             if (result.Succeeded)
             {
                 ValidateExtractedDirectoryLimits(staging.StagingPath);
@@ -647,7 +648,11 @@ public sealed partial class ZpaqService
         string stagingDirectory,
         Process process,
         CancellationTokenSource linkedCts,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken
+#if KEEPVAULT_MACOS
+        , MacFileIdentity? boundDirectoryIdentity = null
+#endif
+    )
     {
         long maxBytes = MaxExtractedBytesOverride > 0 ? MaxExtractedBytesOverride : DefaultMaxExtractedBytes;
         long maxSingleBytes = MaxSingleFileBytesOverride > 0 ? MaxSingleFileBytesOverride : DefaultMaxSingleFileBytes;
@@ -660,26 +665,39 @@ public sealed partial class ZpaqService
         object checkLock = new object();
 
 #if KEEPVAULT_MACOS
-        MacFileIdentity? expectedDirectoryIdentity = null;
-        try
+        MacFileIdentity? expectedDirectoryIdentity = boundDirectoryIdentity;
+        if (!expectedDirectoryIdentity.HasValue)
         {
-            if (Directory.Exists(stagingDirectory))
+            try
             {
-                expectedDirectoryIdentity = MacSafeFileSystem.GetPathIdentityNoFollow(stagingDirectory);
+                if (Directory.Exists(stagingDirectory))
+                {
+                    expectedDirectoryIdentity = MacSafeFileSystem.GetPathIdentityNoFollow(stagingDirectory);
+                }
             }
-        }
-        catch (Exception ex)
-        {
-            linkedCts.Cancel();
-            try { process.Kill(entireProcessTree: true); } catch { }
-            limitViolation = new InvalidOperationException($"Konnte Identität des Staging-Verzeichnisses nicht ermitteln: {ex.Message}", ex);
-            throw limitViolation;
+            catch (Exception ex)
+            {
+                linkedCts.Cancel();
+                try { process.Kill(entireProcessTree: true); } catch { }
+                limitViolation = new InvalidOperationException($"Konnte Identität des Staging-Verzeichnisses nicht ermitteln: {ex.Message}", ex);
+                throw limitViolation;
+            }
         }
 #endif
 
         void CheckLimits()
         {
-            if (process.HasExited || !Directory.Exists(stagingDirectory))
+            bool hasExited;
+            try
+            {
+                hasExited = process.HasExited;
+            }
+            catch (InvalidOperationException)
+            {
+                return;
+            }
+
+            if (hasExited || !Directory.Exists(stagingDirectory))
             {
                 return;
             }
@@ -905,7 +923,11 @@ public sealed partial class ZpaqService
         Func<Stream, CancellationToken, Task> writeArchive,
         IProgress<string>? progress,
         CancellationToken cancellationToken,
-        string? monitorStagingDirectory = null)
+        string? monitorStagingDirectory = null
+#if KEEPVAULT_MACOS
+        , MacFileIdentity? expectedDirectoryIdentity = null
+#endif
+    )
     {
         using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         using var process = CreateProcess(executable, arguments, workingDirectory);
@@ -925,7 +947,15 @@ public sealed partial class ZpaqService
         Task outputTask = ReadLinesAsync(process.StandardOutput, output, progress, linkedCts.Token);
         Task errorTask = ReadLinesAsync(process.StandardError, errors, progress, linkedCts.Token);
         Task? monitorTask = monitorStagingDirectory != null
-            ? MonitorExtractionLimitsAsync(monitorStagingDirectory, process, linkedCts, linkedCts.Token)
+            ? MonitorExtractionLimitsAsync(
+                monitorStagingDirectory,
+                process,
+                linkedCts,
+                linkedCts.Token
+#if KEEPVAULT_MACOS
+                , expectedDirectoryIdentity
+#endif
+              )
             : null;
 
         var tasks = monitorTask != null

@@ -405,10 +405,10 @@ internal sealed class MacOriginalDeletionService
 
                 string qDirName = ".keepvault_quarantine_" + Guid.NewGuid().ToString("N");
                 string quarantineDir = Path.Combine(canonicalParent, qDirName);
-                Directory.CreateDirectory(quarantineDir);
+                MacSafeFileSystem.MkdirAt(parentHandle, qDirName, 0x1C0 /* 0700 */);
                 quarantineDirs.Add(quarantineDir);
 
-                SafeFileHandle qDirHandle = MacSafeFileSystem.OpenDirectoryHandle(quarantineDir);
+                SafeFileHandle qDirHandle = MacSafeFileSystem.OpenDirectoryHandleAt(parentHandle, qDirName);
                 string fileName = Path.GetFileName(path);
 
                 // Atomically move from parent directory to quarantine directory
@@ -456,40 +456,36 @@ internal sealed class MacOriginalDeletionService
         }
         catch (Exception ex)
         {
-            // Pre-Commit Rollback: Restore all quarantined files to their original locations
+            // Pre-Commit Rollback: Restore all quarantined files to their original locations exclusively
             var rollbackErrors = new List<string>();
             foreach (var item in quarantined)
             {
                 try
                 {
                     using SafeFileHandle parentHandle = MacSafeFileSystem.OpenDirectoryHandle(item.OriginalParentDir);
-                    bool origNameFree = false;
+                    bool restored = false;
                     try
                     {
-                        _ = MacSafeFileSystem.GetIdentityAt(parentHandle, item.QuarantineFileName);
-                        origNameFree = false;
+                        MacSafeFileSystem.RenameAtExclusive(item.QuarantineDirHandle, item.QuarantineFileName, parentHandle, item.QuarantineFileName);
+                        restored = true;
                     }
-                    catch (Win32Exception wEx) when (wEx.NativeErrorCode == 2 /* ENOENT */)
+                    catch (Win32Exception wEx) when (wEx.NativeErrorCode == 17 /* EEXIST */)
                     {
-                        origNameFree = true;
+                        restored = false;
                     }
 
-                    if (origNameFree)
-                    {
-                        MacSafeFileSystem.RenameAt(item.QuarantineDirHandle, item.QuarantineFileName, parentHandle, item.QuarantineFileName);
-                    }
-                    else
+                    if (!restored)
                     {
                         rollbackErrors.Add(
                             $"Originalpfad belegt für {item.OriginalPath}. " +
-                            $"Originaldatei verbleibt geschützt in: {Path.Combine(item.QuarantineDirectory, item.QuarantineFileName)}");
+                            $"Originaldatei verbleibt geschützt in Quarantäne: {Path.Combine(item.QuarantineDirectory, item.QuarantineFileName)}");
                     }
                 }
                 catch (Exception moveEx)
                 {
                     rollbackErrors.Add(
                         $"Wiederherstellung aus Quarantäne fehlgeschlagen für {item.OriginalPath}: {moveEx.Message}. " +
-                        $"Originaldatei verbleibt geschützt in: {Path.Combine(item.QuarantineDirectory, item.QuarantineFileName)}");
+                        $"Originaldatei verbleibt geschützt in Quarantäne: {Path.Combine(item.QuarantineDirectory, item.QuarantineFileName)}");
                 }
             }
 
