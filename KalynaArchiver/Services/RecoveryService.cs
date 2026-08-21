@@ -1070,7 +1070,7 @@ public sealed partial class RecoveryService
         int offset = 0;
         WriteLengthAndBytes(result, ref offset, domain);
         WriteLengthAndBytes(result, ref offset, locator.ArchiveId);
-        BinaryPrimitives.WriteInt32LittleEndian(result.AsSpan(offset), Version);
+        BinaryPrimitives.WriteInt32LittleEndian(result.AsSpan(offset), locator.FormatVersion);
         offset += sizeof(int);
         BinaryPrimitives.WriteInt32LittleEndian(result.AsSpan(offset), locator.EncryptionSuite);
         return result;
@@ -1526,6 +1526,7 @@ public sealed partial class RecoveryService
                                 shardIndex);
                         bool valid = readable && ValidateMetadataBlock(
                             block,
+                            locator.FormatVersion,
                             stripe,
                             shardIndex,
                             isParity,
@@ -1624,13 +1625,14 @@ public sealed partial class RecoveryService
 
     private static bool ValidateMetadataBlock(
         byte[] block,
+        int expectedFormatVersion,
         int stripe,
         int shardIndex,
         bool isParity,
         int expectedPayloadLength)
     {
         bool headerValid = block.AsSpan(0, 8).SequenceEqual(MetadataBlockMagic)
-            && BinaryPrimitives.ReadInt32LittleEndian(block.AsSpan(8)) == Version
+            && BinaryPrimitives.ReadInt32LittleEndian(block.AsSpan(8)) == expectedFormatVersion
             && BinaryPrimitives.ReadInt32LittleEndian(block.AsSpan(12)) == stripe
             && BinaryPrimitives.ReadInt32LittleEndian(block.AsSpan(16)) == shardIndex
             && BinaryPrimitives.ReadInt32LittleEndian(block.AsSpan(20)) == (isParity ? 1 : 0)

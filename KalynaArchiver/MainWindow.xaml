@@ -192,18 +192,28 @@
 
                             <Border Grid.Column="2" Padding="14" Background="#0B1120" CornerRadius="8" BorderBrush="#334155" BorderThickness="1">
                                 <StackPanel x:Name="CreatePasswordPanel">
-                                    <TextBlock x:Name="CreatePasswordSetupTitle" Text="Three-part password for encrypted archives" FontSize="16" FontWeight="SemiBold" />
+                                    <TextBlock x:Name="CreatePasswordSetupTitle" Text="Four-part password for encrypted archives" FontSize="16" FontWeight="SemiBold" />
                                     <TextBlock x:Name="CreatePasswordSetupHelpText"
-                                               Text="The user password and two independent generated 512-bit hexadecimal passwords are required for extraction."
+                                               Text="The user password, the PIN, and two independent generated 1024-bit hexadecimal factors are required for extraction."
                                                Foreground="#94A3B8"
                                                TextWrapping="Wrap"
                                                Margin="0,6,0,0" />
                                     <TextBlock x:Name="CreatePasswordLabel" Text="User password" FontWeight="SemiBold" Margin="0,12,0,6" />
-                                    <PasswordBox x:Name="CreatePasswordBox" MaxLength="128" PasswordChanged="CreatePasswordBox_PasswordChanged" />
+                                    <PasswordBox x:Name="CreatePasswordBox" MaxLength="256" PasswordChanged="CreatePasswordBox_PasswordChanged" />
                                     <TextBlock x:Name="CreatePasswordConfirmLabel" Text="Repeat user password" FontWeight="SemiBold" Margin="0,12,0,6" />
-                                    <PasswordBox x:Name="CreatePasswordConfirmBox" MaxLength="128" PasswordChanged="CreatePasswordBox_PasswordChanged" />
+                                    <PasswordBox x:Name="CreatePasswordConfirmBox" MaxLength="256" PasswordChanged="CreatePasswordBox_PasswordChanged" />
+                                    <TextBlock x:Name="CreatePinLabel" Text="PIN" FontWeight="SemiBold" Margin="0,12,0,6" />
+                                    <PasswordBox x:Name="CreatePinBox" MaxLength="16" PasswordChanged="CreatePasswordBox_PasswordChanged" />
+                                    <TextBlock x:Name="CreatePinConfirmLabel" Text="Repeat PIN" FontWeight="SemiBold" Margin="0,12,0,6" />
+                                    <PasswordBox x:Name="CreatePinConfirmBox" MaxLength="16" PasswordChanged="CreatePasswordBox_PasswordChanged" />
+                                    <TextBlock x:Name="PinHelpText"
+                                               Text="6 to 16 digits. The PIN is a credential of its own and is required together with the passphrase and both factors."
+                                               TextWrapping="Wrap"
+                                               Foreground="#94A3B8"
+                                               Margin="0,10,0,0" />
+                                    <TextBlock x:Name="PinPolicyStatusText" Text="PIN not complete." Foreground="#FCA5A5" TextWrapping="Wrap" Margin="0,6,0,0" />
                                     <TextBlock x:Name="PasswordHelpText"
-                                               Text="24 to 128 characters. The policy requires 128 conservative entropy bits and rejects generated-password copies."
+                                               Text="24 to 256 characters. The policy requires 128 conservative entropy bits and rejects factor copies."
                                                TextWrapping="Wrap"
                                                Foreground="#94A3B8"
                                                Margin="0,10,0,0" />
@@ -212,9 +222,9 @@
 
                                     <Border Margin="0,14,0,12" Padding="12" Background="#111827" CornerRadius="8" BorderBrush="#334155" BorderThickness="1">
                                         <StackPanel>
-                                            <TextBlock x:Name="PasswordGeneratorTitle" Text="Two independent generated 512-bit passwords" FontWeight="SemiBold" />
+                                            <TextBlock x:Name="PasswordGeneratorTitle" Text="Two independent generated 1024-bit factors" FontWeight="SemiBold" />
                                             <TextBlock x:Name="PasswordGeneratorHelpText"
-                                                       Text="Move the mouse over the window. Five independent pools are filled evenly; 512 samples per pool is the minimum. Generate creates A, B, salt, and both nonce parts atomically, then marks their reset pools as consumed. Key = Argon2id(SHA3-512(UserPassword, A) || SHA3-512(UserPassword, B), Salt). Inputs are length-prefixed and domain-separated."
+                                                       Text="Move the mouse over the window. Nine independent pools are filled evenly; 1024 samples per pool is the minimum. Generate creates A, B, both salts, and all three nonce parts atomically, then marks their reset pools as consumed."
                                                        Foreground="#94A3B8"
                                                        TextWrapping="Wrap"
                                                        Margin="0,6,0,6" />
@@ -222,14 +232,14 @@
                                             <WrapPanel Margin="0,10,0,8">
                                                 <Button x:Name="GeneratePasswordButton" Content="Regenerate" Click="GeneratePassword_Click" />
                                             </WrapPanel>
-                                            <TextBlock x:Name="GeneratedPasswordFirstLabel" Text="Generated password A" FontWeight="SemiBold" Margin="0,0,0,6" />
+                                            <TextBlock x:Name="GeneratedPasswordFirstLabel" Text="Generated factor A" FontWeight="SemiBold" Margin="0,0,0,6" />
                                             <TextBox x:Name="GeneratedPasswordFirstBox"
                                                      IsReadOnly="True"
                                                      TextWrapping="Wrap"
                                                      FontFamily="Consolas"
                                                      FontSize="12"
                                                      MinHeight="72" />
-                                            <TextBlock x:Name="GeneratedPasswordSecondLabel" Text="Generated password B" FontWeight="SemiBold" Margin="0,10,0,6" />
+                                            <TextBlock x:Name="GeneratedPasswordSecondLabel" Text="Generated factor B" FontWeight="SemiBold" Margin="0,10,0,6" />
                                             <TextBox x:Name="GeneratedPasswordSecondBox"
                                                      IsReadOnly="True"
                                                      TextWrapping="Wrap"
@@ -315,11 +325,13 @@
                                                TextWrapping="Wrap"
                                                Margin="0,0,0,10" />
                                     <TextBlock x:Name="ExtractPasswordLabel" Text="User password" FontWeight="SemiBold" Margin="0,0,0,6" />
-                                    <PasswordBox x:Name="ExtractPasswordBox" MaxLength="128" />
-                                    <TextBlock x:Name="ExtractGeneratedPasswordFirstLabel" Text="Generated password A from key sheet" FontWeight="SemiBold" Margin="0,12,0,6" />
-                                    <TextBox x:Name="ExtractGeneratedPasswordFirstBox" MaxLength="160" FontFamily="Consolas" TextWrapping="Wrap" MinHeight="60" />
-                                    <TextBlock x:Name="ExtractGeneratedPasswordSecondLabel" Text="Generated password B from key sheet" FontWeight="SemiBold" Margin="0,12,0,6" />
-                                    <TextBox x:Name="ExtractGeneratedPasswordSecondBox" MaxLength="160" FontFamily="Consolas" TextWrapping="Wrap" MinHeight="60" />
+                                    <PasswordBox x:Name="ExtractPasswordBox" MaxLength="256" />
+                                    <TextBlock x:Name="ExtractPinLabel" Text="PIN" FontWeight="SemiBold" Margin="0,12,0,6" />
+                                    <PasswordBox x:Name="ExtractPinBox" MaxLength="16" />
+                                    <TextBlock x:Name="ExtractGeneratedPasswordFirstLabel" Text="Generated factor A from key sheet" FontWeight="SemiBold" Margin="0,12,0,6" />
+                                    <TextBox x:Name="ExtractGeneratedPasswordFirstBox" MaxLength="320" FontFamily="Consolas" TextWrapping="Wrap" MinHeight="60" />
+                                    <TextBlock x:Name="ExtractGeneratedPasswordSecondLabel" Text="Generated factor B from key sheet" FontWeight="SemiBold" Margin="0,12,0,6" />
+                                    <TextBox x:Name="ExtractGeneratedPasswordSecondBox" MaxLength="320" FontFamily="Consolas" TextWrapping="Wrap" MinHeight="60" />
                                 </StackPanel>
                             </Border>
 

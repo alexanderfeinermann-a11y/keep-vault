@@ -222,10 +222,13 @@ execute_rollback() {
     # Rollback Anchor if modified
     if (( anchor_updated )); then
       if (( had_existing_anchor )); then
-        ANCHOR_PATH=${anchor_path} PREV_VERSION=${recorded_version} osascript <<'APPLESCRIPT' || rollback_errors+=("Failed to restore rollback anchor")
+        anchor_tmp="${anchor_directory}/.minimum-version.rollback.tmp.$$"
+        ANCHOR_DIR=${anchor_directory} ANCHOR_PATH=${anchor_path} ANCHOR_TMP=${anchor_tmp} PREV_VERSION=${recorded_version} osascript <<'APPLESCRIPT' || rollback_errors+=("Failed to restore rollback anchor")
+set anchorDir to system attribute "ANCHOR_DIR"
 set anchorPath to system attribute "ANCHOR_PATH"
+set anchorTmp to system attribute "ANCHOR_TMP"
 set prevVersion to system attribute "PREV_VERSION"
-set commandText to "/usr/bin/printf '%s' " & quoted form of prevVersion & " > " & quoted form of anchorPath
+set commandText to "/usr/bin/printf '%s' " & quoted form of prevVersion & " > " & quoted form of anchorTmp & " && /usr/sbin/chown 0:0 " & quoted form of anchorTmp & " && /bin/chmod 0644 " & quoted form of anchorTmp & " && /bin/mv -f " & quoted form of anchorTmp & " " & quoted form of anchorPath
 do shell script commandText with administrator privileges
 APPLESCRIPT
       else
@@ -272,12 +275,16 @@ APPLESCRIPT
 
 cleanup() {
   execute_rollback
-  if (( ! ${rollback_failed:-0} )); then
+  if (( ! ${rollback_failed:-0} && ! ${preserve_install_root:-0} )); then
     if [[ -n ${install_root:-} && -d ${install_root} && ${install_root} == ${applications_dir}/.keep-vault-install.* ]]; then
       rm -rf -- ${install_root}
     fi
   else
-    print -u2 "CRITICAL: Retaining installation root and backups at ${install_root} due to rollback failure."
+    if (( ${preserve_install_root:-0} )); then
+      print -u2 "Preserving installation root at ${install_root} because backup recovery paths could not be fully relocated."
+    else
+      print -u2 "CRITICAL: Retaining installation root and backups at ${install_root} due to rollback failure."
+    fi
   fi
   if [[ -n ${temporary_alias_path:-} && -f ${temporary_alias_path} && ! -L ${temporary_alias_path} ]]; then
     rm -- ${temporary_alias_path}
@@ -480,21 +487,46 @@ if (( ! had_existing_anchor )) || (( installed_version > recorded_version )) || 
 fi
 
 if (( update_anchor )); then
-  ANCHOR_PATH=${anchor_path} NEW_VERSION=${installed_version} osascript <<'APPLESCRIPT' || {
+  anchor_updated=1
+  anchor_tmp="${anchor_directory}/.minimum-version.tmp.$$"
+  ANCHOR_DIR=${anchor_directory} ANCHOR_PATH=${anchor_path} ANCHOR_TMP=${anchor_tmp} NEW_VERSION=${installed_version} osascript <<'APPLESCRIPT' || {
+set anchorDir to system attribute "ANCHOR_DIR"
 set anchorPath to system attribute "ANCHOR_PATH"
+set anchorTmp to system attribute "ANCHOR_TMP"
 set newVersion to system attribute "NEW_VERSION"
-set commandText to "/bin/mkdir -p " & quoted form of (do shell script "dirname " & quoted form of anchorPath) & " && /usr/bin/printf '%s' " & quoted form of newVersion & " > " & quoted form of anchorPath & " && /usr/sbin/chown 0:0 " & quoted form of anchorPath & " && /bin/chmod 0644 " & quoted form of anchorPath
+set commandText to "/bin/mkdir -p " & quoted form of anchorDir & " && /usr/sbin/chown 0:0 " & quoted form of anchorDir & " && /bin/chmod 0755 " & quoted form of anchorDir & " && /usr/bin/printf '%s' " & quoted form of newVersion & " > " & quoted form of anchorTmp & " && /usr/sbin/chown 0:0 " & quoted form of anchorTmp & " && /bin/chmod 0644 " & quoted form of anchorTmp & " && /bin/mv -f " & quoted form of anchorTmp & " " & quoted form of anchorPath
 do shell script commandText with administrator privileges
 APPLESCRIPT
     print -u2 "Failed to update machine-wide rollback anchor to version ${installed_version}"
     exit 1
   }
-  anchor_updated=1
+
+  if [[ -L ${anchor_directory} || ! -d ${anchor_directory} ]]; then
+    print -u2 "The rollback anchor directory is invalid or a symlink after update: ${anchor_directory}"
+    exit 1
+  fi
+  anchor_dir_uid=$(stat -f '%u' ${anchor_directory} 2>/dev/null || print -1)
+  anchor_dir_mode=$(stat -f '%Lp' ${anchor_directory} 2>/dev/null || print 0)
+  if (( anchor_dir_uid != 0 || (8#${anchor_dir_mode} & 8#022) != 0 )); then
+    print -u2 "The rollback anchor directory has insecure owner/permissions after update: ${anchor_directory}"
+    exit 1
+  fi
+
+  if [[ -L ${anchor_path} || ! -f ${anchor_path} ]]; then
+    print -u2 "The rollback anchor file is missing or a symlink after update: ${anchor_path}"
+    exit 1
+  fi
   anchor_uid=$(stat -f '%u' ${anchor_path} 2>/dev/null || print -1)
   anchor_links=$(stat -f '%l' ${anchor_path} 2>/dev/null || print 0)
   anchor_mode=$(stat -f '%Lp' ${anchor_path} 2>/dev/null || print 0)
   if (( anchor_uid != 0 || anchor_links != 1 || (8#${anchor_mode} & 8#022) != 0 )); then
-    print -u2 "Rollback anchor has insecure permissions or ownership after update: ${anchor_path}"
+    print -u2 "Rollback anchor has insecure permissions, ownership, or multiple links after update: ${anchor_path}"
+    exit 1
+  fi
+
+  current_anchor_content=$(<${anchor_path})
+  if [[ "${current_anchor_content}" != "${installed_version}" ]]; then
+    print -u2 "Rollback anchor content '${current_anchor_content}' does not match installed version '${installed_version}'"
     exit 1
   fi
   print "rollback_anchor=${anchor_path} (${installed_version})"

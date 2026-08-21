@@ -1349,25 +1349,15 @@ public sealed partial class ZpaqService
             var leases = new InputFileLeaseSet();
             try
             {
-                foreach (string inputPath in inputPaths.Where(File.Exists))
+                foreach (string inputPath in inputPaths)
                 {
-                    FileStream? stream = null;
-                    try
+                    if (File.Exists(inputPath))
                     {
-                        stream = new FileStream(inputPath, FileMode.Open, FileAccess.Read, FileShare.Read);
-                        string resolvedPath = NativePathResolver.ResolveFinalDosPath(stream.SafeFileHandle);
-                        if (!PathsEqual(inputPath, resolvedPath))
-                        {
-                            throw new InvalidOperationException(
-                                $"ZPAQ input path resolves through a reparse point or alias: {inputPath} -> {resolvedPath}");
-                        }
-
-                        leases._streams.Add(stream);
-                        stream = null;
+                        AcquireFileLease(inputPath, leases);
                     }
-                    finally
+                    else if (Directory.Exists(inputPath))
                     {
-                        stream?.Dispose();
+                        AcquireDirectoryLeases(inputPath, leases);
                     }
                 }
 
@@ -1377,6 +1367,61 @@ public sealed partial class ZpaqService
             {
                 leases.Dispose();
                 throw;
+            }
+        }
+
+        private static void AcquireDirectoryLeases(string directoryPath, InputFileLeaseSet leases)
+        {
+            FileAttributes dirAttr = File.GetAttributes(directoryPath);
+            if ((dirAttr & FileAttributes.ReparsePoint) != 0)
+            {
+                throw new InvalidOperationException(
+                    $"ZPAQ input directory is a reparse point or junction: {directoryPath}");
+            }
+
+            foreach (string subDir in Directory.EnumerateDirectories(directoryPath, "*", SearchOption.AllDirectories))
+            {
+                FileAttributes subAttr = File.GetAttributes(subDir);
+                if ((subAttr & FileAttributes.ReparsePoint) != 0)
+                {
+                    throw new InvalidOperationException(
+                        $"ZPAQ input directory contains a reparse point subdirectory: {subDir}");
+                }
+            }
+
+            foreach (string filePath in Directory.EnumerateFiles(directoryPath, "*", SearchOption.AllDirectories))
+            {
+                AcquireFileLease(filePath, leases);
+            }
+        }
+
+        [SuppressMessage("Reliability", "CA2000:Dispose objects before losing scope", Justification = "Transferred to leases._streams")]
+        private static void AcquireFileLease(string filePath, InputFileLeaseSet leases)
+        {
+            FileAttributes fileAttr = File.GetAttributes(filePath);
+            if ((fileAttr & FileAttributes.ReparsePoint) != 0)
+            {
+                throw new InvalidOperationException(
+                    $"ZPAQ input file is a reparse point or symbolic link: {filePath}");
+            }
+
+            FileStream? stream = null;
+            try
+            {
+                stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read);
+                string resolvedPath = NativePathResolver.ResolveFinalDosPath(stream.SafeFileHandle);
+                if (!PathsEqual(filePath, resolvedPath))
+                {
+                    throw new InvalidOperationException(
+                        $"ZPAQ input path resolves through a reparse point or alias: {filePath} -> {resolvedPath}");
+                }
+
+                leases._streams.Add(stream);
+                stream = null;
+            }
+            finally
+            {
+                stream?.Dispose();
             }
         }
 

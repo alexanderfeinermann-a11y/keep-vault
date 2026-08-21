@@ -425,10 +425,10 @@ public sealed partial class MainWindow : Window, IDisposable
                     : null;
                 if (preparedEntropy is null)
                 {
-                    EnsureEntropyReady(EntropyPurpose.Salt);
+                    EnsureEntropyReady(EntropyPurpose.SaltSha3);
+                    EnsureEntropyReady(EntropyPurpose.SaltSkein);
                     EnsureEntropyReady(EntropyPurpose.NonceFirst);
                     EnsureEntropyReady(EntropyPurpose.NonceSecond);
-        EnsureEntropyReady(EntropyPurpose.NonceThird);
                     EnsureEntropyReady(EntropyPurpose.NonceThird);
                 }
 
@@ -456,6 +456,7 @@ public sealed partial class MainWindow : Window, IDisposable
                             zpaqStream,
                             archivePath,
                             CreatePasswordBox.Password,
+                            CreatePinBox.Password,
                             GeneratedPasswordFirstBox.Text,
                             GeneratedPasswordSecondBox.Text,
                             suite,
@@ -469,6 +470,7 @@ public sealed partial class MainWindow : Window, IDisposable
                             zpaqStream,
                             archivePath,
                             CreatePasswordBox.Password,
+                            CreatePinBox.Password,
                             GeneratedPasswordFirstBox.Text,
                             GeneratedPasswordSecondBox.Text,
                             suite,
@@ -514,6 +516,7 @@ public sealed partial class MainWindow : Window, IDisposable
                 await _recovery.CreateAuthenticatedAsync(
                     archivePath,
                     CreatePasswordBox.Password,
+                    CreatePinBox.Password,
                     GeneratedPasswordFirstBox.Text,
                     GeneratedPasswordSecondBox.Text,
                     Progress(),
@@ -603,6 +606,7 @@ public sealed partial class MainWindow : Window, IDisposable
                         (zpaqInput, ct) => _kalyna.DecryptToStreamAsync(
                             effectivePath,
                             ExtractPasswordBox.Password,
+                            ExtractPinBox.Password,
                             ExtractGeneratedPasswordFirstBox.Text,
                             ExtractGeneratedPasswordSecondBox.Text,
                             zpaqInput,
@@ -677,6 +681,7 @@ public sealed partial class MainWindow : Window, IDisposable
                         (zpaqInput, ct) => _kalyna.DecryptToStreamAsync(
                             effectivePath,
                             ExtractPasswordBox.Password,
+                            ExtractPinBox.Password,
                             ExtractGeneratedPasswordFirstBox.Text,
                             ExtractGeneratedPasswordSecondBox.Text,
                             zpaqInput,
@@ -760,6 +765,7 @@ public sealed partial class MainWindow : Window, IDisposable
                 recovery = await _recovery.RecoverToNewFileAuthenticatedAsync(
                     archive,
                     ExtractPasswordBox.Password,
+                    ExtractPinBox.Password,
                     ExtractGeneratedPasswordFirstBox.Text,
                     ExtractGeneratedPasswordSecondBox.Text,
                     Progress(),
@@ -813,6 +819,8 @@ public sealed partial class MainWindow : Window, IDisposable
         _generatedPasswordPairReady = false;
         CreatePasswordBox.Clear();
         CreatePasswordConfirmBox.Clear();
+        CreatePinBox.Clear();
+        CreatePinConfirmBox.Clear();
         GeneratedPasswordFirstBox.Clear();
         GeneratedPasswordSecondBox.Clear();
         generatedArchiveEntropy?.Dispose();
@@ -824,6 +832,7 @@ public sealed partial class MainWindow : Window, IDisposable
     private void ClearExtractSecrets()
     {
         ExtractPasswordBox.Clear();
+        ExtractPinBox.Clear();
         ExtractGeneratedPasswordFirstBox.Clear();
         ExtractGeneratedPasswordSecondBox.Clear();
     }
@@ -864,6 +873,7 @@ public sealed partial class MainWindow : Window, IDisposable
             recovery = await _recovery.VerifyAndRepairAuthenticatedAsync(
                 archive,
                 ExtractPasswordBox.Password,
+                ExtractPinBox.Password,
                 ExtractGeneratedPasswordFirstBox.Text,
                 ExtractGeneratedPasswordSecondBox.Text,
                 Progress(),
@@ -909,6 +919,7 @@ public sealed partial class MainWindow : Window, IDisposable
             RecoveryRepairResult recovery = await _recovery.VerifyAndRepairAuthenticatedAsync(
                 archive,
                 ExtractPasswordBox.Password,
+                ExtractPinBox.Password,
                 ExtractGeneratedPasswordFirstBox.Text,
                 ExtractGeneratedPasswordSecondBox.Text,
                 Progress(),
@@ -937,6 +948,7 @@ public sealed partial class MainWindow : Window, IDisposable
             RecoveryRepairResult recovery = await _recovery.VerifyAndRepairAuthenticatedAsync(
                 archive,
                 ExtractPasswordBox.Password,
+                ExtractPinBox.Password,
                 ExtractGeneratedPasswordFirstBox.Text,
                 ExtractGeneratedPasswordSecondBox.Text,
                 Progress(),
@@ -1232,11 +1244,31 @@ public sealed partial class MainWindow : Window, IDisposable
         {
             throw new InvalidOperationException(T("passwordMismatch"));
         }
+
+        string pin = CreatePinBox.Password;
+        PinPolicyAnalysis analysis = V10KeyDerivation.AnalyzePinForCreation(pin);
+        if (!analysis.IsAccepted)
+        {
+            throw new InvalidOperationException(PinViolationText(analysis.Violations[0]));
+        }
+        if (!string.Equals(pin, CreatePinConfirmBox.Password, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(T("pinMismatch"));
+        }
     }
 
     private void EnsurePasswordPresent()
     {
         EnsurePasswordLength(ExtractPasswordBox.Password);
+        string pin = ExtractPinBox.Password;
+        try
+        {
+            V10KeyDerivation.ValidatePinSyntax(pin);
+        }
+        catch (ArgumentException ex)
+        {
+            throw new InvalidOperationException(T("pinInvalidFormat"), ex);
+        }
     }
 
     private void EnsurePasswordLength(string password)
@@ -1280,9 +1312,9 @@ public sealed partial class MainWindow : Window, IDisposable
 
         string label = purpose switch
         {
-            EntropyPurpose.GeneratedPasswordFirst => T("entropyGeneratedPasswordFirst"),
-            EntropyPurpose.GeneratedPasswordSecond => T("entropyGeneratedPasswordSecond"),
-            EntropyPurpose.Salt => T("entropySalt"),
+            EntropyPurpose.FactorA1 or EntropyPurpose.FactorA2 => T("entropyGeneratedPasswordFirst"),
+            EntropyPurpose.FactorB1 or EntropyPurpose.FactorB2 => T("entropyGeneratedPasswordSecond"),
+            EntropyPurpose.SaltSha3 or EntropyPurpose.SaltSkein => T("entropySalt"),
             EntropyPurpose.NonceFirst => T("entropyNonceFirst"),
             EntropyPurpose.NonceSecond => T("entropyNonceSecond"),
             EntropyPurpose.NonceThird => T("entropyNonceThird"),
@@ -1295,6 +1327,14 @@ public sealed partial class MainWindow : Window, IDisposable
             EntropyMixer.RequiredMouseSamplesPerPurpose,
             current,
             EntropyMixer.MissingSamples(purpose)));
+    }
+
+    private void EnsureAllArchiveEntropyReady()
+    {
+        foreach (EntropyPurpose purpose in Enum.GetValues<EntropyPurpose>())
+        {
+            EnsureEntropyReady(purpose);
+        }
     }
 
     private void EnsureKeySheetHandled(string archivePath)
@@ -1332,11 +1372,7 @@ public sealed partial class MainWindow : Window, IDisposable
 
     private void GenerateGeneratedPassword(bool log)
     {
-        EnsureEntropyReady(EntropyPurpose.GeneratedPasswordFirst);
-        EnsureEntropyReady(EntropyPurpose.GeneratedPasswordSecond);
-        EnsureEntropyReady(EntropyPurpose.Salt);
-        EnsureEntropyReady(EntropyPurpose.NonceFirst);
-        EnsureEntropyReady(EntropyPurpose.NonceSecond);
+        EnsureAllArchiveEntropyReady();
         GeneratedArchiveEntropy? generatedEntropy = EntropyMixer.CreateArchiveEntropy();
         try
         {
@@ -1553,9 +1589,12 @@ public sealed partial class MainWindow : Window, IDisposable
         EntropyStatusText.Text = string.Format(
             T(statusKey),
             status.Total,
-            status.GeneratedPasswordFirst,
-            status.GeneratedPasswordSecond,
-            status.Salt,
+            status.FactorA1,
+            status.FactorA2,
+            status.FactorB1,
+            status.FactorB2,
+            status.SaltSha3,
+            status.SaltSkein,
             status.NonceFirst,
             status.NonceSecond,
             status.NonceThird,
@@ -1601,7 +1640,47 @@ public sealed partial class MainWindow : Window, IDisposable
             PasswordPolicyStatusText.Text = FormatPasswordPolicyViolations(analysis);
             PasswordPolicyStatusText.Foreground = System.Windows.Media.Brushes.LightCoral;
         }
+
+        UpdatePinPolicyStatus();
     }
+
+    private void UpdatePinPolicyStatus()
+    {
+        if (!_componentsReady || PinPolicyStatusText is null || CreatePinBox is null || CreatePinConfirmBox is null)
+        {
+            return;
+        }
+
+        string pin = CreatePinBox.Password;
+        string confirm = CreatePinConfirmBox.Password;
+        string? failure = null;
+
+        PinPolicyAnalysis analysis = V10KeyDerivation.AnalyzePinForCreation(pin);
+        if (!analysis.IsAccepted)
+        {
+            failure = PinViolationText(analysis.Violations[0]);
+        }
+        else if (!string.Equals(pin, confirm, StringComparison.Ordinal))
+        {
+            failure = T("pinMismatch");
+        }
+
+        PinPolicyStatusText.Text = failure ?? T("pinAccepted");
+        PinPolicyStatusText.Foreground = failure is null ? System.Windows.Media.Brushes.LightGreen : System.Windows.Media.Brushes.LightCoral;
+    }
+
+    private string PinViolationText(PinPolicyViolation violation) => violation switch
+    {
+        PinPolicyViolation.TooShort => string.Format(T("pinTooShort"), V10KeyDerivation.MinPinLength),
+        PinPolicyViolation.TooLong => string.Format(T("pinTooLong"), V10KeyDerivation.MaxPinCreationLength),
+        PinPolicyViolation.NonDigit => T("pinNonDigit"),
+        PinPolicyViolation.NotEnoughDistinctDigits => string.Format(T("pinDistinct"), V10KeyDerivation.MinDistinctPinDigits),
+        PinPolicyViolation.RepeatedDigitsTriple => T("pinRepeatedTriple"),
+        PinPolicyViolation.SequentialAscending => T("pinSequentialAscending"),
+        PinPolicyViolation.SequentialDescending => T("pinSequentialDescending"),
+        PinPolicyViolation.Blocklisted => T("pinBlocklisted"),
+        _ => T("pinInvalidFormat"),
+    };
 
     private string FormatPasswordPolicyViolations(PasswordPolicyAnalysis analysis)
     {
@@ -2219,6 +2298,28 @@ public sealed partial class MainWindow : Window, IDisposable
         return LogicalTreeHelper.GetParent(source);
     }
 
+    private bool IsEnglish => string.Equals(_language, "en", StringComparison.OrdinalIgnoreCase);
+
+    private void PopulateSuites()
+    {
+        EncryptionSuite selected = CipherSuiteBox.SelectedItem is System.Windows.Controls.ComboBoxItem { Tag: string tag }
+            && Enum.TryParse(tag, ignoreCase: false, out EncryptionSuite current)
+            ? current
+            : LoadSavedCipherSuite();
+
+        CipherSuiteBox.Items.Clear();
+        foreach (EncryptionSuite suite in EncryptionSuiteCatalog.DisplayOrder)
+        {
+            CipherSuiteBox.Items.Add(new System.Windows.Controls.ComboBoxItem
+            {
+                Content = EncryptionSuiteCatalog.DisplayName(suite, IsEnglish),
+                Tag = suite.ToString(),
+            });
+        }
+
+        SelectCipherSuiteItem(selected);
+    }
+
     private void ApplyLanguage()
     {
         PopulateSuites();
@@ -2268,6 +2369,9 @@ public sealed partial class MainWindow : Window, IDisposable
         UpdateEntropyStatus();
         CreatePasswordLabel.Text = T("userPassword");
         CreatePasswordConfirmLabel.Text = T("userPasswordConfirm");
+        CreatePinLabel.Text = T("pin");
+        CreatePinConfirmLabel.Text = T("repeatPin");
+        PinHelpText.Text = T("pinHelp");
         HintLabel.Text = T("hint");
         HintWarningText.Text = T("hintWarning");
         PasswordHelpText.Text = T("passwordHelp");
@@ -2275,6 +2379,7 @@ public sealed partial class MainWindow : Window, IDisposable
         ExtractPasswordHelpText.Text = T("extractPasswordHelp");
         ExtractHintLabel.Text = T("extractHintLabel");
         ExtractPasswordLabel.Text = T("userPassword");
+        ExtractPinLabel.Text = T("pin");
         ExtractGeneratedPasswordFirstLabel.Text = T("extractGeneratedPasswordFirst");
         ExtractGeneratedPasswordSecondLabel.Text = T("extractGeneratedPasswordSecond");
         RenderExtractHint();
@@ -2315,15 +2420,15 @@ public sealed partial class MainWindow : Window, IDisposable
             ("en", "subtitle2") => "Create, extract, and cryptographically erase encrypted ZPAQ archives.",
             ("en", "createSubtitle") => "Select files or folders, choose the target archive, then print the two separately stored key sheets before encrypting.",
             ("en", "targetArchiveDropHint") => "Drop a folder here to create folder(1).kzpaq beside it, or drop any file to derive name(1).kzpaq.",
-            ("en", "createPasswordSetupTitle") => "Three-part password for encrypted archives",
-            ("en", "createPasswordSetupHelp") => "Extraction requires the user password plus two independently generated 512-bit hexadecimal passwords.",
-            ("en", "passwordGeneratorTitle") => "Two independent generated 512-bit passwords",
-            ("en", "passwordGeneratorHelp") => "Factor A, factor B, salt, nonce 1, and nonce 2 each require at least 512 different samples from evenly filled independent mouse pools. Generate creates all five outputs atomically and then securely consumes every pool; zero counters afterward mean used, not insufficient. Key = Argon2id(SHA3-512(UserPassword, A) || SHA3-512(UserPassword, B), Salt). Inputs are length-prefixed and domain-separated.",
-            ("en", "entropyStatusCollecting") => "Collecting archive entropy: total {0}; factor A {1}/{7}; factor B {2}/{7}; salt {3}/{7}; nonce 1 {4}/{7}; nonce 2 {5}/{7}; nonce 3 {6}/{7}",
-            ("en", "entropyStatusPrepared") => "Archive entropy ready: factors A/B, salt, and nonces were generated; their source samples were securely consumed. Fresh pools: total {0}; factor A {1}/{7}; factor B {2}/{7}; salt {3}/{7}; nonce 1 {4}/{7}; nonce 2 {5}/{7}; nonce 3 {6}/{7}",
-            ("en", "entropyStatusRetry") => "Factors A/B remain valid because their source entropy was already consumed. Fresh salt/nonces are required only for a retry: total {0}; factor A {1}/{7}; factor B {2}/{7}; salt {3}/{7}; nonce 1 {4}/{7}; nonce 2 {5}/{7}; nonce 3 {6}/{7}",
-            ("en", "entropyGeneratedPasswordFirst") => "generated password A",
-            ("en", "entropyGeneratedPasswordSecond") => "generated password B",
+            ("en", "createPasswordSetupTitle") => "Four-part password for encrypted archives",
+            ("en", "createPasswordSetupHelp") => "Extraction requires the user password, the PIN, and two independently generated 1024-bit hexadecimal factors.",
+            ("en", "passwordGeneratorTitle") => "Two independent generated 1024-bit factors",
+            ("en", "passwordGeneratorHelp") => "Nine separate entropy pools need at least 1024 mouse samples each. Generation atomically creates factors A and B, both salts, and all three nonce parts, then consumes all source pools.",
+            ("en", "entropyStatusCollecting") => "Collecting archive entropy: total {0}; factor A {1}+{2}/{10}; factor B {3}+{4}/{10}; salt-SHA3 {5}/{10}; salt-Skein {6}/{10}; nonce 1 {7}/{10}; nonce 2 {8}/{10}; nonce 3 {9}/{10}",
+            ("en", "entropyStatusPrepared") => "Archive entropy ready: factors A/B, salts, and nonces were generated; their source samples were securely consumed. Fresh pools: total {0}; factor A {1}+{2}/{10}; factor B {3}+{4}/{10}; salt-SHA3 {5}/{10}; salt-Skein {6}/{10}; nonce 1 {7}/{10}; nonce 2 {8}/{10}; nonce 3 {9}/{10}",
+            ("en", "entropyStatusRetry") => "Factors A/B remain valid because their source entropy was already consumed. Fresh salts/nonces are required only for a retry: total {0}; factor A {1}+{2}/{10}; factor B {3}+{4}/{10}; salt-SHA3 {5}/{10}; salt-Skein {6}/{10}; nonce 1 {7}/{10}; nonce 2 {8}/{10}; nonce 3 {9}/{10}",
+            ("en", "entropyGeneratedPasswordFirst") => "generated factor A",
+            ("en", "entropyGeneratedPasswordSecond") => "generated factor B",
             ("en", "entropySalt") => "salt",
             ("en", "entropyNonceFirst") => "nonce 1",
             ("en", "entropyNonceSecond") => "nonce 2",
@@ -2331,11 +2436,25 @@ public sealed partial class MainWindow : Window, IDisposable
             ("en", "entropyNotReady") => "Not enough mouse entropy samples for {0}. Required: {1}; current: {2}; missing: {3}. Move the mouse over the app window and try again.",
             ("en", "generatePassword") => "Generate",
             ("en", "regeneratePassword") => "Regenerate",
-            ("en", "generatedPasswordFirstLabel") => "Generated password A",
-            ("en", "generatedPasswordSecondLabel") => "Generated password B",
+            ("en", "generatedPasswordFirstLabel") => "Generated factor A",
+            ("en", "generatedPasswordSecondLabel") => "Generated factor B",
             ("en", "userPassword") => "User password",
             ("en", "userPasswordConfirm") => "Repeat user password",
-            ("en", "passwordHelp") => "User password: 24-128 characters, at least 3 character groups, 12 distinct characters, 12 non-hexadecimal characters, no hexadecimal run of 8+, and a conservative score of at least 128 bits. It must differ from both generated factors.",
+            ("en", "pin") => "PIN",
+            ("en", "repeatPin") => "Repeat PIN",
+            ("en", "pinHelp") => "6 to 16 digits. The PIN is a credential of its own and is required together with the passphrase and both factors.",
+            ("en", "pinAccepted") => "PIN accepted.",
+            ("en", "pinMismatch") => "Both PIN entries differ.",
+            ("en", "pinTooShort") => "Use at least {0} digits.",
+            ("en", "pinTooLong") => "Use no more than {0} digits.",
+            ("en", "pinNonDigit") => "The PIN must consist of digits only.",
+            ("en", "pinDistinct") => "Use at least {0} distinct digits.",
+            ("en", "pinRepeatedTriple") => "Do not repeat the same digit 3 or more times consecutively.",
+            ("en", "pinSequentialAscending") => "Do not use 3 or more ascending consecutive digits.",
+            ("en", "pinSequentialDescending") => "Do not use 3 or more descending consecutive digits.",
+            ("en", "pinBlocklisted") => "This PIN pattern is too predictable.",
+            ("en", "pinInvalidFormat") => "The PIN must consist of 6 to 16 ASCII digits.",
+            ("en", "passwordHelp") => "User password: 24-256 characters, at least 3 character groups, 12 distinct characters, 12 non-hexadecimal characters, no hexadecimal run of 8+, and a conservative score of at least 128 bits. It must differ from both generated factors.",
             ("en", "passwordEntropyStatus") => "Conservative entropy score: {0} / {1} bits",
             ("en", "passwordPolicyAccepted") => "All user-password requirements are met.",
             ("en", "passwordViolationTooShort") => "Use at least {0} characters.",
@@ -2346,11 +2465,11 @@ public sealed partial class MainWindow : Window, IDisposable
             ("en", "passwordViolationDistinct") => "Use at least {0} different characters.",
             ("en", "passwordViolationNonHex") => "Use at least {0} characters outside 0-9 and A-F/a-f.",
             ("en", "passwordViolationHexRun") => "Break every hexadecimal-only run after at most {0} characters.",
-            ("en", "passwordViolationMatchesGenerated") => "Do not reuse either generated 512-bit factor as the user password.",
+            ("en", "passwordViolationMatchesGenerated") => "Do not reuse either generated 1024-bit factor as the user password.",
             ("en", "passwordViolationEntropy") => "Increase unique, non-pattern characters until the conservative score reaches {0} bits.",
-            ("en", "extractPasswordHelp") => "Enter the user password and both generated hexadecimal passwords from the separately stored key sheets.",
-            ("en", "extractGeneratedPasswordFirst") => "Generated password A from key sheet",
-            ("en", "extractGeneratedPasswordSecond") => "Generated password B from key sheet",
+            ("en", "extractPasswordHelp") => "Enter the user password, PIN, and both generated hexadecimal factors from the separately stored key sheets.",
+            ("en", "extractGeneratedPasswordFirst") => "Generated factor A from key sheet",
+            ("en", "extractGeneratedPasswordSecond") => "Generated factor B from key sheet",
             ("en", "saveTestKeySheet") => "Save test PDF",
             ("en", "printKeySheet") => "Print separate key sheets",
             ("en", "keySheetMissing") => "The two key sheets have not been printed or explicitly exported for testing yet.",
@@ -2360,9 +2479,9 @@ public sealed partial class MainWindow : Window, IDisposable
             ("en", "keySheetPrintedLog") => "Key sheets sent to a physical printer without an app-created PDF. The Windows print spooler and driver remain outside the app's storage control.",
             ("en", "saveTestKeySheetDialog") => "Save test key-sheet PDF (writes secrets to disk)",
             ("en", "pdfFilter") => "PDF files (*.pdf)|*.pdf|All files (*.*)|*.*",
-            ("en", "generatedPasswordLength") => "The generated password must contain exactly 128 hexadecimal characters.",
+            ("en", "generatedPasswordLength") => "The generated factor must contain exactly 256 hexadecimal characters.",
             ("en", "passwordComplexity") => "The user password does not meet the required security policy.",
-            ("en", "passwordMatchesGenerated") => "The user password must not equal either generated 512-bit password.",
+            ("en", "passwordMatchesGenerated") => "The user password must not equal either generated 1024-bit factor.",
             ("en", "chooseEraseDialog") => "Select encrypted container for cryptographic erase",
             ("en", "eraseTitle") => "Cryptographic erase",
             ("en", "eraseSubtitle") => "Erase encrypted containers by corrupting and deleting the encrypted container. Plain files require drive-level secure erase.",
@@ -2377,7 +2496,7 @@ public sealed partial class MainWindow : Window, IDisposable
             ("en", "eraseConfirmMissing") => "Please confirm the SSD/hardware erase limitation before deleting.",
             ("en", "eraseFinalConfirm") => "This will corrupt and delete the selected encrypted container. Continue?",
             ("en", "dropEraseTarget") => "Cryptographic erase target set from drop: {0}",
-            ("en", "generatedPasswordLog") => "Generated two independent 512-bit hexadecimal factors and prepared a fresh salt and nonce in locked RAM. Print the separate key sheets before encrypting.",
+            ("en", "generatedPasswordLog") => "Generated two independent 1024-bit hexadecimal factors and prepared fresh salts and nonces in locked RAM. Print the separate key sheets before encrypting.",
             ("en", "integrityChecking") => "Checking integrity ...",
             ("en", "captureActivating") => "Screen capture protection: enabling ...",
             ("en", "captureActive") => "Screen capture protection: active",
@@ -2392,7 +2511,7 @@ public sealed partial class MainWindow : Window, IDisposable
             ("en", "compression") => "Compression",
             ("en", "encrypt") => "Encrypt archive",
             ("en", "cipherSuite") => "Cipher suite",
-            ("en", "argon2Profile") => "Argon2id: 1 GiB memory, 4 iterations, parallelism 4 (locked RAM required)",
+            ("en", "argon2Profile") => "Two sequential KDF paths (1 GiB to just under 2 GiB via PMI16, t=4, p=4) with shared 1024-bit master (Paranoia: 4 Argon2id passes, locked RAM required)",
             ("en", "cipherSuiteSelected") => "Cipher suite selected: {0}",
             ("en", "selectedSuiteMissing") => "The signed and manifest-verified reference library for {0} is unavailable.",
             ("en", "saveArchive") => "Save archive",
@@ -2449,18 +2568,18 @@ public sealed partial class MainWindow : Window, IDisposable
             ("en", "creatingZpaq") => "Creating ZPAQ archive ...",
             ("en", "zpaqCreateFailed") => "ZPAQ could not create the archive.",
             ("en", "encrypting") => "Encrypting ZPAQ archive ...",
-            ("en", "encryptingStreaming") => "Creating ZPAQ stream and encrypting directly in RAM with {0} ...",
-            ("en", "archiveCreated") => "The archive was created.",
+            ("en", "encryptingStreaming") => "Generating ZPAQ stream and encrypting directly in RAM with {0} ...",
+            ("en", "archiveCreated") => "Archive created.",
             ("en", "extractInputMissing") => "Please select an archive file and output folder.",
             ("en", "extracting") => "Extracting archive ...",
-            ("en", "extractingStreaming") => "Authenticating and decrypting the encrypted container directly into the ZPAQ extractor pipe ...",
+            ("en", "extractingStreaming") => "Authenticating and decrypting container directly into ZPAQ extractor pipe ...",
             ("en", "retryAfterRecovery") => "Encrypted container was repaired; retrying authentication and decryption once.",
             ("en", "zpaqExtractFailed") => "ZPAQ could not extract the archive.",
-            ("en", "archiveExtracted") => "The archive was extracted.",
+            ("en", "archiveExtracted") => "Archive extracted.",
             ("en", "archiveMissing") => "Please select an archive file.",
-            ("en", "passwordMismatch") => "The two password entries do not match.",
-            ("en", "passwordLength") => "The password must be 24 to 128 characters long.",
-            ("en", "integrityNoManifest") => "SHA3-512/Skein-1024 dual manifest missing.",
+            ("en", "passwordMismatch") => "Both password entries differ.",
+            ("en", "passwordLength") => "The password must be 24 to 256 characters long.",
+            ("en", "integrityNoManifest") => "SHA3-512 / Skein-1024 dual manifest is missing.",
             ("en", "integrityOk") => "Integrity check passed.",
             ("en", "integrityWarning") => "WARNING: Application integrity violated.",
             ("en", "integrityFailed") => "Integrity check failed.",
@@ -2468,7 +2587,7 @@ public sealed partial class MainWindow : Window, IDisposable
             ("en", "dropTargetArchive") => "Target archive set from drop: {0}",
             ("en", "dropExtractArchive") => "Extract archive set from drop: {0}",
             ("en", "dropOutputFolder") => "Output folder set from drop: {0}",
-            ("en", "generatedPasswordClearedLog") => "Cleared generated password fields.",
+            ("en", "generatedPasswordClearedLog") => "Cleared generated factor fields.",
             ("en", "clearSecrets") => "Clear secrets",
 
             (_, "windowTitle") => ProductInfo.Name,
@@ -2481,15 +2600,15 @@ public sealed partial class MainWindow : Window, IDisposable
             (_, "subtitle2") => "Verschlüsselte ZPAQ-Archive erstellen, entpacken und kryptografisch löschen.",
             (_, "createSubtitle") => "Dateien oder Ordner auswählen, Zielarchiv festlegen und vor der Verschlüsselung die zwei getrennten Schlüsselzettel drucken.",
             (_, "targetArchiveDropHint") => "Ordner hier ablegen, um daneben ordner(1).kzpaq zu erstellen, oder eine Datei als Namensvorlage für name(1).kzpaq ablegen.",
-            (_, "createPasswordSetupTitle") => "Dreiteiliges Passwort für verschlüsselte Archive",
-            (_, "createPasswordSetupHelp") => "Zum Entpacken werden das Userpasswort sowie zwei unabhängig generierte 512-Bit-Hex-Passwörter benötigt.",
-            (_, "passwordGeneratorTitle") => "Zwei unabhängige generierte 512-Bit-Passwörter",
-            (_, "passwordGeneratorHelp") => "Faktor A, Faktor B, Salt, Nonce 1 und Nonce 2 benötigen jeweils mindestens 512 verschiedene Samples aus gleichmäßig gefüllten, getrennten Mauspools. Generieren erzeugt alle fünf Ausgaben atomar und verbraucht danach jeden Pool sicher; Zähler null bedeutet anschließend verbraucht, nicht unzureichend. Schlüssel = Argon2id(SHA3-512(Userpasswort, A) || SHA3-512(Userpasswort, B), Salt). Die Eingaben werden längencodiert und domänengetrennt.",
-            (_, "entropyStatusCollecting") => "Archiv-Entropie wird gesammelt: gesamt {0}; Faktor A {1}/{7}; Faktor B {2}/{7}; Salt {3}/{7}; Nonce 1 {4}/{7}; Nonce 2 {5}/{7}; Nonce 3 {6}/{7}",
-            (_, "entropyStatusPrepared") => "Archiv-Entropie bereit: Faktoren A/B, Salt und Nonces wurden erzeugt; ihre Quell-Samples sind sicher verbraucht. Frische Pools: gesamt {0}; Faktor A {1}/{7}; Faktor B {2}/{7}; Salt {3}/{7}; Nonce 1 {4}/{7}; Nonce 2 {5}/{7}; Nonce 3 {6}/{7}",
-            (_, "entropyStatusRetry") => "Faktoren A/B bleiben gültig, da ihre Quell-Entropie bereits verbraucht wurde. Nur für einen Wiederholungsversuch werden frischer Salt und frische Nonces benötigt: gesamt {0}; Faktor A {1}/{7}; Faktor B {2}/{7}; Salt {3}/{7}; Nonce 1 {4}/{7}; Nonce 2 {5}/{7}; Nonce 3 {6}/{7}",
-            (_, "entropyGeneratedPasswordFirst") => "generiertes Passwort A",
-            (_, "entropyGeneratedPasswordSecond") => "generiertes Passwort B",
+            (_, "createPasswordSetupTitle") => "Vierteiliges Passwort für verschlüsselte Archive",
+            (_, "createPasswordSetupHelp") => "Zum Entpacken werden das Userpasswort, die PIN sowie zwei unabhängig generierte 1024-Bit-Hex-Faktoren benötigt.",
+            (_, "passwordGeneratorTitle") => "Zwei unabhängige generierte 1024-Bit-Faktoren",
+            (_, "passwordGeneratorHelp") => "Neun getrennte Entropiepools benötigen je mindestens 1024 Maus-Samples. Generieren erzeugt die Faktoren A und B, beide Salts und alle drei Nonce-Teile atomar und verbraucht danach alle Quellpools.",
+            (_, "entropyStatusCollecting") => "Archiv-Entropie wird gesammelt: gesamt {0}; Faktor A {1}+{2}/{10}; Faktor B {3}+{4}/{10}; Salt-SHA3 {5}/{10}; Salt-Skein {6}/{10}; Nonce 1 {7}/{10}; Nonce 2 {8}/{10}; Nonce 3 {9}/{10}",
+            (_, "entropyStatusPrepared") => "Archiv-Entropie bereit: Faktoren A/B, Salts und Nonces wurden erzeugt; ihre Quell-Samples sind sicher verbraucht. Frische Pools: gesamt {0}; Faktor A {1}+{2}/{10}; Faktor B {3}+{4}/{10}; Salt-SHA3 {5}/{10}; Salt-Skein {6}/{10}; Nonce 1 {7}/{10}; Nonce 2 {8}/{10}; Nonce 3 {9}/{10}",
+            (_, "entropyStatusRetry") => "Faktoren A/B bleiben gültig, da ihre Quell-Entropie bereits verbraucht wurde. Nur für einen Wiederholungsversuch werden frische Salts und Nonces benötigt: gesamt {0}; Faktor A {1}+{2}/{10}; Faktor B {3}+{4}/{10}; Salt-SHA3 {5}/{10}; Salt-Skein {6}/{10}; Nonce 1 {7}/{10}; Nonce 2 {8}/{10}; Nonce 3 {9}/{10}",
+            (_, "entropyGeneratedPasswordFirst") => "generierter Faktor A",
+            (_, "entropyGeneratedPasswordSecond") => "generierter Faktor B",
             (_, "entropySalt") => "Salt",
             (_, "entropyNonceFirst") => "Nonce 1",
             (_, "entropyNonceSecond") => "Nonce 2",
@@ -2497,11 +2616,25 @@ public sealed partial class MainWindow : Window, IDisposable
             (_, "entropyNotReady") => "Nicht genug Maus-Entropie-Samples für {0}. Erforderlich: {1}; aktuell: {2}; fehlend: {3}. Bewege die Maus über dem App-Fenster und versuche es erneut.",
             (_, "generatePassword") => "Generieren",
             (_, "regeneratePassword") => "Neu generieren",
-            (_, "generatedPasswordFirstLabel") => "Generiertes Passwort A",
-            (_, "generatedPasswordSecondLabel") => "Generiertes Passwort B",
+            (_, "generatedPasswordFirstLabel") => "Generierter Faktor A",
+            (_, "generatedPasswordSecondLabel") => "Generierter Faktor B",
             (_, "userPassword") => "Userpasswort",
             (_, "userPasswordConfirm") => "Userpasswort wiederholen",
-            (_, "passwordHelp") => "Userpasswort: 24-128 Zeichen, mindestens 3 Zeichengruppen, 12 verschiedene Zeichen, 12 Nicht-Hex-Zeichen, keine Hex-Folge ab 8 Zeichen und mindestens 128 Bit konservative Bewertung. Es muss von beiden generierten Faktoren verschieden sein.",
+            (_, "pin") => "PIN",
+            (_, "repeatPin") => "PIN wiederholen",
+            (_, "pinHelp") => "6 bis 16 Ziffern. Die PIN ist ein eigener Faktor und wird zusammen mit dem Passwort und beiden Faktoren benötigt.",
+            (_, "pinAccepted") => "PIN akzeptiert.",
+            (_, "pinMismatch") => "Beide PIN-Eingaben unterscheiden sich.",
+            (_, "pinTooShort") => "Mindestens {0} Ziffern verwenden.",
+            (_, "pinTooLong") => "Höchstens {0} Ziffern verwenden.",
+            (_, "pinNonDigit") => "Die PIN darf nur aus Ziffern bestehen.",
+            (_, "pinDistinct") => "Mindestens {0} verschiedene Ziffern verwenden.",
+            (_, "pinRepeatedTriple") => "Keine 3 gleichen Ziffern hintereinander verwenden.",
+            (_, "pinSequentialAscending") => "Keine 3 aufsteigenden Ziffernfolgen verwenden.",
+            (_, "pinSequentialDescending") => "Keine 3 absteigenden Ziffernfolgen verwenden.",
+            (_, "pinBlocklisted") => "Dieses PIN-Muster ist leicht erratbar.",
+            (_, "pinInvalidFormat") => "Die PIN muss aus 6 bis 16 ASCII-Ziffern bestehen.",
+            (_, "passwordHelp") => "Userpasswort: 24-256 Zeichen, mindestens 3 Zeichengruppen, 12 verschiedene Zeichen, 12 Nicht-Hex-Zeichen, keine Hex-Folge ab 8 Zeichen und mindestens 128 Bit konservative Bewertung. Es muss von beiden generierten Faktoren verschieden sein.",
             (_, "passwordEntropyStatus") => "Konservative Entropiebewertung: {0} / {1} Bit",
             (_, "passwordPolicyAccepted") => "Alle Anforderungen an das Userpasswort sind erfüllt.",
             (_, "passwordViolationTooShort") => "Mindestens {0} Zeichen verwenden.",
@@ -2512,11 +2645,11 @@ public sealed partial class MainWindow : Window, IDisposable
             (_, "passwordViolationDistinct") => "Mindestens {0} verschiedene Zeichen verwenden.",
             (_, "passwordViolationNonHex") => "Mindestens {0} Zeichen außerhalb von 0-9 und A-F/a-f verwenden.",
             (_, "passwordViolationHexRun") => "Jede reine Hex-Folge spätestens nach {0} Zeichen unterbrechen.",
-            (_, "passwordViolationMatchesGenerated") => "Keinen der generierten 512-Bit-Faktoren als Userpasswort wiederverwenden.",
+            (_, "passwordViolationMatchesGenerated") => "Keinen der generierten 1024-Bit-Faktoren als Userpasswort wiederverwenden.",
             (_, "passwordViolationEntropy") => "Mehr eindeutige, nicht schematische Zeichen verwenden, bis die konservative Bewertung {0} Bit erreicht.",
-            (_, "extractPasswordHelp") => "Userpasswort und beide generierten Hex-Passwörter von den getrennt gelagerten Schlüsselzetteln eingeben.",
-            (_, "extractGeneratedPasswordFirst") => "Generiertes Passwort A vom Schlüsselzettel",
-            (_, "extractGeneratedPasswordSecond") => "Generiertes Passwort B vom Schlüsselzettel",
+            (_, "extractPasswordHelp") => "Userpasswort, PIN und beide generierten Hex-Faktoren von den getrennt gelagerten Schlüsselzetteln eingeben.",
+            (_, "extractGeneratedPasswordFirst") => "Generierter Faktor A vom Schlüsselzettel",
+            (_, "extractGeneratedPasswordSecond") => "Generierter Faktor B vom Schlüsselzettel",
             (_, "saveTestKeySheet") => "Test-PDF speichern",
             (_, "printKeySheet") => "Getrennte Schlüsselzettel drucken",
             (_, "keySheetMissing") => "Die zwei Schlüsselzettel wurden noch nicht gedruckt oder ausdrücklich als Test exportiert.",
@@ -2526,9 +2659,9 @@ public sealed partial class MainWindow : Window, IDisposable
             (_, "keySheetPrintedLog") => "Schlüsselzettel ohne von der App erzeugte PDF an einen physischen Drucker gesendet. Windows-Druckspooler und Treiber liegen außerhalb der Speicherkontrolle der App.",
             (_, "saveTestKeySheetDialog") => "Test-Schlüsselzettel-PDF speichern (schreibt Geheimnisse auf die Festplatte)",
             (_, "pdfFilter") => "PDF-Dateien (*.pdf)|*.pdf|Alle Dateien (*.*)|*.*",
-            (_, "generatedPasswordLength") => "Das generierte Passwort muss exakt 128 Hexadezimalzeichen enthalten.",
+            (_, "generatedPasswordLength") => "Der generierte Faktor muss exakt 256 Hexadezimalzeichen enthalten.",
             (_, "passwordComplexity") => "Das Userpasswort erfüllt die Sicherheitsrichtlinie nicht.",
-            (_, "passwordMatchesGenerated") => "Das Userpasswort darf keinem der generierten 512-Bit-Passwörter entsprechen.",
+            (_, "passwordMatchesGenerated") => "Das Userpasswort darf keinem der generierten 1024-Bit-Passwörter entsprechen.",
             (_, "chooseEraseDialog") => "Verschlüsselten Container für Cryptographic erase auswählen",
             (_, "eraseTitle") => "Cryptographic erase",
             (_, "eraseSubtitle") => "Verschlüsselte Container durch Beschädigen und Löschen des Containers entfernen. Unverschlüsselte Dateien benötigen eine Laufwerks-/Hardware-Löschung.",
@@ -2543,7 +2676,7 @@ public sealed partial class MainWindow : Window, IDisposable
             (_, "eraseConfirmMissing") => "Bitte bestätige die SSD-/Hardware-Löschgrenze vor dem Löschen.",
             (_, "eraseFinalConfirm") => "Der ausgewählte verschlüsselte Container wird beschädigt und gelöscht. Fortfahren?",
             (_, "dropEraseTarget") => "Cryptographic-erase-Ziel per Drag-and-Drop gesetzt: {0}",
-            (_, "generatedPasswordLog") => "Zwei unabhängige 512-Bit-Hex-Faktoren erzeugt sowie frischen Salt und frische Nonce im gesperrten RAM vorbereitet. Vor dem Verschlüsseln die getrennten Schlüsselzettel drucken.",
+            (_, "generatedPasswordLog") => "Zwei unabhängige 1024-Bit-Hex-Faktoren erzeugt sowie frische Salts und Nonces im gesperrten RAM vorbereitet. Vor dem Verschlüsseln die getrennten Schlüsselzettel drucken.",
             (_, "integrityChecking") => "Integrität wird geprüft ...",
             (_, "captureActivating") => "Bildschirmaufnahme-Schutz: wird aktiviert ...",
             (_, "captureActive") => "Bildschirmaufnahme-Schutz: aktiv",
@@ -2558,7 +2691,7 @@ public sealed partial class MainWindow : Window, IDisposable
             (_, "compression") => "Kompression",
             (_, "encrypt") => "Archiv verschlüsseln",
             (_, "cipherSuite") => "Verschlüsselungsverfahren",
-            (_, "argon2Profile") => "Argon2id: 1 GiB Speicher, 4 Iterationen, Parallelität 4 (gesperrter RAM erforderlich)",
+            (_, "argon2Profile") => "Zwei sequenzielle KDF-Pfade (1 GiB bis knapp 2 GiB via PMI16, t=4, p=4) mit gemeinsamem 1024-Bit-Master (Paranoia: 4 Argon2id-Aufrufe, gesperrter RAM erforderlich)",
             (_, "cipherSuiteSelected") => "Verschlüsselungsverfahren gewählt: {0}",
             (_, "selectedSuiteMissing") => "Die signierte und manifestgeprüfte Referenzbibliothek für {0} ist nicht verfügbar.",
             (_, "saveArchive") => "Archiv speichern",
@@ -2625,7 +2758,7 @@ public sealed partial class MainWindow : Window, IDisposable
             (_, "archiveExtracted") => "Archiv wurde entpackt.",
             (_, "archiveMissing") => "Bitte eine Archivdatei auswählen.",
             (_, "passwordMismatch") => "Die beiden Passwort-Eingaben stimmen nicht überein.",
-            (_, "passwordLength") => "Das Passwort muss 24 bis 128 Zeichen lang sein.",
+            (_, "passwordLength") => "Das Passwort muss 24 bis 256 Zeichen lang sein.",
             (_, "integrityNoManifest") => "SHA3-512-/Skein-1024-Dualmanifest fehlt.",
             (_, "integrityOk") => "Integritätsprüfung bestanden.",
             (_, "integrityWarning") => "WARNUNG: Programmintegrität verletzt.",
@@ -2634,7 +2767,7 @@ public sealed partial class MainWindow : Window, IDisposable
             (_, "dropTargetArchive") => "Zielarchiv per Drag-and-Drop gesetzt: {0}",
             (_, "dropExtractArchive") => "Entpack-Archiv per Drag-and-Drop gesetzt: {0}",
             (_, "dropOutputFolder") => "Zielordner per Drag-and-Drop gesetzt: {0}",
-            (_, "generatedPasswordClearedLog") => "Generierte Passwortfelder geleert.",
+            (_, "generatedPasswordClearedLog") => "Generierte Faktor-Felder geleert.",
             (_, "clearSecrets") => "Geheimwerte leeren",
             _ => key,
         };

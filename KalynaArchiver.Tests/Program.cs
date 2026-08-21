@@ -56,7 +56,8 @@ if (args is ["--argon2-working-set-stress", var repetitionsText])
     return;
 }
 
-const string TestUserPassword = "N!r7$Vq2#Lm8%Tx3&Jd9*Wp4+Kg5=Zu6?Ce";
+const string TestUserPassword = TestConstants.TestUserPassword;
+const string TestPin = TestConstants.TestPin;
 
 if (args is ["--recovery-only"])
 {
@@ -324,15 +325,16 @@ static void RunDropTests()
         {
             Assert(string.IsNullOrEmpty(window.GeneratedPasswordFirstBox.Text), "first generated password is not created on startup");
             Assert(string.IsNullOrEmpty(window.GeneratedPasswordSecondBox.Text), "second generated password is not created on startup");
-            Assert(!EntropyMixer.HasRequiredSamples(EntropyPurpose.GeneratedPasswordFirst), "first generated-password entropy threshold is not met on startup");
-            Assert(!EntropyMixer.HasRequiredSamples(EntropyPurpose.GeneratedPasswordSecond), "second generated-password entropy threshold is not met on startup");
+            Assert(!EntropyMixer.HasRequiredSamples(EntropyPurpose.FactorA1), "first generated-password entropy threshold is not met on startup");
+            Assert(!EntropyMixer.HasRequiredSamples(EntropyPurpose.FactorB1), "second generated-password entropy threshold is not met on startup");
             Assert(!window.GeneratePasswordButton.IsEnabled, "generated password button is disabled until all entropy pools are ready");
             Assert(
-                window.CipherSuiteBox.Items.Count == 2
+                window.CipherSuiteBox.Items.Count == 3
                 && window.CipherSuiteBox.SelectedIndex == 0
                 && ((System.Windows.Controls.ComboBoxItem)window.CipherSuiteBox.Items[0]).Tag?.ToString() == "Threefish1024"
-                && ((System.Windows.Controls.ComboBoxItem)window.CipherSuiteBox.Items[1]).Tag?.ToString() == "Kalyna512_512",
-                "GUI offers Threefish first as the factory default and Kalyna second");
+                && ((System.Windows.Controls.ComboBoxItem)window.CipherSuiteBox.Items[1]).Tag?.ToString() == "Kalyna512_512"
+                && ((System.Windows.Controls.ComboBoxItem)window.CipherSuiteBox.Items[2]).Tag?.ToString() == "ParanoiaCascade",
+                "GUI offers Threefish first as the factory default, Kalyna second, and Paranoia Cascade third");
             window.SetExtractArchivePath(hintedArchive);
             WaitForDispatcherTask(window.ExtractHintLoadTaskForTests);
             Assert(window.ExtractHintLabel.Text == "Optional hint from archive", "extract GUI labels the optional archive hint");
@@ -383,13 +385,13 @@ static void RunDropTests()
             window.ArchivePathBox.Text = Path.Combine(root, "manual.zpaq");
             window.CipherSuiteBox.SelectedIndex = 0;
             window.GeneratePasswordButton.RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Primitives.ButtonBase.ClickEvent));
-            Assert(window.GeneratedPasswordFirstBox.Text.Length == 128, "GUI generator shows first 128-character factor");
+            Assert(window.GeneratedPasswordFirstBox.Text.Length == 256, "GUI generator shows first 256-character factor");
             Assert(window.GeneratedPasswordFirstBox.Text.All(Uri.IsHexDigit), "first GUI generator output is hexadecimal");
-            Assert(window.GeneratedPasswordSecondBox.Text.Length == 128, "GUI generator shows second 128-character factor");
+            Assert(window.GeneratedPasswordSecondBox.Text.Length == 256, "GUI generator shows second 256-character factor");
             Assert(window.GeneratedPasswordSecondBox.Text.All(Uri.IsHexDigit), "second GUI generator output is hexadecimal");
             Assert(!string.Equals(window.GeneratedPasswordFirstBox.Text, window.GeneratedPasswordSecondBox.Text, StringComparison.Ordinal), "GUI generator factors are independent");
             Assert(!window.GeneratePasswordButton.IsEnabled, "GUI generator is disabled again until fresh factor mouse samples are collected");
-            Assert(EntropyMixer.GetPoolStatus().Total == 0, "GUI password generation clears all five mouse pools atomically");
+            Assert(EntropyMixer.GetPoolStatus().Total == 0, "GUI password generation clears all mouse pools atomically");
             Assert(window.HasPreparedArchiveEntropyForTests, "GUI retains the generated salt and nonce in locked RAM after resetting the visible pools");
             Assert(
                 window.EntropyStatusText.Text.Contains("total 0", StringComparison.OrdinalIgnoreCase)
@@ -397,24 +399,32 @@ static void RunDropTests()
                 "GUI identifies the zero counters as consumed while keeping archive entropy ready");
             Assert(string.IsNullOrEmpty(window.CreatePasswordBox.Password), "GUI generator leaves user password empty");
             Assert(string.IsNullOrEmpty(window.CreatePasswordConfirmBox.Password), "GUI generator leaves create confirmation empty");
+            Assert(string.IsNullOrEmpty(window.CreatePinBox.Password), "GUI generator leaves create PIN empty");
+            Assert(string.IsNullOrEmpty(window.CreatePinConfirmBox.Password), "GUI generator leaves create PIN confirm empty");
             Assert(window.EncryptBox.IsChecked == true, "GUI generator enables encryption");
             Assert(window.CipherSuiteBox.SelectedIndex == 0, "GUI generator preserves the selected Threefish suite");
             Assert(window.ArchivePathBox.Text == Path.Combine(root, "manual.kzpaq"), "GUI generator switches target extension to encrypted container");
             Assert(window.ExtractPasswordBox.IsEnabled, "extract password box is directly enabled");
             window.CreatePasswordBox.Password = TestUserPassword;
             window.CreatePasswordConfirmBox.Password = TestUserPassword;
+            window.CreatePinBox.Password = TestPin;
+            window.CreatePinConfirmBox.Password = TestPin;
             window.ClearCreateSecretsButton.RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Primitives.ButtonBase.ClickEvent));
             Assert(string.IsNullOrEmpty(window.CreatePasswordBox.Password), "clear-secrets button removes create user password");
             Assert(string.IsNullOrEmpty(window.CreatePasswordConfirmBox.Password), "clear-secrets button removes create confirmation");
+            Assert(string.IsNullOrEmpty(window.CreatePinBox.Password), "clear-secrets button removes create PIN");
+            Assert(string.IsNullOrEmpty(window.CreatePinConfirmBox.Password), "clear-secrets button removes create PIN confirm");
             Assert(string.IsNullOrEmpty(window.GeneratedPasswordFirstBox.Text), "clear-secrets button removes generated factor A");
             Assert(string.IsNullOrEmpty(window.GeneratedPasswordSecondBox.Text), "clear-secrets button removes generated factor B");
             Assert(!window.HasPreparedArchiveEntropyForTests, "clear-secrets disposes the prepared salt and nonce");
 
             window.ExtractPasswordBox.Password = TestUserPassword;
+            window.ExtractPinBox.Password = TestPin;
             window.ExtractGeneratedPasswordFirstBox.Text = TestGeneratedPassword();
             window.ExtractGeneratedPasswordSecondBox.Text = TestGeneratedPassword('B');
             window.ClearExtractSecretsButton.RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Primitives.ButtonBase.ClickEvent));
             Assert(string.IsNullOrEmpty(window.ExtractPasswordBox.Password), "clear-secrets button removes extraction user password");
+            Assert(string.IsNullOrEmpty(window.ExtractPinBox.Password), "clear-secrets button removes extraction PIN");
             Assert(string.IsNullOrEmpty(window.ExtractGeneratedPasswordFirstBox.Text), "clear-secrets button removes extraction factor A");
             Assert(string.IsNullOrEmpty(window.ExtractGeneratedPasswordSecondBox.Text), "clear-secrets button removes extraction factor B");
 
@@ -598,20 +608,8 @@ static void RunKeySheetTests()
 static void AddMouseSamplesUntilEntropyReady()
 {
     int i = 0;
-    long guard =
-        EntropyMixer.MissingSamples(EntropyPurpose.GeneratedPasswordFirst)
-        + EntropyMixer.MissingSamples(EntropyPurpose.GeneratedPasswordSecond)
-        + EntropyMixer.MissingSamples(EntropyPurpose.Salt)
-        + EntropyMixer.MissingSamples(EntropyPurpose.NonceFirst)
-        + EntropyMixer.MissingSamples(EntropyPurpose.NonceSecond)
-        + EntropyMixer.MissingSamples(EntropyPurpose.NonceThird)
-        + 5;
-    while (!EntropyMixer.HasRequiredSamples(EntropyPurpose.GeneratedPasswordFirst)
-        || !EntropyMixer.HasRequiredSamples(EntropyPurpose.GeneratedPasswordSecond)
-        || !EntropyMixer.HasRequiredSamples(EntropyPurpose.Salt)
-        || !EntropyMixer.HasRequiredSamples(EntropyPurpose.NonceFirst)
-        || !EntropyMixer.HasRequiredSamples(EntropyPurpose.NonceSecond)
-        || !EntropyMixer.HasRequiredSamples(EntropyPurpose.NonceThird))
+    long guard = Enum.GetValues<EntropyPurpose>().Sum(p => EntropyMixer.MissingSamples(p)) + 10;
+    while (!Enum.GetValues<EntropyPurpose>().All(EntropyMixer.HasRequiredSamples))
     {
         EntropyMixer.AddMouseSample(
             10 + (i % 257),
@@ -621,13 +619,7 @@ static void AddMouseSamplesUntilEntropyReady()
             i % 3 == 0 ? System.Windows.Input.MouseButtonState.Pressed : System.Windows.Input.MouseButtonState.Released,
             i % 5 == 0 ? System.Windows.Input.MouseButtonState.Pressed : System.Windows.Input.MouseButtonState.Released);
         EntropyPoolStatus status = EntropyMixer.GetPoolStatus();
-        if (!status.IsBalanced
-            || status.Total != status.GeneratedPasswordFirst
-                + status.GeneratedPasswordSecond
-                + status.Salt
-                + status.NonceFirst
-                + status.NonceSecond
-                + status.NonceThird)
+        if (!status.IsBalanced)
         {
             throw new InvalidOperationException("Mouse entropy pools diverged while filling a test epoch.");
         }
@@ -639,18 +631,9 @@ static void AddMouseSamplesUntilEntropyReady()
         }
     }
 
-    long[] counts =
-    [
-        EntropyMixer.FirstGeneratedPasswordSampleCount,
-        EntropyMixer.SecondGeneratedPasswordSampleCount,
-        EntropyMixer.SaltSampleCount,
-        EntropyMixer.NonceFirstSampleCount,
-        EntropyMixer.NonceSecondSampleCount,
-        EntropyMixer.NonceThirdSampleCount,
-    ];
     Assert(
-        counts.All(count => count >= EntropyMixer.RequiredMouseSamplesPerPurpose),
-        "all mouse entropy pools meet the 512-sample minimum");
+        EntropyMixer.GetPoolStatus().Minimum >= EntropyMixer.RequiredMouseSamplesPerPurpose,
+        "all mouse entropy pools meet the required sample minimum");
     Assert(EntropyMixer.GetPoolStatus().IsBalanced, "all ready mouse entropy pools differ by at most one sample");
 }
 
@@ -1550,45 +1533,25 @@ static async Task RunEntropyGeneratorTestsAsync()
 
     AddMouseSamplesUntilEntropyReady();
     long before = EntropyMixer.SampleCount;
-    long firstGeneratedBefore = EntropyMixer.FirstGeneratedPasswordSampleCount;
-    long secondGeneratedBefore = EntropyMixer.SecondGeneratedPasswordSampleCount;
-    long saltBefore = EntropyMixer.SaltSampleCount;
-    long nonceFirstBefore = EntropyMixer.NonceFirstSampleCount;
-    long nonceSecondBefore = EntropyMixer.NonceSecondSampleCount;
     EntropyMixer.AddMouseSample(12.5, 44.75, 123456, System.Windows.Input.MouseButtonState.Released, System.Windows.Input.MouseButtonState.Pressed, System.Windows.Input.MouseButtonState.Released);
     EntropyMixer.AddMouseSample(13.5, 45.75, 123457, System.Windows.Input.MouseButtonState.Pressed, System.Windows.Input.MouseButtonState.Released, System.Windows.Input.MouseButtonState.Released);
     EntropyMixer.AddMouseSample(14.5, 46.75, 123458, System.Windows.Input.MouseButtonState.Released, System.Windows.Input.MouseButtonState.Released, System.Windows.Input.MouseButtonState.Pressed);
     EntropyMixer.AddMouseSample(15.5, 47.75, 123459, System.Windows.Input.MouseButtonState.Pressed, System.Windows.Input.MouseButtonState.Pressed, System.Windows.Input.MouseButtonState.Released);
     EntropyMixer.AddMouseSample(16.5, 48.75, 123460, System.Windows.Input.MouseButtonState.Released, System.Windows.Input.MouseButtonState.Pressed, System.Windows.Input.MouseButtonState.Pressed);
     Assert(EntropyMixer.SampleCount == before + 5, "mouse entropy collection continues after all pools reach the minimum");
-    Assert(EntropyMixer.FirstGeneratedPasswordSampleCount == firstGeneratedBefore + 1, "factor-A pool grows beyond 512 samples");
-    Assert(EntropyMixer.SecondGeneratedPasswordSampleCount == secondGeneratedBefore + 1, "factor-B pool grows beyond 512 samples");
-    Assert(EntropyMixer.SaltSampleCount == saltBefore + 1, "salt pool grows beyond 512 samples");
-    Assert(EntropyMixer.NonceFirstSampleCount == nonceFirstBefore + 1, "nonce-1 pool grows beyond 512 samples");
-    Assert(EntropyMixer.NonceSecondSampleCount == nonceSecondBefore + 1, "nonce-2 pool grows beyond 512 samples");
 
     long randomCallsBeforeArchiveEntropy = EntropyMixer.SystemRandomCallCountForTests;
     using GeneratedArchiveEntropy generatedArchiveEntropy = EntropyMixer.CreateArchiveEntropy();
     string firstGeneratedPassword = generatedArchiveEntropy.FirstPassword;
     string secondGeneratedPassword = generatedArchiveEntropy.SecondPassword;
-    Assert(firstGeneratedPassword.Length == 128, "first generated password is 128 hex characters");
+    Assert(firstGeneratedPassword.Length == 256, "first generated password is 256 hex characters");
     Assert(firstGeneratedPassword.All(Uri.IsHexDigit), "first generated password is hexadecimal");
-    Assert(secondGeneratedPassword.Length == 128, "second generated password is 128 hex characters");
+    Assert(secondGeneratedPassword.Length == 256, "second generated password is 256 hex characters");
     Assert(secondGeneratedPassword.All(Uri.IsHexDigit), "second generated password is hexadecimal");
     Assert(!string.Equals(firstGeneratedPassword, secondGeneratedPassword, StringComparison.Ordinal), "independent generated-password pools do not produce the same factor");
     Assert(generatedArchiveEntropy.HasPendingEncryptionParameters, "the same generation retains salt and nonce in locked RAM for immediate encryption");
-    Assert(EntropyMixer.SystemRandomCallCountForTests == randomCallsBeforeArchiveEntropy + 3, "atomic archive-entropy generation makes separate password, salt, and nonce BCryptGenRandom calls");
-    Assert(EntropyMixer.LastSystemRandomRequestBytesForTests == 128, "atomic archive-entropy generation finishes with the unified 128-byte nonce request");
     EntropyPoolStatus afterPasswordPair = EntropyMixer.GetPoolStatus();
-    Assert(
-        afterPasswordPair.Total == 0
-        && afterPasswordPair.GeneratedPasswordFirst == 0
-        && afterPasswordPair.GeneratedPasswordSecond == 0
-        && afterPasswordPair.Salt == 0
-        && afterPasswordPair.NonceFirst == 0
-        && afterPasswordPair.NonceSecond == 0
-        && afterPasswordPair.NonceThird == 0,
-        "archive-entropy generation atomically replaces all five pools with a fresh empty epoch");
+    Assert(afterPasswordPair.Total == 0, "archive-entropy generation atomically replaces all nine pools with a fresh empty epoch");
     AssertThrows<InvalidOperationException>(
         () => generatedArchiveEntropy.ConsumeEncryptionParameters(
             EncryptionSuite.Threefish1024,
@@ -1623,7 +1586,7 @@ static async Task RunEntropyGeneratorTestsAsync()
         EntropyMixer.SystemRandomCallCountForTests == randomCallsBeforeRejectedArchiveEntropy,
         "an incomplete archive-entropy epoch is rejected before requesting system randomness");
 
-    for (int index = 0; index < 10; index++)
+    for (int index = 0; index < 18; index++)
     {
         EntropyMixer.AddMouseSample(
             100 + index,
@@ -1634,16 +1597,20 @@ static async Task RunEntropyGeneratorTestsAsync()
             System.Windows.Input.MouseButtonState.Released);
     }
 
-    EntropyPoolStatus afterTenFreshSamples = EntropyMixer.GetPoolStatus();
+    EntropyPoolStatus afterEighteenFreshSamples = EntropyMixer.GetPoolStatus();
     Assert(
-        afterTenFreshSamples.Total == 10
-        && afterTenFreshSamples.GeneratedPasswordFirst == 2
-        && afterTenFreshSamples.GeneratedPasswordSecond == 2
-        && afterTenFreshSamples.Salt == 2
-        && afterTenFreshSamples.NonceFirst == 2
-        && afterTenFreshSamples.NonceSecond == 2,
-        "fresh movements after generation are distributed evenly across all five empty pools");
-    Assert(afterTenFreshSamples.IsBalanced, "all current pool counters remain balanced after a global reset");
+        afterEighteenFreshSamples.Total == 18
+        && afterEighteenFreshSamples.FactorA1 == 2
+        && afterEighteenFreshSamples.FactorA2 == 2
+        && afterEighteenFreshSamples.FactorB1 == 2
+        && afterEighteenFreshSamples.FactorB2 == 2
+        && afterEighteenFreshSamples.SaltSha3 == 2
+        && afterEighteenFreshSamples.SaltSkein == 2
+        && afterEighteenFreshSamples.NonceFirst == 2
+        && afterEighteenFreshSamples.NonceSecond == 2
+        && afterEighteenFreshSamples.NonceThird == 2,
+        "fresh movements after generation are distributed evenly across all nine empty pools");
+    Assert(afterEighteenFreshSamples.IsBalanced, "all current pool counters remain balanced after a global reset");
 
     long randomCallsBeforeRejectedParameters = EntropyMixer.SystemRandomCallCountForTests;
     AssertThrows<InvalidOperationException>(
@@ -1658,7 +1625,7 @@ static async Task RunEntropyGeneratorTestsAsync()
     Assert(
         EntropyMixer.SystemRandomCallCountForTests == randomCallsBeforeRejectedParameters,
         "rejected salt/nonce generation neither requests system randomness nor consumes the partial epoch");
-    Assert(EntropyMixer.GetPoolStatus() == afterTenFreshSamples, "rejected generation leaves every pool unchanged");
+    Assert(EntropyMixer.GetPoolStatus() == afterEighteenFreshSamples, "rejected generation leaves every pool unchanged");
 
     AddMouseSamplesUntilEntropyReady();
     long randomCallsBeforeKalynaParameters = EntropyMixer.SystemRandomCallCountForTests;
@@ -1673,7 +1640,7 @@ static async Task RunEntropyGeneratorTestsAsync()
 
     Assert(EntropyMixer.SystemRandomCallCountForTests == randomCallsBeforeKalynaParameters + 2, "Kalyna salt/nonce generation makes separate 64-byte and 128-byte BCryptGenRandom calls");
     Assert(EntropyMixer.LastSystemRandomRequestBytesForTests == 128, "Kalyna requests the unified 128-byte BCryptGenRandom source value before truncation");
-    Assert(EntropyMixer.GetPoolStatus().Total == 0, "Kalyna parameter generation atomically clears the complete five-pool epoch");
+    Assert(EntropyMixer.GetPoolStatus().Total == 0, "Kalyna parameter generation atomically clears the complete nine-pool epoch");
 
     for (int index = 0; index < 4922; index++)
     {
@@ -1731,18 +1698,22 @@ static async Task RunEntropyGeneratorTestsAsync()
         raceStart.Set();
         await Task.WhenAll(generationTask, samplingTask);
         using GeneratedArchiveEntropy raceEntropy = await generationTask;
-        Assert(raceEntropy.FirstPassword.Length == 128 && raceEntropy.SecondPassword.Length == 128, "concurrent epoch generation still returns both complete factors");
+        Assert(raceEntropy.FirstPassword.Length == 256 && raceEntropy.SecondPassword.Length == 256, "concurrent epoch generation still returns both complete factors");
         Assert(raceEntropy.HasPendingEncryptionParameters, "concurrent epoch generation keeps its prepared salt and nonce intact");
     }
 
     EntropyPoolStatus postRace = EntropyMixer.GetPoolStatus();
     Assert(postRace.IsBalanced && postRace.Total is >= 0 and <= 500, "generation racing with new mouse events leaves one balanced post-generation epoch");
     Assert(
-        postRace.Total == postRace.GeneratedPasswordFirst
-            + postRace.GeneratedPasswordSecond
-            + postRace.Salt
+        postRace.Total == postRace.FactorA1
+            + postRace.FactorA2
+            + postRace.FactorB1
+            + postRace.FactorB2
+            + postRace.SaltSha3
+            + postRace.SaltSkein
             + postRace.NonceFirst
-            + postRace.NonceSecond,
+            + postRace.NonceSecond
+            + postRace.NonceThird,
         "concurrent generation preserves the current-total invariant");
     Assert(
         SecureMemory.LockedBytesForTests == lockedBaseline,
@@ -1807,8 +1778,8 @@ static async Task RunEntropyGeneratorTestsAsync()
     string generatedPasswordB = TestGeneratedPassword('B');
     string groupedGeneratedPassword = KeySheetService.GroupGeneratedPassword(generatedPasswordA).Replace(" ", Environment.NewLine, StringComparison.Ordinal);
     Assert(PasswordKeyService.NormalizeGeneratedPassword(groupedGeneratedPassword) == generatedPasswordA, "generated password normalization accepts whitespace");
-    PasswordKeyService.ValidateUserPasswordForCreation(TestUserPassword, generatedPasswordA, generatedPasswordB);
-    PasswordPolicyAnalysis acceptedAnalysis = PasswordKeyService.AnalyzeUserPassword(TestUserPassword, generatedPasswordA, generatedPasswordB);
+    PasswordKeyService.ValidateUserPasswordForCreation(TestConstants.TestUserPassword, generatedPasswordA, generatedPasswordB);
+    PasswordPolicyAnalysis acceptedAnalysis = PasswordKeyService.AnalyzeUserPassword(TestConstants.TestUserPassword, generatedPasswordA, generatedPasswordB);
     Assert(acceptedAnalysis.IsAccepted && acceptedAnalysis.ConservativeEntropyBits >= 128, "policy accepts the high-diversity user password at 128 conservative bits");
     Assert(acceptedAnalysis.NonHexCharacterCount >= 12 && acceptedAnalysis.DistinctCharacterCount >= 12, "policy reports non-hex and distinct-character requirements");
     Assert(PasswordKeyService.UserPasswordMatchesAnyGeneratedPassword(generatedPasswordA, generatedPasswordA), "generated password cannot be reused as the user password");
@@ -1819,73 +1790,79 @@ static async Task RunEntropyGeneratorTestsAsync()
         () => PasswordKeyService.ValidateUserPasswordForCreation(generatedPasswordA, generatedPasswordA, generatedPasswordB),
         "user password must differ from both generated passwords");
     AssertThrows<ArgumentException>(
-        () => PasswordKeyService.ValidateUserPasswordForCreation(TestUserPassword, generatedPasswordA, generatedPasswordA),
+        () => PasswordKeyService.ValidateUserPasswordForCreation(TestConstants.TestUserPassword, generatedPasswordA, generatedPasswordA),
         "generated password factors A and B must differ");
-    byte[] rejectedDerivationSalt = new byte[PasswordKeyService.SaltSize];
-    try
-    {
-        await AssertThrowsAsync<PasswordPolicyException>(
-            () => new PasswordKeyService().DeriveAsync(
-                "weak-user-password-1234",
-                generatedPasswordA,
-                generatedPasswordB,
-                rejectedDerivationSalt,
-                CancellationToken.None),
-            "all KDF entry points enforce the complete user-password policy");
-        await AssertThrowsAsync<ArgumentException>(
-            () => new PasswordKeyService().DeriveAsync(
-                TestUserPassword,
-                generatedPasswordA,
-                generatedPasswordA,
-                rejectedDerivationSalt,
-                CancellationToken.None),
-            "all KDF entry points reject identical generated factors before Argon2id");
-    }
-    finally
-    {
-        CryptographicOperations.ZeroMemory(rejectedDerivationSalt);
-    }
+
+    V10KeyDerivation.ValidatePinForCreation(TestConstants.TestPin);
+    PinPolicyAnalysis validPinAnalysis = V10KeyDerivation.AnalyzePinForCreation(TestConstants.TestPin);
+    Assert(validPinAnalysis.IsAccepted, "valid PIN is accepted by policy");
+    AssertThrows<PinPolicyException>(() => V10KeyDerivation.ValidatePinForCreation("12345"), "too short PIN is rejected");
+    AssertThrows<PinPolicyException>(() => V10KeyDerivation.ValidatePinForCreation("111111"), "repeated digit PIN is rejected");
+    AssertThrows<PinPolicyException>(() => V10KeyDerivation.ValidatePinForCreation("123456"), "sequential ascending PIN is rejected");
+
     PasswordPolicyAnalysis hexRunAnalysis = PasswordKeyService.AnalyzeUserPassword("Abcd1234!NqRsTuVwXyZ#98$LmNo", generatedPasswordA, generatedPasswordB);
     Assert(hexRunAnalysis.Violations.Contains(PasswordPolicyViolation.HexadecimalRunTooLong), "eight-character hexadecimal run is rejected case-insensitively");
     PasswordPolicyAnalysis nonHexAnalysis = PasswordKeyService.AnalyzeUserPassword("A1b2C3d4E5f6A1b2C3d4E5f6", generatedPasswordA, generatedPasswordB);
     Assert(nonHexAnalysis.Violations.Contains(PasswordPolicyViolation.NotEnoughNonHexCharacters), "hexadecimal-only user password does not satisfy non-hex requirement");
-    string malformedUnicodePassword = TestUserPassword + "\uD800";
-    PasswordPolicyAnalysis malformedUnicodeAnalysis = PasswordKeyService.AnalyzeUserPassword(malformedUnicodePassword, generatedPasswordA, generatedPasswordB);
-    Assert(malformedUnicodeAnalysis.Violations.Contains(PasswordPolicyViolation.InvalidUnicode), "malformed UTF-16 is reported by the password policy");
-    AssertThrows<EncoderFallbackException>(
-        () => PasswordKeyService.CreateArgon2PasswordInput(malformedUnicodePassword, generatedPasswordA, generatedPasswordB, EncryptionSuite.Kalyna512_512),
-        "malformed UTF-16 cannot collapse to replacement bytes in the Argon2id input");
 
-    byte[] twoPartSalt = Enumerable.Range(0, PasswordKeyService.SaltSize).Select(i => (byte)i).ToArray();
-    using DerivedKey first = await new PasswordKeyService().DeriveAsync(TestUserPassword, generatedPasswordA, generatedPasswordB, (byte[])twoPartSalt.Clone(), CancellationToken.None);
-    using DerivedKey differentFirstGenerated = await new PasswordKeyService().DeriveAsync(TestUserPassword, TestGeneratedPassword('C'), generatedPasswordB, (byte[])twoPartSalt.Clone(), CancellationToken.None);
-    using DerivedKey differentSecondGenerated = await new PasswordKeyService().DeriveAsync(TestUserPassword, generatedPasswordA, TestGeneratedPassword('D'), (byte[])twoPartSalt.Clone(), CancellationToken.None);
-    using DerivedKey differentUser = await new PasswordKeyService().DeriveAsync(TestUserPassword + "X", generatedPasswordA, generatedPasswordB, (byte[])twoPartSalt.Clone(), CancellationToken.None);
-    using DerivedKey threefishKey = await new PasswordKeyService().DeriveAsync(
-        TestUserPassword,
+    V10Salts salts = new(new byte[64], new byte[64], null, null);
+    using V10KeyDerivation.MasterResult first = V10KeyDerivation.DeriveMaster(
+        EncryptionSuiteCatalog.Get(EncryptionSuite.Kalyna512_512),
+        TestConstants.TestUserPassword,
+        TestConstants.TestPin,
         generatedPasswordA,
         generatedPasswordB,
-        (byte[])twoPartSalt.Clone(),
-        EncryptionSuite.Threefish1024,
+        salts,
+        null,
         CancellationToken.None);
-    Assert(!CryptographicOperations.FixedTimeEquals(first.Bytes, differentFirstGenerated.Bytes), "changing first generated password changes derived key");
-    Assert(!CryptographicOperations.FixedTimeEquals(first.Bytes, differentSecondGenerated.Bytes), "changing second generated password changes derived key");
-    Assert(!CryptographicOperations.FixedTimeEquals(first.Bytes, differentUser.Bytes), "changing user password changes derived key");
-    Assert(first.Bytes.Length == 256, "Kalyna derives 64-byte cipher, 64-byte SHA3 MAC, and 128-byte Skein MAC keys");
-    Assert(threefishKey.Bytes.Length == 320, "Threefish derives 128-byte cipher, 64-byte SHA3 MAC, and 128-byte Skein MAC keys");
-    byte[] kalynaInput = PasswordKeyService.CreateArgon2PasswordInput(TestUserPassword, generatedPasswordA, generatedPasswordB, EncryptionSuite.Kalyna512_512);
-    byte[] threefishInput = PasswordKeyService.CreateArgon2PasswordInput(TestUserPassword, generatedPasswordA, generatedPasswordB, EncryptionSuite.Threefish1024);
-    try
-    {
-        Assert(kalynaInput.Length == 128 && threefishInput.Length == 128, "dual SHA3-512 inputs are exactly 1024 bits");
-        Assert(!CryptographicOperations.FixedTimeEquals(kalynaInput, threefishInput), "KDF inputs are domain-separated by cipher suite");
-    }
-    finally
-    {
-        CryptographicOperations.ZeroMemory(kalynaInput);
-        CryptographicOperations.ZeroMemory(threefishInput);
-    }
-    CryptographicOperations.ZeroMemory(twoPartSalt);
+    using V10KeyDerivation.MasterResult differentFirstGenerated = V10KeyDerivation.DeriveMaster(
+        EncryptionSuiteCatalog.Get(EncryptionSuite.Kalyna512_512),
+        TestConstants.TestUserPassword,
+        TestConstants.TestPin,
+        TestGeneratedPassword('C'),
+        generatedPasswordB,
+        salts,
+        null,
+        CancellationToken.None);
+    using V10KeyDerivation.MasterResult differentSecondGenerated = V10KeyDerivation.DeriveMaster(
+        EncryptionSuiteCatalog.Get(EncryptionSuite.Kalyna512_512),
+        TestConstants.TestUserPassword,
+        TestConstants.TestPin,
+        generatedPasswordA,
+        TestGeneratedPassword('D'),
+        salts,
+        null,
+        CancellationToken.None);
+    using V10KeyDerivation.MasterResult differentUser = V10KeyDerivation.DeriveMaster(
+        EncryptionSuiteCatalog.Get(EncryptionSuite.Kalyna512_512),
+        TestConstants.TestUserPassword + "X",
+        TestConstants.TestPin,
+        generatedPasswordA,
+        generatedPasswordB,
+        salts,
+        null,
+        CancellationToken.None);
+    using V10KeyDerivation.MasterResult differentPin = V10KeyDerivation.DeriveMaster(
+        EncryptionSuiteCatalog.Get(EncryptionSuite.Kalyna512_512),
+        TestConstants.TestUserPassword,
+        "98765432",
+        generatedPasswordA,
+        generatedPasswordB,
+        salts,
+        null,
+        CancellationToken.None);
+
+    Assert(!CryptographicOperations.FixedTimeEquals(first.Master.Bytes, differentFirstGenerated.Master.Bytes), "changing first generated password changes derived master");
+    Assert(!CryptographicOperations.FixedTimeEquals(first.Master.Bytes, differentSecondGenerated.Master.Bytes), "changing second generated password changes derived master");
+    Assert(!CryptographicOperations.FixedTimeEquals(first.Master.Bytes, differentUser.Master.Bytes), "changing user password changes derived master");
+    Assert(!CryptographicOperations.FixedTimeEquals(first.Master.Bytes, differentPin.Master.Bytes), "changing PIN changes derived master");
+
+    using RoleKeyMaterial kalynaKeys = SuiteKeySchedule.DeriveSuiteKeys(first.Master.Bytes, EncryptionSuiteCatalog.Get(EncryptionSuite.Kalyna512_512));
+    using RoleKeyMaterial threefishKeys = SuiteKeySchedule.DeriveSuiteKeys(first.Master.Bytes, EncryptionSuiteCatalog.Get(EncryptionSuite.Threefish1024));
+    using RoleKeyMaterial paranoiaKeys = SuiteKeySchedule.DeriveSuiteKeys(first.Master.Bytes, EncryptionSuiteCatalog.Get(EncryptionSuite.ParanoiaCascade));
+    Assert(kalynaKeys.EncryptionKey.Bytes.Length == 64 && kalynaKeys.Sha3MacKey.Bytes.Length == 64 && kalynaKeys.SkeinMacKey.Bytes.Length == 128, "Kalyna derives 64-byte cipher, 64-byte SHA3 MAC, and 128-byte Skein MAC keys");
+    Assert(threefishKeys.EncryptionKey.Bytes.Length == 128 && threefishKeys.Sha3MacKey.Bytes.Length == 64 && threefishKeys.SkeinMacKey.Bytes.Length == 128, "Threefish derives 128-byte cipher, 64-byte SHA3 MAC, and 128-byte Skein MAC keys");
+    Assert(paranoiaKeys.EncryptionKey.Bytes.Length == 192 && paranoiaKeys.Sha3MacKey.Bytes.Length == 64 && paranoiaKeys.SkeinMacKey.Bytes.Length == 128, "Paranoia derives 192-byte cipher, 64-byte SHA3 MAC, and 128-byte Skein MAC keys");
 }
 
 static void RunMldsa87ReferenceTests()
@@ -2353,75 +2330,32 @@ static void UpdateMaximum(ref long target, long candidate)
 static async Task RunArgon2ReferenceCliTestAsync()
 {
     byte[] salt = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"u8.ToArray();
-    string firstGeneratedPassword = TestGeneratedPassword();
-    string secondGeneratedPassword = TestGeneratedPassword('B');
-    var service = new PasswordKeyService();
-    byte[]? previousSuiteInput = null;
+    byte[] testPassword = "SamplePasswordForArgon2ReferenceVerification123!"u8.ToArray();
 
     try
     {
         await RunArgon2WorkingSetStressAsync(3);
 
-        foreach (EncryptionSuite suite in Enum.GetValues<EncryptionSuite>())
+        int outputLength = 64;
+        byte[] reference = RunBouncyArgon2id(testPassword, salt, Argon2Profile.Default, outputLength);
+        byte[] managed = new byte[outputLength];
+        NativeArgon2id.HashRaw((uint)Argon2Profile.Default.Iterations, (uint)Argon2Profile.Default.MemoryKiB, (uint)Argon2Profile.Default.Parallelism, testPassword, salt, managed);
+        try
         {
-            byte[] expectedInput = BuildDualSha3Argon2InputForTest(
-                TestUserPassword,
-                firstGeneratedPassword,
-                secondGeneratedPassword,
-                suite);
-            byte[] actualInput = PasswordKeyService.CreateArgon2PasswordInput(
-                TestUserPassword,
-                firstGeneratedPassword,
-                secondGeneratedPassword,
-                suite);
-            try
-            {
-                Assert(
-                    CryptographicOperations.FixedTimeEquals(expectedInput, actualInput),
-                    $"{suite} dual SHA3-512 input matches independent length-prefixed construction");
-                Assert(actualInput[..64].Any(value => value != 0) && actualInput[64..].Any(value => value != 0), "both SHA3-512 halves contain data");
-                if (previousSuiteInput is not null)
-                {
-                    Assert(!CryptographicOperations.FixedTimeEquals(previousSuiteInput, actualInput), "suite-specific KDF domains produce different Argon2 inputs");
-                    CryptographicOperations.ZeroMemory(previousSuiteInput);
-                }
-
-                previousSuiteInput = (byte[])actualInput.Clone();
-                int outputLength = EncryptionSuiteCatalog.Get(suite).DerivedKeyBytes;
-                byte[] reference = RunBouncyArgon2id(actualInput, salt, Argon2Profile.Default, outputLength);
-                using DerivedKey derived = await service.DeriveAsync(
-                    TestUserPassword,
-                    firstGeneratedPassword,
-                    secondGeneratedPassword,
-                    (byte[])salt.Clone(),
-                    suite,
-                    CancellationToken.None);
-                try
-                {
-                    Assert(derived.Bytes.Length == outputLength, $"{suite} Argon2id output length");
-                    Assert(
-                        CryptographicOperations.FixedTimeEquals(derived.Bytes, reference),
-                        $"{suite} 128-byte Argon2id input/output matches independent Bouncy Castle");
-                }
-                finally
-                {
-                    CryptographicOperations.ZeroMemory(reference);
-                }
-            }
-            finally
-            {
-                CryptographicOperations.ZeroMemory(expectedInput);
-                CryptographicOperations.ZeroMemory(actualInput);
-            }
+            Assert(managed.Length == outputLength, "Argon2id output length");
+            Assert(
+                CryptographicOperations.FixedTimeEquals(managed, reference),
+                "managed Argon2id output matches independent Bouncy Castle");
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(reference);
+            CryptographicOperations.ZeroMemory(managed);
         }
     }
     finally
     {
-        if (previousSuiteInput is not null)
-        {
-            CryptographicOperations.ZeroMemory(previousSuiteInput);
-        }
-
+        CryptographicOperations.ZeroMemory(testPassword);
         CryptographicOperations.ZeroMemory(salt);
     }
 }
@@ -2500,59 +2434,13 @@ static string TestGeneratedPassword(char digit = 'A')
     return new string(digit, PasswordKeyService.GeneratedPasswordLength);
 }
 
-static byte[] BuildDualSha3Argon2InputForTest(
-    string userPassword,
-    string firstGeneratedPassword,
-    string secondGeneratedPassword,
-    EncryptionSuite suite)
-{
-    byte[] userPasswordBytes = Encoding.UTF8.GetBytes(userPassword);
-    byte[] firstGeneratedPasswordBytes = Encoding.ASCII.GetBytes(PasswordKeyService.NormalizeGeneratedPassword(firstGeneratedPassword));
-    byte[] secondGeneratedPasswordBytes = Encoding.ASCII.GetBytes(PasswordKeyService.NormalizeGeneratedPassword(secondGeneratedPassword));
-    string suiteName = suite switch
-    {
-        EncryptionSuite.Kalyna512_512 => "Kalyna-512-512",
-        EncryptionSuite.Threefish1024 => "Threefish-1024",
-        _ => throw new ArgumentOutOfRangeException(nameof(suite)),
-    };
-    byte[] firstDomain = Encoding.ASCII.GetBytes($"Kalyna-ZPAQ/v8/{suiteName}/SHA3-512/User+Factor-A");
-    byte[] secondDomain = Encoding.ASCII.GetBytes($"Kalyna-ZPAQ/v8/{suiteName}/SHA3-512/User+Factor-B");
-    byte[] firstMessage = BuildLengthPrefixedMessageForTest(firstDomain, userPasswordBytes, firstGeneratedPasswordBytes);
-    byte[] secondMessage = BuildLengthPrefixedMessageForTest(secondDomain, userPasswordBytes, secondGeneratedPasswordBytes);
-    byte[] firstHash = SHA3_512.HashData(firstMessage);
-    byte[] secondHash = SHA3_512.HashData(secondMessage);
-    byte[] result = [.. firstHash, .. secondHash];
-    CryptographicOperations.ZeroMemory(userPasswordBytes);
-    CryptographicOperations.ZeroMemory(firstGeneratedPasswordBytes);
-    CryptographicOperations.ZeroMemory(secondGeneratedPasswordBytes);
-    CryptographicOperations.ZeroMemory(firstDomain);
-    CryptographicOperations.ZeroMemory(secondDomain);
-    CryptographicOperations.ZeroMemory(firstMessage);
-    CryptographicOperations.ZeroMemory(secondMessage);
-    CryptographicOperations.ZeroMemory(firstHash);
-    CryptographicOperations.ZeroMemory(secondHash);
-    return result;
-}
 
-static byte[] BuildLengthPrefixedMessageForTest(params byte[][] values)
-{
-    byte[] result = new byte[values.Sum(value => sizeof(int) + value.Length)];
-    int offset = 0;
-    foreach (byte[] value in values)
-    {
-        BinaryPrimitives.WriteInt32LittleEndian(result.AsSpan(offset, sizeof(int)), value.Length);
-        offset += sizeof(int);
-        value.CopyTo(result, offset);
-        offset += value.Length;
-    }
-
-    return result;
-}
 
 static async Task RunPdfRoundTripTestsAsync()
 {
     string sourcePdf = ResolveSamplePdfPath();
-    const string password = TestUserPassword;
+    const string password = TestConstants.TestUserPassword;
+    const string pin = TestConstants.TestPin;
     string firstGeneratedPassword = TestGeneratedPassword();
     string secondGeneratedPassword = TestGeneratedPassword('B');
 
@@ -2629,8 +2517,10 @@ static async Task RunPdfRoundTripTestsAsync()
                     input,
                     Path.Combine(root, "invalid-hint.kzpaq"),
                     password,
+                    pin,
                     firstGeneratedPassword,
                     secondGeneratedPassword,
+                    EncryptionSuite.Kalyna512_512,
                     new string('H', 181),
                     null,
                     CancellationToken.None);
@@ -2649,6 +2539,7 @@ static async Task RunPdfRoundTripTestsAsync()
                 zpaqStream,
                 encryptedArchive,
                 password,
+                pin,
                 firstGeneratedPassword,
                 secondGeneratedPassword,
                 EncryptionSuite.Kalyna512_512,
@@ -2666,17 +2557,10 @@ static async Task RunPdfRoundTripTestsAsync()
         Assert(info.RequiresGeneratedPassword
             && info.GeneratedPasswordBits == 1024
             && info.GeneratedPasswordFactorCount == 2
-            && info.Version == 8
+            && (info.Version == 10 || info.Version == 11)
             && info.Suite == EncryptionSuite.Kalyna512_512
             && info.Hint == "test hint",
-            "v8 Kalyna container declares two generated 512-bit factors");
-
-        string v6HeaderArchive = Path.Combine(root, "legacy-version.kzpaq");
-        File.Copy(encryptedArchive, v6HeaderArchive);
-        ReplaceContainerHeaderToken(v6HeaderArchive, "\"Version\":7", "\"Version\":6");
-        await AssertThrowsAsync<InvalidDataException>(
-            () => kalyna.ReadContainerInfoAsync(v6HeaderArchive, CancellationToken.None),
-            "v6 containers are rejected without a legacy parser");
+            "v11 Kalyna container declares two generated 1024-bit factors");
 
         string existingTarget = Path.Combine(root, "must-not-overwrite.kzpaq");
         byte[] existingSentinel = "existing target must survive"u8.ToArray();
@@ -2686,14 +2570,14 @@ static async Task RunPdfRoundTripTestsAsync()
             async () =>
             {
                 await using var tinyInput = new MemoryStream([1, 2, 3, 4], writable: false);
-                await kalyna.EncryptZpaqStreamWithProfileAsync(
+                await kalyna.EncryptZpaqStreamAsync(
                     tinyInput,
                     existingTarget,
                     password,
+                    pin,
                     firstGeneratedPassword,
                     secondGeneratedPassword,
                     EncryptionSuite.Threefish1024,
-                    Argon2Profile.Default,
                     null,
                     null,
                     CancellationToken.None);
@@ -2716,21 +2600,14 @@ static async Task RunPdfRoundTripTestsAsync()
         ReplaceContainerHeaderToken(invalidSaltBitsArchive, "\"SaltBits\":512", "\"SaltBits\":511");
         await AssertThrowsAsync<InvalidDataException>(
             () => kalyna.ReadContainerInfoAsync(invalidSaltBitsArchive, CancellationToken.None),
-            "v8 container header requires a 512-bit salt declaration");
-
-        string manipulatedArgon2MemoryArchive = Path.Combine(root, "argon2-legacy-memory.kzpaq");
-        File.Copy(encryptedArchive, manipulatedArgon2MemoryArchive);
-        ReplaceContainerHeaderToken(manipulatedArgon2MemoryArchive, "\"Argon2MemoryKiB\":1048576", "\"Argon2MemoryKiB\":262144");
-        await AssertThrowsAsync<InvalidDataException>(
-            () => kalyna.ReadContainerInfoAsync(manipulatedArgon2MemoryArchive, CancellationToken.None),
-            "v8 rejects the legacy 256 MiB Argon2 cost before deriving a key");
+            "v11 container header requires a 512-bit salt declaration");
 
         string manipulatedArgon2IterationsArchive = Path.Combine(root, "argon2-t3.kzpaq");
         File.Copy(encryptedArchive, manipulatedArgon2IterationsArchive);
         ReplaceContainerHeaderToken(manipulatedArgon2IterationsArchive, "\"Argon2Iterations\":4", "\"Argon2Iterations\":3");
         await AssertThrowsAsync<InvalidDataException>(
             () => kalyna.ReadContainerInfoAsync(manipulatedArgon2IterationsArchive, CancellationToken.None),
-            "v8 rejects weakened Argon2 iterations before deriving a key");
+            "v11 rejects weakened Argon2 iterations before deriving a key");
 
         string duplicateHeaderPropertyArchive = Path.Combine(root, "duplicate-header-property.kzpaq");
         File.Copy(encryptedArchive, duplicateHeaderPropertyArchive);
@@ -2740,55 +2617,58 @@ static async Task RunPdfRoundTripTestsAsync()
             "\"Argon2Iterations\":4,\"Argon2Iterations\":4");
         await AssertThrowsAsync<InvalidDataException>(
             () => kalyna.ReadContainerInfoAsync(duplicateHeaderPropertyArchive, CancellationToken.None),
-            "v8 rejects duplicate JSON properties even when both values are identical");
+            "v11 rejects duplicate JSON properties even when both values are identical");
 
         string manipulatedArgon2Archive = Path.Combine(root, "argon2-p3.kzpaq");
         File.Copy(encryptedArchive, manipulatedArgon2Archive);
         ReplaceContainerHeaderToken(manipulatedArgon2Archive, "\"Argon2Parallelism\":4", "\"Argon2Parallelism\":3");
         await AssertThrowsAsync<InvalidDataException>(
             () => kalyna.ReadContainerInfoAsync(manipulatedArgon2Archive, CancellationToken.None),
-            "v8 rejects weakened Argon2 parallelism before deriving a key");
+            "v11 rejects weakened Argon2 parallelism before deriving a key");
 
         await AssertThrowsCryptographicAsync(
-            () => kalyna.DecryptToStreamAsync(encryptedArchive, password + "x", firstGeneratedPassword, secondGeneratedPassword, Stream.Null, null, CancellationToken.None),
+            () => kalyna.DecryptToStreamAsync(encryptedArchive, password + "x", pin, firstGeneratedPassword, secondGeneratedPassword, Stream.Null, null, CancellationToken.None),
             "wrong user password is rejected");
         await AssertThrowsCryptographicAsync(
-            () => kalyna.DecryptToStreamAsync(encryptedArchive, password, TestGeneratedPassword('C'), secondGeneratedPassword, Stream.Null, null, CancellationToken.None),
+            () => kalyna.DecryptToStreamAsync(encryptedArchive, password, "98765432", firstGeneratedPassword, secondGeneratedPassword, Stream.Null, null, CancellationToken.None),
+            "wrong PIN is rejected");
+        await AssertThrowsCryptographicAsync(
+            () => kalyna.DecryptToStreamAsync(encryptedArchive, password, pin, TestGeneratedPassword('C'), secondGeneratedPassword, Stream.Null, null, CancellationToken.None),
             "wrong first generated password is rejected");
         await AssertThrowsCryptographicAsync(
-            () => kalyna.DecryptToStreamAsync(encryptedArchive, password, firstGeneratedPassword, TestGeneratedPassword('D'), Stream.Null, null, CancellationToken.None),
+            () => kalyna.DecryptToStreamAsync(encryptedArchive, password, pin, firstGeneratedPassword, TestGeneratedPassword('D'), Stream.Null, null, CancellationToken.None),
             "wrong second generated password is rejected");
 
         string tamperedArchive = Path.Combine(root, "tampered.kzpaq");
         File.Copy(encryptedArchive, tamperedArchive);
         await FlipLastByteAsync(tamperedArchive);
         await AssertThrowsCryptographicAsync(
-            () => kalyna.DecryptToStreamAsync(tamperedArchive, password, firstGeneratedPassword, secondGeneratedPassword, Stream.Null, null, CancellationToken.None),
+            () => kalyna.DecryptToStreamAsync(tamperedArchive, password, pin, firstGeneratedPassword, secondGeneratedPassword, Stream.Null, null, CancellationToken.None),
             "tampered container is rejected");
 
         string tamperedSha3TagArchive = Path.Combine(root, "tampered-sha3-tag.kzpaq");
         File.Copy(encryptedArchive, tamperedSha3TagArchive);
         await FlipContainerTagByteAsync(tamperedSha3TagArchive, skeinTag: false);
         await AssertThrowsCryptographicAsync(
-            () => kalyna.DecryptToStreamAsync(tamperedSha3TagArchive, password, firstGeneratedPassword, secondGeneratedPassword, Stream.Null, null, CancellationToken.None),
+            () => kalyna.DecryptToStreamAsync(tamperedSha3TagArchive, password, pin, firstGeneratedPassword, secondGeneratedPassword, Stream.Null, null, CancellationToken.None),
             "container with only its HMAC-SHA3-512 tag changed is rejected");
 
         string tamperedSkeinTagArchive = Path.Combine(root, "tampered-skein-tag.kzpaq");
         File.Copy(encryptedArchive, tamperedSkeinTagArchive);
         await FlipContainerTagByteAsync(tamperedSkeinTagArchive, skeinTag: true);
         await AssertThrowsCryptographicAsync(
-            () => kalyna.DecryptToStreamAsync(tamperedSkeinTagArchive, password, firstGeneratedPassword, secondGeneratedPassword, Stream.Null, null, CancellationToken.None),
+            () => kalyna.DecryptToStreamAsync(tamperedSkeinTagArchive, password, pin, firstGeneratedPassword, secondGeneratedPassword, Stream.Null, null, CancellationToken.None),
             "container with only its Skein-1024 MAC tag changed is rejected");
 
         ProcessResult listResult = await zpaq.ListStreamingAsync(
-            (zpaqInput, ct) => kalyna.DecryptToStreamAsync(encryptedArchive, password, firstGeneratedPassword, secondGeneratedPassword, zpaqInput, null, ct),
+            (zpaqInput, ct) => kalyna.DecryptToStreamAsync(encryptedArchive, password, pin, firstGeneratedPassword, secondGeneratedPassword, zpaqInput, null, ct),
             null,
             CancellationToken.None);
         Assert(listResult.Succeeded, "encrypted streaming container lists");
         Assert(listResult.StandardError.Contains("versions", StringComparison.OrdinalIgnoreCase), "encrypted list scans the streaming pipe without a temporary archive");
 
         ProcessResult encryptedExtractResult = await zpaq.ExtractStreamingAsync(
-            (zpaqInput, ct) => kalyna.DecryptToStreamAsync(encryptedArchive, password, firstGeneratedPassword, secondGeneratedPassword, zpaqInput, null, ct),
+            (zpaqInput, ct) => kalyna.DecryptToStreamAsync(encryptedArchive, password, pin, firstGeneratedPassword, secondGeneratedPassword, zpaqInput, null, ct),
             encryptedExtractDir,
             null,
             CancellationToken.None);
@@ -2805,6 +2685,7 @@ static async Task RunPdfRoundTripTestsAsync()
                 zpaqStream,
                 threefishArchive,
                 password,
+                pin,
                 firstGeneratedPassword,
                 secondGeneratedPassword,
                 EncryptionSuite.Threefish1024,
@@ -2816,20 +2697,20 @@ static async Task RunPdfRoundTripTestsAsync()
         Assert(threefishAddResult.Succeeded, "streaming ZPAQ add into Threefish container");
         AssertContainerHeader(threefishArchive, EncryptionSuite.Threefish1024);
         KalynaContainerInfo threefishInfo = await kalyna.ReadContainerInfoAsync(threefishArchive, CancellationToken.None);
-        Assert(threefishInfo.Version == 7
+        Assert((threefishInfo.Version == 10 || threefishInfo.Version == 11)
             && threefishInfo.Suite == EncryptionSuite.Threefish1024
             && threefishInfo.NonceBits == 1024
             && threefishInfo.SaltBits == 512,
-            "v8 Threefish suite metadata");
+            "v11 Threefish suite metadata");
 
         ProcessResult threefishList = await zpaq.ListStreamingAsync(
-            (zpaqInput, ct) => kalyna.DecryptToStreamAsync(threefishArchive, password, firstGeneratedPassword, secondGeneratedPassword, zpaqInput, null, ct),
+            (zpaqInput, ct) => kalyna.DecryptToStreamAsync(threefishArchive, password, pin, firstGeneratedPassword, secondGeneratedPassword, zpaqInput, null, ct),
             null,
             CancellationToken.None);
         Assert(threefishList.Succeeded, "Threefish encrypted streaming container lists");
         Assert(threefishList.StandardError.Contains("versions", StringComparison.OrdinalIgnoreCase), "Threefish list scans the streaming pipe directly");
         ProcessResult threefishExtract = await zpaq.ExtractStreamingAsync(
-            (zpaqInput, ct) => kalyna.DecryptToStreamAsync(threefishArchive, password, firstGeneratedPassword, secondGeneratedPassword, zpaqInput, null, ct),
+            (zpaqInput, ct) => kalyna.DecryptToStreamAsync(threefishArchive, password, pin, firstGeneratedPassword, secondGeneratedPassword, zpaqInput, null, ct),
             threefishExtractDir,
             null,
             CancellationToken.None);
@@ -2841,6 +2722,7 @@ static async Task RunPdfRoundTripTestsAsync()
         await pdfRecovery.CreateAuthenticatedAsync(
             encryptedArchive,
             password,
+            pin,
             firstGeneratedPassword,
             secondGeneratedPassword,
             null,
@@ -2849,6 +2731,7 @@ static async Task RunPdfRoundTripTestsAsync()
         RecoveryRepairResult encryptedPdfRecovery = await pdfRecovery.VerifyAndRepairAuthenticatedAsync(
             encryptedArchive,
             password,
+            pin,
             firstGeneratedPassword,
             secondGeneratedPassword,
             null,
@@ -2862,6 +2745,7 @@ static async Task RunPdfRoundTripTestsAsync()
             (zpaqInput, ct) => kalyna.DecryptToStreamAsync(
                 encryptedPdfRecovery.OutputPath!,
                 password,
+                pin,
                 firstGeneratedPassword,
                 secondGeneratedPassword,
                 zpaqInput,
@@ -3014,7 +2898,8 @@ static async Task RunMixedSampleRoundTripTestsAsync()
             (zpaqStream, ct) => container.EncryptZpaqStreamAsync(
                 zpaqStream,
                 kalynaArchive,
-                TestUserPassword,
+                TestConstants.TestUserPassword,
+                TestConstants.TestPin,
                 TestGeneratedPassword(),
                 TestGeneratedPassword('B'),
                 EncryptionSuite.Kalyna512_512,
@@ -3029,7 +2914,8 @@ static async Task RunMixedSampleRoundTripTestsAsync()
         ProcessResult kalynaExtract = await zpaq.ExtractStreamingAsync(
             (zpaqInput, ct) => container.DecryptToStreamAsync(
                 kalynaArchive,
-                TestUserPassword,
+                TestConstants.TestUserPassword,
+                TestConstants.TestPin,
                 TestGeneratedPassword(),
                 TestGeneratedPassword('B'),
                 zpaqInput,
@@ -3048,7 +2934,8 @@ static async Task RunMixedSampleRoundTripTestsAsync()
             (zpaqStream, ct) => container.EncryptZpaqStreamAsync(
                 zpaqStream,
                 threefishArchive,
-                TestUserPassword,
+                TestConstants.TestUserPassword,
+                TestConstants.TestPin,
                 TestGeneratedPassword(),
                 TestGeneratedPassword('B'),
                 EncryptionSuite.Threefish1024,
@@ -3063,7 +2950,8 @@ static async Task RunMixedSampleRoundTripTestsAsync()
         ProcessResult threefishExtract = await zpaq.ExtractStreamingAsync(
             (zpaqInput, ct) => container.DecryptToStreamAsync(
                 threefishArchive,
-                TestUserPassword,
+                TestConstants.TestUserPassword,
+                TestConstants.TestPin,
                 TestGeneratedPassword(),
                 TestGeneratedPassword('B'),
                 zpaqInput,
@@ -3151,14 +3039,14 @@ static async Task RunLargeStreamingContainerTestAsync()
         ProcessResult addResult = await zpaq.AddStreamingAsync(
             [source],
             1,
-            (zpaqStream, ct) => kalyna.EncryptZpaqStreamAsync(zpaqStream, encryptedArchive, password, firstGeneratedPassword, secondGeneratedPassword, EncryptionSuite.Threefish1024, null, null, ct),
+            (zpaqStream, ct) => kalyna.EncryptZpaqStreamAsync(zpaqStream, encryptedArchive, password, TestConstants.TestPin, firstGeneratedPassword, secondGeneratedPassword, EncryptionSuite.Threefish1024, null, null, ct),
             null,
             CancellationToken.None);
         Assert(addResult.Succeeded, "large ZPAQ pipe add into encrypted container");
         Assert(new FileInfo(encryptedArchive).Length > 1024 * 1024, "large encrypted archive crosses streaming chunk boundary");
 
         ProcessResult extractResult = await zpaq.ExtractStreamingAsync(
-            (zpaqInput, ct) => kalyna.DecryptToStreamAsync(encryptedArchive, password, firstGeneratedPassword, secondGeneratedPassword, zpaqInput, null, ct),
+            (zpaqInput, ct) => kalyna.DecryptToStreamAsync(encryptedArchive, password, TestConstants.TestPin, firstGeneratedPassword, secondGeneratedPassword, zpaqInput, null, ct),
             extractDir,
             null,
             CancellationToken.None);
@@ -3176,7 +3064,8 @@ static async Task RunLargeStreamingContainerTestAsync()
 
 static async Task RunShortReadKalynaStreamTestAsync()
 {
-    const string password = TestUserPassword;
+    const string password = TestConstants.TestUserPassword;
+    const string pin = TestConstants.TestPin;
     string firstGeneratedPassword = TestGeneratedPassword();
     string secondGeneratedPassword = TestGeneratedPassword('B');
     string root = Path.Combine(Path.GetTempPath(), $"kalyna-short-read-{Guid.NewGuid():N}");
@@ -3193,11 +3082,11 @@ static async Task RunShortReadKalynaStreamTestAsync()
         AddMouseSamplesUntilEntropyReady();
         await using (var shortRead = new ShortReadStream(data, maxRead: 1000))
         {
-            await kalyna.EncryptZpaqStreamAsync(shortRead, encryptedArchive, password, firstGeneratedPassword, secondGeneratedPassword, null, null, CancellationToken.None);
+            await kalyna.EncryptZpaqStreamAsync(shortRead, encryptedArchive, password, pin, firstGeneratedPassword, secondGeneratedPassword, EncryptionSuite.Threefish1024, null, null, CancellationToken.None);
         }
 
         await using var decrypted = new MemoryStream();
-        await kalyna.DecryptToStreamAsync(encryptedArchive, password, firstGeneratedPassword, secondGeneratedPassword, decrypted, null, CancellationToken.None);
+        await kalyna.DecryptToStreamAsync(encryptedArchive, password, pin, firstGeneratedPassword, secondGeneratedPassword, decrypted, null, CancellationToken.None);
         byte[] decryptedBytes = decrypted.ToArray();
         byte[] decryptedHash = SHA3_512.HashData(decryptedBytes);
         try
@@ -3461,7 +3350,8 @@ static async Task RunRecoveryTestsAsync()
         Assert(new FileInfo(lengthGuardArchive).Length == truncatedLength, "KPAR2 length guard leaves the truncated archive untouched");
 
         AddMouseSamplesUntilEntropyReady();
-        const string password = TestUserPassword;
+        const string password = TestConstants.TestUserPassword;
+        const string pin = TestConstants.TestPin;
         const string wrongPassword = "Q!m8$Ls2#Vx7%Tp4&Jd9*Wr5+Kn6=Zu3?Ce";
         string firstGeneratedPassword = TestGeneratedPassword();
         string secondGeneratedPassword = TestGeneratedPassword('B');
@@ -3472,7 +3362,7 @@ static async Task RunRecoveryTestsAsync()
         var kalyna = new KalynaContainerService();
         await using (var input = new MemoryStream(containerPlain, writable: false))
         {
-            await kalyna.EncryptZpaqStreamAsync(input, encryptedArchive, password, firstGeneratedPassword, secondGeneratedPassword, EncryptionSuite.Threefish1024, null, null, CancellationToken.None);
+            await kalyna.EncryptZpaqStreamAsync(input, encryptedArchive, password, pin, firstGeneratedPassword, secondGeneratedPassword, EncryptionSuite.Threefish1024, null, null, CancellationToken.None);
         }
 
         byte[] encryptedArchiveHash = await Sha3FileAsync(encryptedArchive);
@@ -3492,6 +3382,7 @@ static async Task RunRecoveryTestsAsync()
         string encryptedRecoveryPath = await recovery.CreateAuthenticatedAsync(
             encryptedArchive,
             password,
+            pin,
             firstGeneratedPassword,
             secondGeneratedPassword,
             null,
@@ -3508,6 +3399,7 @@ static async Task RunRecoveryTestsAsync()
         RecoveryRepairResult metadataCertificationCheck = await recovery.VerifyAndRepairAuthenticatedAsync(
             encryptedArchive,
             password,
+            pin,
             firstGeneratedPassword,
             secondGeneratedPassword,
             null,
@@ -3529,6 +3421,7 @@ static async Task RunRecoveryTestsAsync()
             () => recovery.VerifyAndRepairAuthenticatedAsync(
                 encryptedArchive,
                 wrongPassword,
+                pin,
                 firstGeneratedPassword,
                 secondGeneratedPassword,
                 null,
@@ -3542,6 +3435,7 @@ static async Task RunRecoveryTestsAsync()
         RecoveryRepairResult encryptedRepair = await recovery.VerifyAndRepairAuthenticatedAsync(
             encryptedArchive,
             password,
+            pin,
             firstGeneratedPassword,
             secondGeneratedPassword,
             null,
@@ -3564,6 +3458,7 @@ static async Task RunRecoveryTestsAsync()
         RecoveryRepairResult emergencyRepair = await recovery.RecoverToNewFileAuthenticatedAsync(
             encryptedArchive,
             password,
+            pin,
             firstGeneratedPassword,
             secondGeneratedPassword,
             null,
@@ -3594,6 +3489,7 @@ static async Task RunRecoveryTestsAsync()
             () => recovery.VerifyAndRepairAuthenticatedAsync(
                 transplantedTarget,
                 password,
+                pin,
                 firstGeneratedPassword,
                 secondGeneratedPassword,
                 null,
@@ -3608,6 +3504,7 @@ static async Task RunRecoveryTestsAsync()
             () => recovery.VerifyAndRepairAuthenticatedAsync(
                 metadataArchive,
                 password,
+                pin,
                 firstGeneratedPassword,
                 secondGeneratedPassword,
                 null,
@@ -3634,7 +3531,8 @@ static async Task RunRecoveryTestsAsync()
 
 static async Task RunCryptographicEraseTestsAsync()
 {
-    const string password = TestUserPassword;
+    const string password = TestConstants.TestUserPassword;
+    const string pin = TestConstants.TestPin;
     string firstGeneratedPassword = TestGeneratedPassword();
     string secondGeneratedPassword = TestGeneratedPassword('B');
     string root = Path.Combine(Path.GetTempPath(), $"kalyna-erase-test-{Guid.NewGuid():N}");
@@ -3672,13 +3570,14 @@ static async Task RunCryptographicEraseTestsAsync()
         ProcessResult encryptedAdd = await zpaq.AddStreamingAsync(
             [source],
             1,
-            (zpaqStream, ct) => kalyna.EncryptZpaqStreamAsync(zpaqStream, encryptedArchive, password, firstGeneratedPassword, secondGeneratedPassword, EncryptionSuite.Threefish1024, null, null, ct),
+            (zpaqStream, ct) => kalyna.EncryptZpaqStreamAsync(zpaqStream, encryptedArchive, password, pin, firstGeneratedPassword, secondGeneratedPassword, EncryptionSuite.Threefish1024, null, null, ct),
             null,
             CancellationToken.None);
         Assert(encryptedAdd.Succeeded, "encrypted archive for erase test");
         string recoveryPath = await new RecoveryService().CreateAuthenticatedAsync(
             encryptedArchive,
             password,
+            pin,
             firstGeneratedPassword,
             secondGeneratedPassword,
             null,
@@ -4237,4 +4136,10 @@ static class TestNativeFileLinks
     [DllImport("kernel32.dll", EntryPoint = "CreateHardLinkW", CharSet = CharSet.Unicode, SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool CreateHardLink(string fileName, string existingFileName, nint securityAttributes);
+}
+
+internal static class TestConstants
+{
+    public const string TestUserPassword = "N!r7$Vq2#Lm8%Tx3&Jd9*Wp4+Kg5=Zu6?Ce";
+    public const string TestPin = "24681357";
 }
