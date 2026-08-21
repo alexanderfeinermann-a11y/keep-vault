@@ -110,13 +110,16 @@ internal static class KeyedSkein1024
         }
 
         var mac = new SkeinMac(SkeinEngine.SKEIN_1024, OutputBytes * 8);
-        byte[] bcKey = key.ToArray();
-        byte[] personalisationBytes = Encoding.UTF8.GetBytes(personalisation);
+        using var keyBuf = LockedSensitiveBuffer.Create(key.Length);
+        key.CopyTo(keyBuf.Bytes);
+        int persByteCount = Encoding.UTF8.GetByteCount(personalisation);
+        using var persBuf = LockedSensitiveBuffer.Create(persByteCount);
+        Encoding.UTF8.GetBytes(personalisation, persBuf.Bytes);
         try
         {
             SkeinParameters parameters = new SkeinParameters.Builder()
-                .SetKey(bcKey)
-                .SetPersonalisation(personalisationBytes)
+                .SetKey(keyBuf.Bytes)
+                .SetPersonalisation(persBuf.Bytes)
                 .Build();
             mac.Init(parameters);
             mac.BlockUpdate(message);
@@ -133,8 +136,6 @@ internal static class KeyedSkein1024
         }
         finally
         {
-            CryptographicOperations.ZeroMemory(bcKey);
-            CryptographicOperations.ZeroMemory(personalisationBytes);
             mac.Reset();
         }
     }
@@ -171,12 +172,14 @@ internal static class Sha3HkdfExpand
             throw new ArgumentOutOfRangeException(nameof(destination));
         }
 
-        byte[] prkBytes = pseudoRandomKey.ToArray();
-        byte[] infoBytes = info.ToArray();
+        using var prkBuf = LockedSensitiveBuffer.Create(pseudoRandomKey.Length);
+        pseudoRandomKey.CopyTo(prkBuf.Bytes);
+        using var infoBuf = LockedSensitiveBuffer.Create(info.Length);
+        info.CopyTo(infoBuf.Bytes);
         try
         {
             var generator = new HkdfBytesGenerator(new Sha3Digest(512));
-            generator.Init(HkdfParameters.SkipExtractParameters(prkBytes, infoBytes));
+            generator.Init(HkdfParameters.SkipExtractParameters(prkBuf.Bytes, infoBuf.Bytes));
 
             using var outBuf = LockedSensitiveBuffer.Create(destination.Length);
             int generated = generator.GenerateBytes(outBuf.Bytes);
@@ -190,8 +193,6 @@ internal static class Sha3HkdfExpand
         }
         finally
         {
-            CryptographicOperations.ZeroMemory(prkBytes);
-            CryptographicOperations.ZeroMemory(infoBytes);
         }
     }
 }

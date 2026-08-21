@@ -50,7 +50,16 @@ internal static class TestRunner
         int repeatCount = repeatIndex >= 0 && repeatIndex + 1 < args.Length && int.TryParse(args[repeatIndex + 1], out int r) ? Math.Max(1, r) : 1;
 
         int parallelIndex = Array.IndexOf(args, "--parallel");
-        int? parallelOverride = parallelIndex >= 0 && parallelIndex + 1 < args.Length && int.TryParse(args[parallelIndex + 1], out int p) ? p : null;
+        int? parallelOverride = null;
+        if (parallelIndex >= 0)
+        {
+            if (parallelIndex + 1 >= args.Length || !int.TryParse(args[parallelIndex + 1], out int p) || (p != -1 && (p < 1 || p > 128)))
+            {
+                Console.Error.WriteLine("Usage error: --parallel requires -1 or an integer between 1 and 128.");
+                return 64;
+            }
+            parallelOverride = p;
+        }
 
         int seedIndex = Array.IndexOf(args, "--seed");
         uint? seedOverride = null;
@@ -61,6 +70,9 @@ internal static class TestRunner
                 ? Convert.ToUInt32(seedStr[2..], 16)
                 : uint.TryParse(seedStr, out uint s) ? s : null;
         }
+
+        int baseIndex = Array.IndexOf(args, "--base");
+        string? baseRef = baseIndex >= 0 && baseIndex + 1 < args.Length ? args[baseIndex + 1] : null;
 
         int timingsIndex = Array.IndexOf(args, "--timings");
         string timingsPath = timingsIndex >= 0 && timingsIndex + 1 < args.Length
@@ -89,14 +101,28 @@ internal static class TestRunner
 
         if (changedRequested)
         {
-            HashSet<string> affectedNames = DetermineAffectedTestsFromGit();
-            selectedSmoke.AddRange(smokeTests.Where(t => affectedNames.Contains(t.Name) || affectedNames.Contains("ALL_SMOKE")));
-            selectedComprehensive.AddRange(comprehensiveTests.Where(t => affectedNames.Contains(t.Name) || affectedNames.Contains("ALL_COMPREHENSIVE")));
-            if (selectedSmoke.Count == 0 && selectedComprehensive.Count == 0)
+            HashSet<string>? affectedNames = DetermineAffectedTestsFromGit(baseRef);
+            if (affectedNames == null)
+            {
+                Console.WriteLine("Note: Git impact detection could not determine changed files; running full test suite.");
+                selectedSmoke.AddRange(smokeTests);
+                selectedComprehensive.AddRange(comprehensiveTests);
+            }
+            else if (affectedNames.Count == 0)
             {
                 // Fallback: run smoke + light tests
                 selectedSmoke.AddRange(smokeTests);
                 selectedComprehensive.AddRange(comprehensiveTests.Where(t => t.Resource == TestResource.Light));
+            }
+            else
+            {
+                selectedSmoke.AddRange(smokeTests.Where(t => affectedNames.Contains(t.Name) || affectedNames.Contains("ALL_SMOKE")));
+                selectedComprehensive.AddRange(comprehensiveTests.Where(t => affectedNames.Contains(t.Name) || affectedNames.Contains("ALL_COMPREHENSIVE")));
+                if (selectedSmoke.Count == 0 && selectedComprehensive.Count == 0)
+                {
+                    selectedSmoke.AddRange(smokeTests);
+                    selectedComprehensive.AddRange(comprehensiveTests.Where(t => t.Resource == TestResource.Light));
+                }
             }
         }
         else if (quickRequested)
@@ -140,7 +166,8 @@ internal static class TestRunner
         if (selectedSmoke.Count == 0 && selectedComprehensive.Count == 0)
         {
             Console.WriteLine("No tests matched the specified criteria.");
-            return 0;
+            bool explicitSelector = onlyFilter != null || smokeOnlyFilter != null || categoryFilter != null;
+            return explicitSelector ? 64 : 0;
         }
 
         // Determine worker count
@@ -337,6 +364,7 @@ internal static class TestRunner
     {
         uint seed = seedOverride ?? checked((uint)RandomNumberGenerator.GetInt32(1, int.MaxValue));
         MacComprehensiveTests.TestSeed = seed;
+        MacComprehensiveTests.SetCurrentPrng(new Random((int)seed));
 
         Stopwatch sw = Stopwatch.StartNew();
         try
@@ -375,93 +403,128 @@ internal static class TestRunner
         }
     }
 
-    private static HashSet<string> DetermineAffectedTestsFromGit()
+    private static HashSet<string>? DetermineAffectedTestsFromGit(string? baseRef)
     {
         var affected = new HashSet<string>(StringComparer.Ordinal);
         try
         {
-            using var proc = new Process();
-            proc.StartInfo.FileName = "git";
-            proc.StartInfo.Arguments = "diff --name-only HEAD";
-            proc.StartInfo.UseShellExecute = false;
-            proc.StartInfo.RedirectStandardOutput = true;
-            proc.StartInfo.CreateNoWindow = true;
-            if (proc.Start())
+            List<string> diffArgsList = new();
+            if (!string.IsNullOrWhiteSpace(baseRef))
             {
-                string output = proc.StandardOutput.ReadToEnd();
-                proc.WaitForExit();
-                string[] files = output.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+                diffArgsList.Add($"diff --name-only {baseRef}...HEAD");
+            }
+            else
+            {
+                diffArgsList.Add("diff --name-only HEAD");
+                diffArgsList.Add("diff --name-only --cached");
+                diffArgsList.Add("diff --name-only HEAD~1...HEAD");
+            }
 
-                foreach (string file in files)
+            var allFiles = new HashSet<string>(StringComparer.Ordinal);
+            bool anySuccess = false;
+
+            foreach (string gitArg in diffArgsList)
+            {
+                using var proc = new Process();
+                proc.StartInfo.FileName = "git";
+                proc.StartInfo.Arguments = gitArg;
+                proc.StartInfo.UseShellExecute = false;
+                proc.StartInfo.RedirectStandardOutput = true;
+                proc.StartInfo.RedirectStandardError = true;
+                proc.StartInfo.CreateNoWindow = true;
+                if (proc.Start())
                 {
-                    if (file.Contains("V10MasterKdf") || file.Contains("V10Primitives") || file.Contains("PasswordKeyService"))
+                    string output = proc.StandardOutput.ReadToEnd();
+                    proc.WaitForExit();
+                    if (proc.ExitCode == 0)
                     {
-                        affected.Add("v10 primitives against independent second implementations");
-                        affected.Add("v10 master KDF: credential binding, PMI range and round chaining");
-                        affected.Add("Argon2id fixed 1 GiB profile and independent equivalence");
-                        affected.Add("v10 peak memory stays at one Argon2 matrix, and the header leaks nothing");
-                        affected.Add("password policy and KEEPVAULT term rejection");
-                        affected.Add("v10 creation PIN policy and weak-pattern rejection");
-                        affected.Add("v10 suite roundtrips and manipulation rejection");
-                    }
-                    if (file.Contains("ZpaqService") || file.Contains("MacPlatformSecurity") || file.Contains("MacSecureFile") || file.Contains("MacOriginalDeletionService"))
-                    {
-                        affected.Add("ZPAQ levels, streaming, traversal and malformed corpus");
-                        affected.Add("verified original deletion refuses on any mismatch");
-                        affected.Add("cryptographic erase ordering and hard-link refusal");
-                        affected.Add("descriptor identity");
-                        affected.Add("symlink rejection");
-                        affected.Add("archive-input symlink rejection");
-                        affected.Add("container-private archive-input snapshot");
-                        affected.Add("overlapping archive-input normalization");
-                        affected.Add("descriptor-bound private snapshot");
-                    }
-                    if (file.Contains("RecoveryService") || file.Contains("Kpar2"))
-                    {
-                        affected.Add("KPAR2-v3 repair, authentication and transplantation rejection");
-                        affected.Add("KPAR2-v3 accepts every catalogued suite, not just the first two");
-                    }
-                    if (file.Contains("MainWindow") || file.Contains("MacGuiTests") || file.Contains("Avalonia"))
-                    {
-                        affected.Add("GUI entropy display beyond the 512 minimum");
-                        affected.Add("GUI encryption toggle and target normalization");
-                        affected.Add("GUI folder target lands beside the folder");
-                        affected.Add("GUI password policy feedback");
-                        affected.Add("GUI verified-original-deletion localization");
-                        affected.Add("GUI reference control inventory");
-                        affected.Add("GUI 256-character factor normalization and field handling");
-                        affected.Add("GUI secret clearing wipes password, PIN, and factors");
-                        affected.Add("GUI KDF and entropy profile description localization");
-                        affected.Add("GUI full creation flow with mouse sampling and factor generation");
-                    }
-                    if (file.Contains("QrCodeScanner") || file.Contains("QR-Scanner") || file.Contains("Verify-QR-Scanner"))
-                    {
-                        affected.Add("the companion QR scanner is checked against the pinned keys");
-                        affected.Add("release companion version plumbing");
-                    }
-                    if (file.Contains("Packaging") || file.Contains("HybridSigner") || file.Contains("Integrity"))
-                    {
-                        affected.Add("signed native trust and tamper rejection");
-                        affected.Add("every Mach-O in the release bundle carries a hybrid signature");
-                        affected.Add("ML-DSA-87 managed/reference interoperability");
-                    }
-                    if (file.Contains("Threefish") || file.Contains("Kalyna") || file.Contains("Sha3") || file.Contains("Skein") || file.Contains("Mars") || file.Contains("Shacal"))
-                    {
-                        affected.Add("SHA3, Skein, Kalyna and Threefish reference vectors");
-                        affected.Add("cascade layering: the outer layer alone reveals nothing");
-                        affected.Add("v10 two-round key derivation from one pool consumption");
-                        affected.Add("salt and nonce for every single-round suite without prepared entropy");
-                        affected.Add("v10 per-chunk nonces across a multi-chunk archive");
-                        affected.Add("MARS and SHACAL-2 published vectors and CTR behaviour");
-                        affected.Add("randomised differential testing against every reference library");
+                        anySuccess = true;
+                        string[] files = output.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+                        foreach (var f in files) allFiles.Add(f);
                     }
                 }
             }
+
+            if (!anySuccess)
+            {
+                return null;
+            }
+
+            if (allFiles.Count == 0)
+            {
+                return affected;
+            }
+
+            foreach (string file in allFiles)
+            {
+                if (file.Contains("V10MasterKdf") || file.Contains("V10Primitives") || file.Contains("PasswordKeyService"))
+                {
+                    affected.Add("v10 primitives against independent second implementations");
+                    affected.Add("v10 master KDF: credential binding, PMI range and round chaining");
+                    affected.Add("Argon2id fixed 1 GiB profile and independent equivalence");
+                    affected.Add("v10 peak memory stays at one Argon2 matrix, and the header leaks nothing");
+                    affected.Add("password policy and KEEPVAULT term rejection");
+                    affected.Add("v10 creation PIN policy and weak-pattern rejection");
+                    affected.Add("v10 suite roundtrips and manipulation rejection");
+                }
+                if (file.Contains("ZpaqService") || file.Contains("MacPlatformSecurity") || file.Contains("MacSecureFile") || file.Contains("MacOriginalDeletionService"))
+                {
+                    affected.Add("ZPAQ levels, streaming, traversal and malformed corpus");
+                    affected.Add("verified original deletion refuses on any mismatch");
+                    affected.Add("cryptographic erase ordering and hard-link refusal");
+                    affected.Add("descriptor identity");
+                    affected.Add("symlink rejection");
+                    affected.Add("archive-input symlink rejection");
+                    affected.Add("container-private archive-input snapshot");
+                    affected.Add("overlapping archive-input normalization");
+                    affected.Add("descriptor-bound private snapshot");
+                }
+                if (file.Contains("RecoveryService") || file.Contains("Kpar2"))
+                {
+                    affected.Add("KPAR2-v3 repair, authentication and transplantation rejection");
+                    affected.Add("KPAR2-v3 accepts every catalogued suite, not just the first two");
+                }
+                if (file.Contains("MainWindow") || file.Contains("MacGuiTests") || file.Contains("Avalonia"))
+                {
+                    affected.Add("GUI entropy display beyond the 512 minimum");
+                    affected.Add("GUI encryption toggle and target normalization");
+                    affected.Add("GUI folder target lands beside the folder");
+                    affected.Add("GUI password policy feedback");
+                    affected.Add("GUI verified-original-deletion localization");
+                    affected.Add("GUI reference control inventory");
+                    affected.Add("GUI 256-character factor normalization and field handling");
+                    affected.Add("GUI secret clearing wipes password, PIN, and factors");
+                    affected.Add("GUI KDF and entropy profile description localization");
+                    affected.Add("GUI full creation flow with mouse sampling and factor generation");
+                }
+                if (file.Contains("QrCodeScanner") || file.Contains("QR-Scanner") || file.Contains("Verify-QR-Scanner"))
+                {
+                    affected.Add("the companion QR scanner is checked against the pinned keys");
+                    affected.Add("release companion version plumbing");
+                }
+                if (file.Contains("Packaging") || file.Contains("HybridSigner") || file.Contains("Integrity"))
+                {
+                    affected.Add("signed native trust and tamper rejection");
+                    affected.Add("every Mach-O in the release bundle carries a hybrid signature");
+                    affected.Add("ML-DSA-87 managed/reference interoperability");
+                }
+                if (file.Contains("Threefish") || file.Contains("Kalyna") || file.Contains("Sha3") || file.Contains("Skein") || file.Contains("Mars") || file.Contains("Shacal"))
+                {
+                    affected.Add("SHA3, Skein, Kalyna and Threefish reference vectors");
+                    affected.Add("cascade layering: the outer layer alone reveals nothing");
+                    affected.Add("v10 two-round key derivation from one pool consumption");
+                    affected.Add("salt and nonce for every single-round suite without prepared entropy");
+                    affected.Add("v10 per-chunk nonces across a multi-chunk archive");
+                    affected.Add("MARS and SHACAL-2 published vectors and CTR behaviour");
+                    affected.Add("randomised differential testing against every reference library");
+                }
+            }
+            return affected;
         }
         catch
         {
+            return null;
         }
-        return affected;
     }
 
     private static Dictionary<string, double> LoadTimings(string path)

@@ -84,12 +84,26 @@ if ! codesign -v --strict ${app_path}; then
 fi
 
 app_signature=$(codesign -dvvv ${app_path} 2>&1)
-if [[ ${app_signature} == *"TeamIdentifier=${expected_team}"* ]]; then
-  print "team_id=${expected_team}"
-elif (( allow_development )) && [[ ${app_signature} == *'Authority=Apple Development:'* ]]; then
-  print 'team_id=development (accepted by --allow-development)'
+if [[ ${app_signature} == *'Authority=Developer ID Application:'* ]]; then
+  if [[ ${app_signature} == *"TeamIdentifier=${expected_team}"* ]]; then
+    print "team_id=${expected_team}"
+  else
+    print -u2 "The QR-Scanner is signed with Developer ID, but not with pinned Team ID ${expected_team}."
+    exit 1
+  fi
+elif [[ ${app_signature} == *'Authority=Apple Development:'* ]]; then
+  if (( ! allow_development )); then
+    print -u2 'The QR-Scanner is signed with Apple Development, but --allow-development was not specified.'
+    exit 1
+  fi
+  if [[ ${app_signature} == *"TeamIdentifier=${expected_team}"* ]]; then
+    print 'team_id=development (accepted by --allow-development)'
+  else
+    print -u2 "The QR-Scanner is signed with Apple Development, but not with pinned Team ID ${expected_team}."
+    exit 1
+  fi
 else
-  print -u2 "The QR-Scanner is not signed with pinned Team ID ${expected_team}."
+  print -u2 'The QR-Scanner does not have a recognized Developer ID Application or Apple Development signature.'
   exit 1
 fi
 

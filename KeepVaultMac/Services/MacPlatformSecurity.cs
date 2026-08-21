@@ -9,11 +9,11 @@ namespace KalynaArchiver.Services;
 
 internal static partial class MacSafeFileSystem
 {
-    private const int OpenReadOnly = 0x0000;
-    private const int OpenReadWrite = 0x0002;
-    private const int OpenDirectory = 0x00100000;
-    private const int OpenCloseOnExec = 0x01000000;
-    private const int OpenNoFollowAny = 0x20000000;
+    internal const int OpenReadOnly = 0x0000;
+    internal const int OpenReadWrite = 0x0002;
+    internal const int OpenDirectory = 0x00100000;
+    internal const int OpenCloseOnExec = 0x01000000;
+    internal const int OpenNoFollowAny = 0x20000000;
     private const uint CloneNoOwnerCopy = 0x0002;
     private const uint CloneNoFollowAny = 0x0008;
     private const uint CloneResolveBeneath = 0x0010;
@@ -511,6 +511,60 @@ internal static partial class MacSafeFileSystem
         }
     }
 
+    internal static bool IsDirectoryEmptyDescriptor(SafeFileHandle dirHandle)
+    {
+        ArgumentNullException.ThrowIfNull(dirHandle);
+        bool added = false;
+        try
+        {
+            dirHandle.DangerousAddRef(ref added);
+            int fd = checked((int)dirHandle.DangerousGetHandle());
+            int dupFd = Dup(fd);
+            if (dupFd < 0)
+            {
+                throw new Win32Exception(Marshal.GetLastPInvokeError(), "macOS could not dup directory descriptor.");
+            }
+            nint dirp = FdOpenDir(dupFd);
+            if (dirp == 0)
+            {
+                CloseDescriptor(dupFd);
+                throw new Win32Exception(Marshal.GetLastPInvokeError(), "macOS fdopendir failed.");
+            }
+            try
+            {
+                while (true)
+                {
+                    nint entryPtr = ReadDir(dirp);
+                    if (entryPtr == 0)
+                    {
+                        break;
+                    }
+                    unsafe
+                    {
+                        var entry = (DarwinDirent*)entryPtr;
+                        string name = Marshal.PtrToStringUTF8((nint)entry->d_name, entry->d_namlen);
+                        if (name is not ("." or ".."))
+                        {
+                            return false;
+                        }
+                    }
+                }
+                return true;
+            }
+            finally
+            {
+                CloseDir(dirp);
+            }
+        }
+        finally
+        {
+            if (added)
+            {
+                dirHandle.DangerousRelease();
+            }
+        }
+    }
+
     internal static void DeleteDirectoryContentsDescriptor(SafeFileHandle dirHandle)
     {
         ArgumentNullException.ThrowIfNull(dirHandle);
@@ -547,7 +601,17 @@ internal static partial class MacSafeFileSystem
                         {
                             continue;
                         }
-                        if (entry->d_type == 4 /* DT_DIR */)
+
+                        bool isDirectory = entry->d_type == 4 /* DT_DIR */;
+                        if (entry->d_type == 0 /* DT_UNKNOWN */)
+                        {
+                            if (FStatAt(fd, name, out DarwinStat status, 0x0020 /* AT_SYMLINK_NOFOLLOW */) == 0)
+                            {
+                                isDirectory = (status.Mode & 0xF000 /* S_IFMT */) == 0x4000 /* S_IFDIR */;
+                            }
+                        }
+
+                        if (isDirectory)
                         {
                             int subFd = PInvokeOpenAt(fd, name, OpenReadOnly | OpenDirectory | OpenCloseOnExec | OpenNoFollowAny, 0);
                             if (subFd >= 0)
@@ -557,11 +621,25 @@ internal static partial class MacSafeFileSystem
                                     DeleteDirectoryContentsDescriptor(subHandle);
                                 }
                             }
-                            PInvokeUnlinkAt(fd, name, 0x0080 /* AT_REMOVEDIR */);
+                            if (PInvokeUnlinkAt(fd, name, 0x0080 /* AT_REMOVEDIR */) != 0)
+                            {
+                                int err = Marshal.GetLastPInvokeError();
+                                if (err != 2 /* ENOENT */)
+                                {
+                                    throw new Win32Exception(err, $"Could not remove directory '{name}'.");
+                                }
+                            }
                         }
                         else
                         {
-                            PInvokeUnlinkAt(fd, name, 0);
+                            if (PInvokeUnlinkAt(fd, name, 0) != 0)
+                            {
+                                int err = Marshal.GetLastPInvokeError();
+                                if (err != 2 /* ENOENT */)
+                                {
+                                    throw new Win32Exception(err, $"Could not unlink entry '{name}'.");
+                                }
+                            }
                         }
                     }
                 }
@@ -990,22 +1068,47 @@ internal sealed class MacExtractionStaging : IDisposable
         }
         catch (Win32Exception ex) when (ex.NativeErrorCode == 17 /* EEXIST */)
         {
-            if (Directory.Exists(DestinationPath))
+            bool parentAdded = false;
+            bool removed = false;
+            try
             {
-                FileAttributes attributes = File.GetAttributes(DestinationPath);
-                if ((attributes & FileAttributes.ReparsePoint) == 0 && !Directory.EnumerateFileSystemEntries(DestinationPath).Any())
+                _parentHandle.DangerousAddRef(ref parentAdded);
+                int parentFd = checked((int)_parentHandle.DangerousGetHandle());
+                int destFd = MacSafeFileSystem.PInvokeOpenAt(
+                    parentFd,
+                    destName,
+                    MacSafeFileSystem.OpenReadOnly | MacSafeFileSystem.OpenDirectory | MacSafeFileSystem.OpenNoFollowAny | MacSafeFileSystem.OpenCloseOnExec,
+                    0);
+                if (destFd >= 0)
                 {
-                    Directory.Delete(DestinationPath);
-                    MacSafeFileSystem.RenameAtExclusive(_parentHandle, StagingName, _parentHandle, destName);
+                    using (var existingHandle = new SafeFileHandle(destFd, ownsHandle: true))
+                    {
+                        if (MacSafeFileSystem.IsDirectoryEmptyDescriptor(existingHandle))
+                        {
+                            // 0x0080 is AT_REMOVEDIR on macOS
+                            if (MacSafeFileSystem.PInvokeUnlinkAt(parentFd, destName, 0x0080) == 0)
+                            {
+                                removed = true;
+                            }
+                        }
+                    }
                 }
-                else
+            }
+            finally
+            {
+                if (parentAdded)
                 {
-                    throw new IOException("The extraction target changed or is not empty before installation.", ex);
+                    _parentHandle.DangerousRelease();
                 }
+            }
+
+            if (removed)
+            {
+                MacSafeFileSystem.RenameAtExclusive(_parentHandle, StagingName, _parentHandle, destName);
             }
             else
             {
-                throw new IOException("A file appeared at the extraction target before installation.", ex);
+                throw new IOException("The extraction target changed or is not empty before installation.", ex);
             }
         }
 

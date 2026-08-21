@@ -34,7 +34,32 @@ internal static partial class MacComprehensiveTests
     private const string UserPin = "428317";
     private const string WrongPassword = "Q!m8$Ls2#Vx7%Tp4&Jd9*Wr5+Kn6=Zu3?Ce";
 
+    private static readonly AsyncLocal<Random?> CurrentPrng = new();
     internal static uint? TestSeed { get; set; }
+
+    internal static void SetCurrentPrng(Random? random)
+    {
+        CurrentPrng.Value = random;
+    }
+
+    internal static byte[] GetRandomTestBytes(int count)
+    {
+        byte[] bytes = new byte[count];
+        FillRandomTestBytes(bytes);
+        return bytes;
+    }
+
+    internal static void FillRandomTestBytes(Span<byte> destination)
+    {
+        if (CurrentPrng.Value is { } prng)
+        {
+            prng.NextBytes(destination);
+        }
+        else
+        {
+            RandomNumberGenerator.Fill(destination);
+        }
+    }
 
     internal static IReadOnlyList<TestCase> AllTests =>
     [
@@ -1344,12 +1369,12 @@ internal static partial class MacComprehensiveTests
 
         foreach (int length in lengths)
         {
-            byte[] message = RandomNumberGenerator.GetBytes(length);
+            byte[] message = GetRandomTestBytes(length);
             // HMAC accepts any key length, and varying it exercises the
             // shorter-than-block, exactly-block and longer-than-block paths.
             // Skein's keyed mode takes a fixed 128-byte key.
-            byte[] key = RandomNumberGenerator.GetBytes(length % 97 == 0 ? 64 : (length % 97) + 1);
-            byte[] skeinKey = RandomNumberGenerator.GetBytes(128);
+            byte[] key = GetRandomTestBytes(length % 97 == 0 ? 64 : (length % 97) + 1);
+            byte[] skeinKey = GetRandomTestBytes(128);
             try
             {
                 Require(
@@ -1395,12 +1420,12 @@ internal static partial class MacComprehensiveTests
         // keystream. Sizes span the parallel-processing threshold.
         foreach (int length in new[] { 1, 63, 64, 65, 4096, 1 << 20 })
         {
-            byte[] plaintext = RandomNumberGenerator.GetBytes(length);
-            byte[] kalynaKey = RandomNumberGenerator.GetBytes(64);
-            byte[] kalynaNonce = RandomNumberGenerator.GetBytes(64);
-            byte[] threefishKey = RandomNumberGenerator.GetBytes(128);
-            byte[] threefishTweak = RandomNumberGenerator.GetBytes(16);
-            byte[] threefishNonce = RandomNumberGenerator.GetBytes(128);
+            byte[] plaintext = GetRandomTestBytes(length);
+            byte[] kalynaKey = GetRandomTestBytes(64);
+            byte[] kalynaNonce = GetRandomTestBytes(64);
+            byte[] threefishKey = GetRandomTestBytes(128);
+            byte[] threefishTweak = GetRandomTestBytes(16);
+            byte[] threefishNonce = GetRandomTestBytes(128);
             byte[] kalynaOut = new byte[length];
             byte[] kalynaBack = new byte[length];
             byte[] threefishOut = new byte[length];
@@ -2531,13 +2556,11 @@ internal static partial class MacComprehensiveTests
                 }
             }
 
-            // Test MarkForDeletion rollback when victim path is occupied by another new file
+            // Test MarkForDeletion rollback when victim path is occupied by another new file (squatter)
             string victimPath2 = Path.Combine(root, "victim2.txt");
             string foreignPath2 = Path.Combine(root, "foreign2.txt");
-            string squatterPath = Path.Combine(root, "squatter.txt");
             await File.WriteAllTextAsync(victimPath2, "victim2 content").ConfigureAwait(false);
             await File.WriteAllTextAsync(foreignPath2, "foreign2 content").ConfigureAwait(false);
-            await File.WriteAllTextAsync(squatterPath, "squatter content").ConfigureAwait(false);
 
             using (FileStream victimStream2 = MacSafeFileSystem.OpenReadNoSymlinks(victimPath2))
             {
@@ -2547,9 +2570,14 @@ internal static partial class MacComprehensiveTests
                     File.Move(foreignPath2, victimPath2);
                 };
 
+                SecureFile.TestHookBeforeRollback = () =>
+                {
+                    // Adversary introduces squatter file at original victimPath2 before rollback rename runs
+                    File.WriteAllText(victimPath2, "squatter content");
+                };
+
                 try
                 {
-                    // Introduce squatter right after rename but before restore
                     bool threw = false;
                     try
                     {
@@ -2558,15 +2586,19 @@ internal static partial class MacComprehensiveTests
                     catch (InvalidOperationException ex)
                     {
                         threw = true;
-                        Require(ex.Message.Contains("Foreign item preserved safely in quarantine", StringComparison.Ordinal)
-                            || ex.Message.Contains("Foreign item restored", StringComparison.Ordinal),
-                            "MarkForDeletion did not handle mismatch safely.");
+                        Require(ex.Message.Contains("Original path", StringComparison.Ordinal)
+                            && ex.Message.Contains("occupied or restore failed", StringComparison.Ordinal)
+                            && ex.Message.Contains("Foreign item preserved safely in quarantine under", StringComparison.Ordinal),
+                            "MarkForDeletion did not report squatter quarantine details: " + ex.Message);
                     }
-                    Require(threw, "MarkForDeletion did not reject identity mismatch.");
+                    Require(threw, "MarkForDeletion did not reject identity mismatch when squatter occupied original path.");
+                    Require(File.Exists(victimPath2), "Squatter file disappeared.");
+                    Require(File.ReadAllText(victimPath2) == "squatter content", "Squatter content was overwritten.");
                 }
                 finally
                 {
                     SecureFile.TestHookBeforeRename = null;
+                    SecureFile.TestHookBeforeRollback = null;
                 }
             }
 

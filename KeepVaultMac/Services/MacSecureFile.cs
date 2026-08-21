@@ -72,6 +72,7 @@ public static partial class SecureFile
     }
 
     internal static Action? TestHookBeforeRename { get; set; }
+    internal static Action? TestHookBeforeRollback { get; set; }
 
     internal static void MarkForDeletion(FileStream stream, string path)
     {
@@ -100,6 +101,7 @@ public static partial class SecureFile
 
         if (!handleIdentity.SameObject(quarantineIdentity))
         {
+            TestHookBeforeRollback?.Invoke();
             // Identity mismatch indicates a race substitution. NEVER unlink the quarantine entry!
             // Attempt descriptor-relative exclusive rollback if the original name is free.
             bool restored = false;
@@ -120,9 +122,10 @@ public static partial class SecureFile
             }
             else
             {
+                string fullQuarantinePath = Path.Combine(canonicalParent, quarantineName);
                 throw new InvalidOperationException(
                     $"Quarantined file identity mismatch after rename for '{path}'. Original path '{oldName}' is occupied or restore failed. "
-                    + $"Foreign item preserved safely in quarantine under '{quarantineName}'; deletion aborted.");
+                    + $"Foreign item preserved safely in quarantine under '{fullQuarantinePath}'; deletion aborted.");
             }
         }
 
@@ -131,20 +134,63 @@ public static partial class SecureFile
 
         // Move to a unique, private cleanup subdirectory inside parent directory to eliminate any final race window
         string cleanDirName = ".keepvault_clean_" + Guid.NewGuid().ToString("N");
-        MacSafeFileSystem.MkdirAt(parentHandle, cleanDirName, 0x1C0 /* 0700 */);
-        using (SafeFileHandle cleanDirHandle = MacSafeFileSystem.OpenDirectoryHandleAt(parentHandle, cleanDirName))
+        bool cleanDirCreated = false;
+        bool targetMoved = false;
+        bool targetUnlinked = false;
+        try
         {
-            const string cleanTargetName = "target";
-            MacSafeFileSystem.RenameAtExclusive(parentHandle, quarantineName, cleanDirHandle, cleanTargetName);
-            MacFileIdentity cleanEntryIdentity = MacSafeFileSystem.GetIdentityAt(cleanDirHandle, cleanTargetName);
-            if (!cleanEntryIdentity.SameObject(handleIdentity))
+            MacSafeFileSystem.MkdirAt(parentHandle, cleanDirName, 0x1C0 /* 0700 */);
+            cleanDirCreated = true;
+            using (SafeFileHandle cleanDirHandle = MacSafeFileSystem.OpenDirectoryHandleAt(parentHandle, cleanDirName))
             {
-                throw new InvalidOperationException("Final cleanup entry identity mismatch; deletion aborted.");
+                const string cleanTargetName = "target";
+                MacSafeFileSystem.RenameAtExclusive(parentHandle, quarantineName, cleanDirHandle, cleanTargetName);
+                targetMoved = true;
+
+                MacFileIdentity cleanEntryIdentity = MacSafeFileSystem.GetIdentityAt(cleanDirHandle, cleanTargetName);
+                if (!cleanEntryIdentity.SameObject(handleIdentity))
+                {
+                    throw new InvalidOperationException(
+                        $"Final cleanup entry identity mismatch; deletion aborted. Target preserved safely in '{Path.Combine(canonicalParent, cleanDirName, cleanTargetName)}'.");
+                }
+
+                MacSafeFileSystem.UnlinkAt(cleanDirHandle, cleanTargetName);
+                targetUnlinked = true;
             }
-
-            MacSafeFileSystem.UnlinkAt(cleanDirHandle, cleanTargetName);
         }
+        finally
+        {
+            if (cleanDirCreated)
+            {
+                if (targetMoved && !targetUnlinked)
+                {
+                    try
+                    {
+                        using SafeFileHandle cleanDirHandle = MacSafeFileSystem.OpenDirectoryHandleAt(parentHandle, cleanDirName);
+                        const string cleanTargetName = "target";
+                        MacFileIdentity entryIdentity = MacSafeFileSystem.GetIdentityAt(cleanDirHandle, cleanTargetName);
+                        if (entryIdentity.SameObject(handleIdentity))
+                        {
+                            MacSafeFileSystem.UnlinkAt(cleanDirHandle, cleanTargetName);
+                            targetUnlinked = true;
+                        }
+                    }
+                    catch
+                    {
+                    }
+                }
 
-        MacSafeFileSystem.UnlinkAt(parentHandle, cleanDirName, 0x0080 /* AT_REMOVEDIR */);
+                if (!targetMoved || targetUnlinked)
+                {
+                    try
+                    {
+                        MacSafeFileSystem.UnlinkAt(parentHandle, cleanDirName, 0x0080 /* AT_REMOVEDIR */);
+                    }
+                    catch
+                    {
+                    }
+                }
+            }
+        }
     }
 }

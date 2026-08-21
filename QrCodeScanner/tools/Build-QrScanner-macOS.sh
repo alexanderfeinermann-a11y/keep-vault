@@ -167,9 +167,10 @@ mkdir -p ${macos_dir} ${resources_dir}
 # and that rule is the reason this app exists, so it is checked before anything
 # is signed rather than after.
 if (( run_tests )); then
+  host_arch=$(uname -m)
   test_binary=${build_root}/ArbiterTests
   xcrun swiftc \
-    -target arm64-apple-macos${deployment_target} \
+    -target ${host_arch}-apple-macos${deployment_target} \
     -O -parse-as-library \
     ${sources_dir}/CodeArbiter.swift \
     ${sources_dir}/PayloadInspector.swift \

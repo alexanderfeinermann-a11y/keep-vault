@@ -59,14 +59,7 @@ if [[ -z ${source_app} ]]; then
       source_app=${dist_candidate}
     fi
   else
-    if [[ -d ${dist_candidate} ]]; then
-      source_app=${dist_candidate}
-    elif [[ -d ${dev_candidate} ]]; then
-      source_app=${dev_candidate}
-      allow_development=1
-    else
-      source_app=${dist_candidate}
-    fi
+    source_app=${dist_candidate}
   fi
 fi
 
@@ -133,6 +126,7 @@ transaction_committed=0
 anchor_updated=0
 had_existing_anchor=0
 recorded_version=0
+rollback_failed=0
 
 anchor_directory='/Library/Application Support/Keep Vault'
 anchor_path=${anchor_directory}/minimum-version
@@ -141,6 +135,26 @@ if [[ -e ${anchor_path} || -L ${anchor_path} ]]; then
   if [[ -L ${anchor_path} || ! -f ${anchor_path} ]]; then
     release_lock
     print -u2 "The machine-wide rollback anchor is corrupted or a symlink: ${anchor_path}"
+    exit 1
+  fi
+  if [[ -L ${anchor_directory} || ! -d ${anchor_directory} ]]; then
+    release_lock
+    print -u2 "The rollback anchor directory is invalid or a symlink: ${anchor_directory}"
+    exit 1
+  fi
+  anchor_dir_uid=$(stat -f '%u' ${anchor_directory} 2>/dev/null || print -1)
+  anchor_dir_mode=$(stat -f '%Lp' ${anchor_directory} 2>/dev/null || print 0)
+  if (( anchor_dir_uid != 0 || (8#${anchor_dir_mode} & 8#022) != 0 )); then
+    release_lock
+    print -u2 "The rollback anchor directory has insecure owner/permissions: ${anchor_directory}"
+    exit 1
+  fi
+  anchor_uid=$(stat -f '%u' ${anchor_path} 2>/dev/null || print -1)
+  anchor_links=$(stat -f '%l' ${anchor_path} 2>/dev/null || print 0)
+  anchor_mode=$(stat -f '%Lp' ${anchor_path} 2>/dev/null || print 0)
+  if (( anchor_uid != 0 || anchor_links != 1 || (8#${anchor_mode} & 8#022) != 0 )); then
+    release_lock
+    print -u2 "The rollback anchor file has insecure owner/permissions or multiple links: ${anchor_path}"
     exit 1
   fi
   had_existing_anchor=1
@@ -157,18 +171,23 @@ execute_rollback() {
     transaction_active=0
     set +e
     print -u2 'Installation incomplete or verification failed; executing unified rollback transaction...'
+    rollback_errors=()
 
     # Rollback Keep Vault
     if (( has_existing_installation )) && [[ -d ${backup_path} && ! -L ${backup_path} ]]; then
       failed_name=.Keep\ Vault.failed.$(date -u +%Y%m%dT%H%M%SZ).app
-      atomic_replace ${destination} ${backup_path} ${failed_name}
+      if ! atomic_replace ${destination} ${backup_path} ${failed_name}; then
+        rollback_errors+=("Failed to restore previous Keep Vault app bundle from ${backup_path}")
+      fi
       for launcher_sidecar_suffix in .sha3 .skein .khsig .sha3.khsig .skein.khsig; do
         if [[ -f ${backup_dir}/Keep\ Vault.app.launcher${launcher_sidecar_suffix} ]]; then
-          ditto ${backup_dir}/Keep\ Vault.app.launcher${launcher_sidecar_suffix} \
-            ${applications_dir}/Keep\ Vault.app.launcher${launcher_sidecar_suffix}
+          if ! ditto ${backup_dir}/Keep\ Vault.app.launcher${launcher_sidecar_suffix} \
+            ${applications_dir}/Keep\ Vault.app.launcher${launcher_sidecar_suffix}; then
+            rollback_errors+=("Failed to restore launcher signature ${launcher_sidecar_suffix}")
+          fi
         fi
       done
-      print -u2 'Previous Keep Vault app and launcher signatures restored.'
+      print -u2 'Previous Keep Vault app and launcher signatures restore attempted.'
     elif [[ -d ${destination} && ! -L ${destination} ]]; then
       rm -rf -- ${destination}
       for launcher_sidecar_suffix in .sha3 .skein .khsig .sha3.khsig .skein.khsig; do
@@ -180,14 +199,18 @@ execute_rollback() {
     if (( install_scanner )); then
       if (( has_existing_scanner )) && [[ -d ${scanner_backup_path} && ! -L ${scanner_backup_path} ]]; then
         scanner_failed_name=.QR-Scanner.failed.$(date -u +%Y%m%dT%H%M%SZ).app
-        atomic_replace ${scanner_destination} ${scanner_backup_path} ${scanner_failed_name}
+        if ! atomic_replace ${scanner_destination} ${scanner_backup_path} ${scanner_failed_name}; then
+          rollback_errors+=("Failed to restore previous QR-Scanner app bundle from ${scanner_backup_path}")
+        fi
         for scanner_sidecar_suffix in .sha3 .skein .khsig .sha3.khsig .skein.khsig; do
           if [[ -f ${backup_dir}/QR-Scanner.app${scanner_sidecar_suffix} ]]; then
-            ditto ${backup_dir}/QR-Scanner.app${scanner_sidecar_suffix} \
-              ${applications_dir}/QR-Scanner.app${scanner_sidecar_suffix}
+            if ! ditto ${backup_dir}/QR-Scanner.app${scanner_sidecar_suffix} \
+              ${applications_dir}/QR-Scanner.app${scanner_sidecar_suffix}; then
+              rollback_errors+=("Failed to restore scanner signature ${scanner_sidecar_suffix}")
+            fi
           fi
         done
-        print -u2 'Previous QR-Scanner app and signatures restored.'
+        print -u2 'Previous QR-Scanner app and signatures restore attempted.'
       elif [[ -d ${scanner_destination} && ! -L ${scanner_destination} ]]; then
         rm -rf -- ${scanner_destination}
         for scanner_sidecar_suffix in .sha3 .skein .khsig .sha3.khsig .skein.khsig; do
@@ -199,19 +222,49 @@ execute_rollback() {
     # Rollback Anchor if modified
     if (( anchor_updated )); then
       if (( had_existing_anchor )); then
-        ANCHOR_PATH=${anchor_path} PREV_VERSION=${recorded_version} osascript <<'APPLESCRIPT'
+        ANCHOR_PATH=${anchor_path} PREV_VERSION=${recorded_version} osascript <<'APPLESCRIPT' || rollback_errors+=("Failed to restore rollback anchor")
 set anchorPath to system attribute "ANCHOR_PATH"
 set prevVersion to system attribute "PREV_VERSION"
 set commandText to "/usr/bin/printf '%s' " & quoted form of prevVersion & " > " & quoted form of anchorPath
 do shell script commandText with administrator privileges
 APPLESCRIPT
       else
-        ANCHOR_PATH=${anchor_path} osascript <<'APPLESCRIPT'
+        ANCHOR_PATH=${anchor_path} osascript <<'APPLESCRIPT' || rollback_errors+=("Failed to remove rollback anchor")
 set anchorPath to system attribute "ANCHOR_PATH"
 set commandText to "/bin/rm -f " & quoted form of anchorPath
 do shell script commandText with administrator privileges
 APPLESCRIPT
       fi
+    fi
+
+    # Re-verify restored state if we had an existing installation
+    if (( has_existing_installation )) && [[ -d ${destination} ]]; then
+      rollback_kv_flags=(--app ${destination} --require-launcher-signature)
+      (( allow_development )) && rollback_kv_flags+=(--allow-development)
+      if ! ${script_dir}/Verify-KeepVault-macOS.sh ${rollback_kv_flags[@]} >/dev/null 2>&1; then
+        rollback_errors+=("Restored Keep Vault app failed post-rollback verification.")
+      fi
+    fi
+
+    if (( has_existing_scanner )) && [[ -d ${scanner_destination} ]]; then
+      rollback_scanner_flags=(--app ${scanner_destination})
+      (( allow_development )) && rollback_scanner_flags+=(--allow-development)
+      if ! ${script_dir}/Verify-QR-Scanner-macOS.sh ${rollback_scanner_flags[@]} >/dev/null 2>&1; then
+        rollback_errors+=("Restored QR-Scanner app failed post-rollback verification.")
+      fi
+    fi
+
+    if (( ${#rollback_errors[@]} > 0 )); then
+      rollback_failed=1
+      print -u2 'CRITICAL: Rollback failed to completely restore the previous state!'
+      for err in ${rollback_errors[@]}; do
+        print -u2 "  - ${err}"
+      done
+      print -u2 "Backup directory preserved for manual recovery: ${backup_dir}"
+      [[ -d ${backup_path} ]] && print -u2 "App backup preserved at: ${backup_path}"
+      [[ -d ${scanner_backup_path} ]] && print -u2 "Scanner backup preserved at: ${scanner_backup_path}"
+    else
+      print -u2 'Rollback completed and restored state verified successfully.'
     fi
     set -e
   fi
@@ -219,8 +272,12 @@ APPLESCRIPT
 
 cleanup() {
   execute_rollback
-  if [[ -n ${install_root:-} && -d ${install_root} && ${install_root} == ${applications_dir}/.keep-vault-install.* ]]; then
-    rm -rf -- ${install_root}
+  if (( ! ${rollback_failed:-0} )); then
+    if [[ -n ${install_root:-} && -d ${install_root} && ${install_root} == ${applications_dir}/.keep-vault-install.* ]]; then
+      rm -rf -- ${install_root}
+    fi
+  else
+    print -u2 "CRITICAL: Retaining installation root and backups at ${install_root} due to rollback failure."
   fi
   if [[ -n ${temporary_alias_path:-} && -f ${temporary_alias_path} && ! -L ${temporary_alias_path} ]]; then
     rm -- ${temporary_alias_path}
@@ -244,7 +301,11 @@ done
 # Check if staged app is signed with Apple Development or Developer ID
 staged_sig=$(codesign -dvvv ${staged_app} 2>&1 || true)
 if [[ ${staged_sig} == *'Authority=Apple Development:'* ]]; then
-  allow_development=1
+  if (( ! allow_development )); then
+    release_lock
+    print -u2 'The staged Keep Vault app is signed with Apple Development, but --development was not specified.'
+    exit 1
+  fi
 fi
 
 kv_verify_flags=(--app ${staged_app} --require-launcher-signature)

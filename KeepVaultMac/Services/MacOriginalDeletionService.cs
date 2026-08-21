@@ -234,34 +234,49 @@ internal sealed class MacOriginalDeletionService
     {
         ArgumentNullException.ThrowIfNull(originals);
         ArgumentNullException.ThrowIfNull(originalsVerified);
-        ArchiveIdentity current;
+        ArgumentException.ThrowIfNullOrWhiteSpace(archivePath);
+
+        FileStream archiveStream;
+        MacFileIdentity archiveIdentity;
         try
         {
-            current = CaptureArchiveIdentity(archivePath);
+            archiveStream = MacSafeFileSystem.OpenReadNoSymlinks(archivePath);
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
             return [$"{Path.GetFileName(archivePath)}: {exception.Message}"];
         }
 
-        if (current.Length != verified.Length
-            || !CryptographicOperations.FixedTimeEquals(
-                Convert.FromHexString(current.Digest),
-                Convert.FromHexString(verified.Digest)))
+        using (archiveStream)
         {
-            return [
-                "Das Archiv wurde zwischen Prüfung und Löschung verändert; "
-                + "es wurde nichts gelöscht."
-            ];
-        }
+            try
+            {
+                archiveIdentity = MacSafeFileSystem.GetIdentity(archiveStream.SafeFileHandle);
+                byte[] digest = SHA512.HashData(archiveStream);
+                if (archiveStream.Length != verified.Length
+                    || !CryptographicOperations.FixedTimeEquals(
+                        digest,
+                        Convert.FromHexString(verified.Digest)))
+                {
+                    return [
+                        "Das Archiv wurde zwischen Prüfung und Löschung verändert; "
+                        + "es wurde nichts gelöscht."
+                    ];
+                }
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+                return [$"{Path.GetFileName(archivePath)}: {exception.Message}"];
+            }
 
-        string? drift = FindOriginalDrift(originals, originalsVerified);
-        if (drift is not null)
-        {
-            return [drift];
-        }
+            string? drift = FindOriginalDrift(originals, originalsVerified);
+            if (drift is not null)
+            {
+                return [drift];
+            }
 
-        return DeleteVerifiedFiles(originals, originalsVerified);
+            return DeleteVerifiedFiles(originals, originalsVerified, archivePath, archiveStream, archiveIdentity, verified);
+        }
     }
 
     /// <summary>
@@ -383,7 +398,11 @@ internal sealed class MacOriginalDeletionService
     /// </remarks>
     private static IReadOnlyList<string> DeleteVerifiedFiles(
         IReadOnlyList<string> originals,
-        OriginalSnapshot verified)
+        OriginalSnapshot verified,
+        string archivePath,
+        FileStream archiveStream,
+        MacFileIdentity archiveIdentity,
+        ArchiveIdentity verifiedArchive)
     {
         var failures = new List<string>();
         var quarantined = new List<QuarantinedItem>();
@@ -452,6 +471,24 @@ internal sealed class MacOriginalDeletionService
                 {
                     throw new InvalidDataException($"Verzeichniseintrag in Quarantäne wurde modifiziert für {item.OriginalPath}");
                 }
+            }
+
+            // Stage 2.5: Descriptor-bound verification of archive before irreversible commit
+            MacSafeFileSystem.RequirePathStillNamesHandle(archiveStream.SafeFileHandle, archivePath);
+            MacFileIdentity currentPathIdentity = MacSafeFileSystem.GetPathIdentityNoFollow(archivePath);
+            if (!currentPathIdentity.SameObject(archiveIdentity))
+            {
+                throw new InvalidOperationException("Das Archiv wurde vor dem endgültigen Lösch-Commit ausgetauscht.");
+            }
+
+            archiveStream.Position = 0;
+            byte[] finalArchiveDigest = SHA512.HashData(archiveStream);
+            if (archiveStream.Length != verifiedArchive.Length
+                || !CryptographicOperations.FixedTimeEquals(
+                    finalArchiveDigest,
+                    Convert.FromHexString(verifiedArchive.Digest)))
+            {
+                throw new InvalidOperationException("Das Archiv wurde vor dem endgültigen Lösch-Commit modifiziert.");
             }
         }
         catch (Exception ex)

@@ -181,7 +181,8 @@ public sealed partial class ZpaqService
                 staging.StagingPath,
                 progress,
                 cancellationToken,
-                monitorStagingDirectory: staging.StagingPath).ConfigureAwait(false);
+                monitorStagingDirectory: staging.StagingPath,
+                expectedDirectoryIdentity: staging.StagingIdentity).ConfigureAwait(false);
             if (result.Succeeded)
             {
                 ValidateExtractedDirectoryLimits(staging.StagingPath);
@@ -637,7 +638,7 @@ public sealed partial class ZpaqService
 
 #if KEEPVAULT_MACOS
         long freeSpace = MacSafeFileSystem.GetFreeDiskSpaceBytes(stagingDirectory);
-        if (freeSpace >= 0 && freeSpace < minFreeSpace)
+        if (freeSpace < 0 || freeSpace < minFreeSpace)
         {
             throw new IOException($"ZPAQ-Extraktion abgebrochen: Unzureichender freier Speicherplatz auf dem Ziellaufwerk ({freeSpace} Bytes verbleibend).");
         }
@@ -759,7 +760,7 @@ public sealed partial class ZpaqService
 
 #if KEEPVAULT_MACOS
                 long freeSpace = MacSafeFileSystem.GetFreeDiskSpaceBytes(stagingDirectory);
-                if (freeSpace >= 0 && freeSpace < minFreeSpace)
+                if (freeSpace < 0 || freeSpace < minFreeSpace)
                 {
                     linkedCts.Cancel();
                     try { process.Kill(entireProcessTree: true); } catch { }
@@ -855,7 +856,11 @@ public sealed partial class ZpaqService
         string workingDirectory,
         IProgress<string>? progress,
         CancellationToken cancellationToken,
-        string? monitorStagingDirectory = null)
+        string? monitorStagingDirectory = null
+#if KEEPVAULT_MACOS
+        , MacFileIdentity? expectedDirectoryIdentity = null
+#endif
+    )
     {
         using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         using var process = CreateProcess(executable, arguments, workingDirectory);
@@ -873,7 +878,15 @@ public sealed partial class ZpaqService
         Task outputTask = ReadLinesAsync(process.StandardOutput, output, progress, linkedCts.Token);
         Task errorTask = ReadLinesAsync(process.StandardError, errors, progress, linkedCts.Token);
         Task? monitorTask = monitorStagingDirectory != null
-            ? MonitorExtractionLimitsAsync(monitorStagingDirectory, process, linkedCts, linkedCts.Token)
+            ? MonitorExtractionLimitsAsync(
+                monitorStagingDirectory,
+                process,
+                linkedCts,
+                linkedCts.Token
+#if KEEPVAULT_MACOS
+                , expectedDirectoryIdentity
+#endif
+              )
             : null;
 
         var tasks = monitorTask != null
