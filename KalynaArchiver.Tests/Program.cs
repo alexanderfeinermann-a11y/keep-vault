@@ -64,7 +64,7 @@ if (args is ["--recovery-only"])
     RunProcessHardeningTests();
     RunNativeIntegrityTests();
     await RunRecoveryTestsAsync();
-    Console.WriteLine("KPAR2 v4 focused recovery tests passed (current writer; v3 legacy fixtures are covered by the macOS suite).");
+    Console.WriteLine("KPAR2 v4 focused recovery tests passed.");
     return;
 }
 

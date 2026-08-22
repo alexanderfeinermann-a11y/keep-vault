@@ -227,6 +227,9 @@ public sealed partial class KalynaContainerService
         SuiteKeyMaterial? keyMaterial = null;
         byte[] tweak = [];
         byte[] counter = [];
+        IDisposable? nonceLock = null;
+        IDisposable? tweakLock = null;
+        IDisposable? counterLock = null;
         Argon2Profile effectiveProfile;
         try
         {
@@ -256,9 +259,14 @@ public sealed partial class KalynaContainerService
 
             tweak = CreateSuiteTweak(suite, nonce);
             counter = (byte[])nonce.Clone();
-            using IDisposable nonceLock = SecureMemory.TryLock(nonce);
-            using IDisposable tweakLock = SecureMemory.TryLock(tweak);
-            using IDisposable counterLock = SecureMemory.TryLock(counter);
+            // These stay locked until the outer finally has zeroed them.
+            // A `using` declaration here would unlock the pages when this
+            // block ends and leave the still-populated buffers unpinned until
+            // the finally ran, which is the one ordering the locking exists to
+            // prevent.
+            nonceLock = SecureMemory.TryLock(nonce);
+            tweakLock = SecureMemory.TryLock(tweak);
+            counterLock = SecureMemory.TryLock(counter);
 
             var header = new ContainerHeader(
                 CurrentVersion,
@@ -454,6 +462,9 @@ public sealed partial class KalynaContainerService
             CryptographicOperations.ZeroMemory(tweak);
             CryptographicOperations.ZeroMemory(nonce);
             CryptographicOperations.ZeroMemory(salt);
+            counterLock?.Dispose();
+            tweakLock?.Dispose();
+            nonceLock?.Dispose();
             // A two-round set owns all four buffers, so disposing it covers the
             // salt and nonce aliases taken from it.
             if (twoRound is not null)
@@ -502,6 +513,9 @@ public sealed partial class KalynaContainerService
         byte[]? actualSkeinTag = null;
         SuiteKeyMaterial? keyMaterial = null;
         byte[]? counter = null;
+        IDisposable? nonceLock = null;
+        IDisposable? tweakLock = null;
+        IDisposable? counterLock = null;
 
         try
         {
@@ -590,9 +604,12 @@ public sealed partial class KalynaContainerService
             }
 
             counter = (byte[])nonce.Clone();
-            using IDisposable nonceLock = SecureMemory.TryLock(nonce);
-            using IDisposable tweakLock = SecureMemory.TryLock(tweak);
-            using IDisposable counterLock = SecureMemory.TryLock(counter);
+            // Locked until the outer finally has zeroed them; a `using`
+            // declaration would unlock the pages while they still hold their
+            // contents.
+            nonceLock = SecureMemory.TryLock(nonce);
+            tweakLock = SecureMemory.TryLock(tweak);
+            counterLock = SecureMemory.TryLock(counter);
             input.Position = cipherStart;
             // Sized to one written chunk: payload, plus the tag that follows
             // it when the suite has an authenticated outer layer. A single read
@@ -679,6 +696,9 @@ public sealed partial class KalynaContainerService
             ZeroIfNotNull(counter);
             ZeroIfNotNull(tweak);
             ZeroIfNotNull(nonce);
+            counterLock?.Dispose();
+            tweakLock?.Dispose();
+            nonceLock?.Dispose();
             ZeroIfNotNull(secondSalt);
             ZeroIfNotNull(secondNonce);
             ZeroIfNotNull(chunkNonceBase);

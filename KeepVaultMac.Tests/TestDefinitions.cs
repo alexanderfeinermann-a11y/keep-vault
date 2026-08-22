@@ -7,7 +7,8 @@ internal enum TestResource
 {
     Light,          // Thread-safe, low RAM/CPU: pure KATs, policies, non-conflicting descriptors
     CpuHeavy,       // Thread-safe CPU-intensive: ML-DSA, differential testing, per-chunk nonces
-    ProcessGlobal,  // Serial preflight: modifies process-wide state (process hardening)
+    ProcessGlobal,  // Serial preflight: modifies or measures process-wide state
+                    // (process hardening, locked-page accounting)
     ArgonHeavy,     // Serial: 1-2 GiB matrices, Argon2id equivalence
     ArgonPeakMemory,// Strictly exclusive: peak memory / RSS measurement
     EntropyGlobal,  // Serial: consumes shared EntropyMixer state

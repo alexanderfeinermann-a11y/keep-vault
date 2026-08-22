@@ -81,7 +81,11 @@ internal static partial class MacComprehensiveTests
         new("v11 master KDF and 512/512 factor split mutation isolation", TestV11MasterKdfAsync, TestResource.ArgonHeavy, "KDF"),
         new("v11 container header, decryption and KPAR2 round trip", TestV11ContainersAsync, TestResource.EntropyGlobal, "Containers"),
         new("quarantine rollback object binding and symlink-safe directory traversal", TestQuarantineAndSymlinkSafetyAsync, TestResource.Light, "Deletion"),
-        new("GeneratedArchiveEntropy exception safety and leak prevention", TestEntropyExceptionSafetyAsync, TestResource.Light, "Entropy"),
+        // Reads the process-wide locked-byte counter, so it cannot share the
+        // process with another test that locks or releases memory: in parallel
+        // it fails at random and, worse, can hide a real leak behind another
+        // test's release.
+        new("GeneratedArchiveEntropy exception safety and leak prevention", TestEntropyExceptionSafetyAsync, TestResource.ProcessGlobal, "Entropy"),
         new("cascade layering: the outer layer alone reveals nothing", TestCascadeLayeringAsync, TestResource.Light, "Crypto"),
         new("two-round key derivation from one pool consumption", TestTwoRoundDerivationAsync, TestResource.EntropyGlobal, "Crypto"),
         new("salt and nonce for every single-round suite without prepared entropy", TestUnpreparedEncryptionParametersAsync, TestResource.EntropyGlobal, "Crypto"),

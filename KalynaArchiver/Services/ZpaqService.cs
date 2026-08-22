@@ -1690,6 +1690,10 @@ public sealed partial class ZpaqService
                     staged[index] = destination;
                 }
 
+                // The mirror can only contain directories this process created
+                // and links or copies of files it verified, so a reparse point
+                // in it means something else wrote into the private tree.
+                RequireNoReparsePointsWindows(snapshot._snapshotRoot);
                 snapshot.InputPaths = staged;
                 return snapshot;
             }
