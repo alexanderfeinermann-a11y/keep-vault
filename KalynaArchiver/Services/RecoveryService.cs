@@ -99,15 +99,6 @@ public sealed partial class RecoveryService
 
     public static string GetRecoveryPath(string archivePath) => $"{archivePath}.kpar2";
 
-    public static void DeleteRecoverySidecar(string archivePath)
-    {
-        string recoveryPath = GetRecoveryPath(archivePath);
-        if (File.Exists(recoveryPath))
-        {
-            File.Delete(recoveryPath);
-        }
-    }
-
     // The beginning contains parity for the encrypted container header; the end contains
     // redundant bootstrap metadata. Both regions must be destroyed before deletion so a
     // deleted sidecar cannot trivially restore a cryptographically erased container header.

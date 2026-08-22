@@ -184,8 +184,17 @@ internal static class TestCoordinator
         int freeArgon = budget.ArgonSlots;
         int freeZpaq = budget.ZpaqSlots;
         int freeGui = 1;
+        int freeEntropy = 1;
         bool hostExclusiveRunning = false;
+        bool processExclusiveRunning = false;
         bool argonFallbackUsed = false;
+
+        // Process isolation is what makes process-local global state safe to
+        // run in parallel: a child process has its own entropy mixer, its own
+        // locked-page accounting and its own hardening. Without it those
+        // constraints have to serialise instead, or tests silently corrupt each
+        // other's measurements.
+        bool isolatesProcessState = !inProcess;
 
         var running = new List<(Task<TestOutcome> Task, TestCase Test)>();
         bool stopStarting = false;
@@ -233,6 +242,24 @@ internal static class TestCoordinator
                         continue;
                     }
 
+                    if (!isolatesProcessState)
+                    {
+                        if (cost.Constraints.HasFlag(TestConstraint.ProcessExclusive) && running.Count > 0)
+                        {
+                            continue;
+                        }
+
+                        if (processExclusiveRunning)
+                        {
+                            continue;
+                        }
+
+                        if (cost.Constraints.HasFlag(TestConstraint.EntropyState) && freeEntropy <= 0)
+                        {
+                            continue;
+                        }
+                    }
+
                     pending.RemoveAt(index);
                     freeCpu -= cost.CpuTokens;
                     freeMemory -= cost.MemoryMiB;
@@ -240,6 +267,11 @@ internal static class TestCoordinator
                     if (cost.Constraints.HasFlag(TestConstraint.ZpaqProcess)) freeZpaq--;
                     if (cost.Constraints.HasFlag(TestConstraint.Gui)) freeGui--;
                     if (cost.Constraints.HasFlag(TestConstraint.HostExclusive)) hostExclusiveRunning = true;
+                    if (!isolatesProcessState)
+                    {
+                        if (cost.Constraints.HasFlag(TestConstraint.ProcessExclusive)) processExclusiveRunning = true;
+                        if (cost.Constraints.HasFlag(TestConstraint.EntropyState)) freeEntropy--;
+                    }
 
                     uint seed = seedOverride ?? checked((uint)System.Security.Cryptography.RandomNumberGenerator.GetInt32(1, int.MaxValue));
                     Task<TestOutcome> task = inProcess
@@ -301,6 +333,11 @@ internal static class TestCoordinator
             if (finishedCost.Constraints.HasFlag(TestConstraint.ZpaqProcess)) freeZpaq++;
             if (finishedCost.Constraints.HasFlag(TestConstraint.Gui)) freeGui++;
             if (finishedCost.Constraints.HasFlag(TestConstraint.HostExclusive)) hostExclusiveRunning = false;
+            if (!isolatesProcessState)
+            {
+                if (finishedCost.Constraints.HasFlag(TestConstraint.ProcessExclusive)) processExclusiveRunning = false;
+                if (finishedCost.Constraints.HasFlag(TestConstraint.EntropyState)) freeEntropy++;
+            }
 
             TestOutcome outcome = await completed.ConfigureAwait(false);
             outcomes.Add(outcome);
