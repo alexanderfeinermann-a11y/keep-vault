@@ -10,7 +10,7 @@ using Org.BouncyCastle.Crypto.Parameters;
 namespace KalynaArchiver.Services;
 
 /// <summary>
-/// The length-prefixed framing every v10 domain construction is built from:
+/// The length-prefixed framing every domain construction is built from:
 /// <c>LP(X) = LE32(|X|) || X</c>, concatenated for several fields.
 /// </summary>
 /// <remarks>

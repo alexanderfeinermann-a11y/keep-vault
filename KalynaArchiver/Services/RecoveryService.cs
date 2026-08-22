@@ -19,23 +19,20 @@ public sealed partial class RecoveryService
     private static readonly byte[] LocatorMagic = "KPR2LOC2"u8.ToArray();
     private static readonly byte[] MetadataBlockMagic = "KPR2BLK2"u8.ToArray();
     private static readonly byte[] MetadataEnvelopeMagic = "KPR2META"u8.ToArray();
-    private static readonly byte[] CertificationDomainV3 = "Kalyna-ZPAQ/KPAR2/v3/Metadata-Certification"u8.ToArray();
-    private static readonly byte[] Sha3KeyDomainV3 = "Kalyna-ZPAQ/KPAR2/v3/SHA3-Recovery-Key"u8.ToArray();
-    private static readonly byte[] SkeinKeyDomainV3 = "Kalyna-ZPAQ/KPAR2/v3/Skein-Recovery-Key"u8.ToArray();
-    private static readonly byte[] CertificationDomainV4 = "Kalyna-ZPAQ/KPAR2/v4/Metadata-Certification"u8.ToArray();
-    private static readonly byte[] Sha3KeyDomainV4 = "Kalyna-ZPAQ/KPAR2/v4/SHA3-Recovery-Key"u8.ToArray();
-    private static readonly byte[] SkeinKeyDomainV4 = "Kalyna-ZPAQ/KPAR2/v4/Skein-Recovery-Key"u8.ToArray();
+    private static readonly byte[] CertificationDomain = "Kalyna-ZPAQ/KPAR2/v4/Metadata-Certification"u8.ToArray();
+    private static readonly byte[] Sha3KeyDomain = "Kalyna-ZPAQ/KPAR2/v4/SHA3-Recovery-Key"u8.ToArray();
+    private static readonly byte[] SkeinKeyDomain = "Kalyna-ZPAQ/KPAR2/v4/Skein-Recovery-Key"u8.ToArray();
 
     /// <summary>
-    /// KPAR2 format version. 4 binds container version (v10/v11) explicitly in
-    /// authenticated locator and manifest contexts. Version 3 is retained for
-    /// backward compatibility with historical recovery packages.
+    /// KPAR2 format version. 4 binds the container version explicitly in the
+    /// authenticated locator and manifest contexts. There is no legacy reader:
+    /// an older recovery file is refused rather than parsed by a second, less
+    /// strictly bound code path.
     /// </summary>
     private const int Version = 4;
-    private const int LegacyVersion = 3;
 
     /// <summary>
-    /// One v10 salt pair: the SHA3 branch's salt followed by the Skein
+    /// One salt pair: the SHA3 branch's salt followed by the Skein
     /// branch's.
     /// </summary>
     private const int SaltPairBytes = 128;
@@ -68,7 +65,6 @@ public sealed partial class RecoveryService
                 ? 2 * SaltPairBytes
                 : SaltPairBytes;
     private const string RecoveryAlgorithm = "KPAR2-v4-SHA3-512+Skein-1024-RS(20,3)";
-    private const string LegacyRecoveryAlgorithm = "KPAR2-v3-SHA3-512+Skein-1024-RS(20,3)";
     private const int DataShardCount = 20;
     private const int ParityShardCount = 3;
     private const int BodyShardSize = 4 * 1024 * 1024;
@@ -833,92 +829,46 @@ public sealed partial class RecoveryService
             {
                 if (locator.ProtectionMode == RecoveryProtectionMode.DualAuthenticatedEncrypted)
                 {
-                    if (locator.FormatVersion >= 4)
+                    // The container version comes out of the locator, but the
+                    // locator's own copy of it is unkeyed. It is only ever used
+                    // to pick a derivation this build actually supports, and the
+                    // very next step - the keyed certification, which binds the
+                    // same field - is what proves the value was not tampered
+                    // with. With one supported version there is nothing left to
+                    // downgrade to.
+                    int kdfVersion = locator.ContainerVersion;
+                    if (kdfVersion != ContainerKeyDerivation.ContainerVersion)
                     {
-                        int kdfVersion = locator.ContainerVersion;
-                        if (kdfVersion is not (10 or 11))
-                        {
-                            throw new InvalidDataException($"Unsupported container version {kdfVersion} in KPAR2 v4 metadata.");
-                        }
-
-                        recoveryKeys = await DeriveRecoveryKeysAsync(
-                            userPassword!,
-                            pin!,
-                            firstGeneratedPassword!,
-                            secondGeneratedPassword!,
-                            locator,
-                            cancellationToken,
-                            version: kdfVersion).ConfigureAwait(false);
-
-                        (byte[] actualSha3, byte[] actualSkein) = ComputeMetadataCertification(
-                            locator,
-                            payload,
-                            recoveryKeys);
-                        bool sha3Matches = CryptographicOperations.FixedTimeEquals(expectedSha3, actualSha3);
-                        bool skeinMatches = CryptographicOperations.FixedTimeEquals(expectedSkein, actualSkein);
-                        CryptographicOperations.ZeroMemory(actualSha3);
-                        CryptographicOperations.ZeroMemory(actualSkein);
-
-                        if (!(sha3Matches & skeinMatches))
-                        {
-                            throw new CryptographicException(
-                                "Wrong password factors or manipulated dual-authenticated KPAR2 metadata.");
-                        }
-
-                        authenticationVerified = true;
+                        throw new InvalidDataException(
+                            $"Unsupported container version {kdfVersion} in KPAR2 metadata; "
+                            + $"only container version {ContainerKeyDerivation.ContainerVersion} is supported.");
                     }
-                    else
+
+                    recoveryKeys = await DeriveRecoveryKeysAsync(
+                        userPassword!,
+                        pin!,
+                        firstGeneratedPassword!,
+                        secondGeneratedPassword!,
+                        locator,
+                        cancellationToken,
+                        version: kdfVersion).ConfigureAwait(false);
+
+                    (byte[] actualSha3, byte[] actualSkein) = ComputeMetadataCertification(
+                        locator,
+                        payload,
+                        recoveryKeys);
+                    bool sha3Matches = CryptographicOperations.FixedTimeEquals(expectedSha3, actualSha3);
+                    bool skeinMatches = CryptographicOperations.FixedTimeEquals(expectedSkein, actualSkein);
+                    CryptographicOperations.ZeroMemory(actualSha3);
+                    CryptographicOperations.ZeroMemory(actualSkein);
+
+                    if (!(sha3Matches & skeinMatches))
                     {
-                        // Legacy v3 compatibility path
-                        recoveryKeys = await DeriveRecoveryKeysAsync(
-                            userPassword!,
-                            pin!,
-                            firstGeneratedPassword!,
-                            secondGeneratedPassword!,
-                            locator,
-                            cancellationToken,
-                            version: 11).ConfigureAwait(false);
-
-                        (byte[] actualSha3, byte[] actualSkein) = ComputeMetadataCertification(
-                            locator,
-                            payload,
-                            recoveryKeys);
-                        bool sha3Matches = CryptographicOperations.FixedTimeEquals(expectedSha3, actualSha3);
-                        bool skeinMatches = CryptographicOperations.FixedTimeEquals(expectedSkein, actualSkein);
-                        CryptographicOperations.ZeroMemory(actualSha3);
-                        CryptographicOperations.ZeroMemory(actualSkein);
-
-                        if (!(sha3Matches & skeinMatches))
-                        {
-                            recoveryKeys.Dispose();
-                            // Try v10 backward compatibility for v3 legacy
-                            recoveryKeys = await DeriveRecoveryKeysAsync(
-                                userPassword!,
-                                pin!,
-                                firstGeneratedPassword!,
-                                secondGeneratedPassword!,
-                                locator,
-                                cancellationToken,
-                                version: 10).ConfigureAwait(false);
-
-                            (byte[] actualSha3V10, byte[] actualSkeinV10) = ComputeMetadataCertification(
-                                locator,
-                                payload,
-                                recoveryKeys);
-                            sha3Matches = CryptographicOperations.FixedTimeEquals(expectedSha3, actualSha3V10);
-                            skeinMatches = CryptographicOperations.FixedTimeEquals(expectedSkein, actualSkeinV10);
-                            CryptographicOperations.ZeroMemory(actualSha3V10);
-                            CryptographicOperations.ZeroMemory(actualSkeinV10);
-
-                            if (!(sha3Matches & skeinMatches))
-                            {
-                                throw new CryptographicException(
-                                    "Wrong password factors or manipulated dual-authenticated KPAR2 metadata.");
-                            }
-                        }
-
-                        authenticationVerified = true;
+                        throw new CryptographicException(
+                            "Wrong password factors or manipulated dual-authenticated KPAR2 metadata.");
                     }
+
+                    authenticationVerified = true;
                 }
                 else
                 {
@@ -996,14 +946,14 @@ public sealed partial class RecoveryService
         // separate from the container's -- they come from their own role
         // purposes -- but they now cost exactly as much to attack.
         bool paranoia = parameters.UsesTwoKdfRounds;
-        var salts = new V10Salts(
+        var salts = new KdfSalts(
             locator.SaltSha3Round1,
             locator.SaltSkeinRound1,
             paranoia ? locator.SaltSha3Round2 : null,
             paranoia ? locator.SaltSkeinRound2 : null);
         salts.Validate(paranoia);
-        using V10KeyDerivation.MasterResult master = await Task.Run(
-            () => V10KeyDerivation.DeriveMaster(
+        using ContainerKeyDerivation.MasterResult master = await Task.Run(
+            () => ContainerKeyDerivation.DeriveMaster(
                 parameters,
                 userPassword,
                 pin,
@@ -1027,10 +977,8 @@ public sealed partial class RecoveryService
             "KPAR2/Skein-MAC-1024-1024",
             KeyRolePurpose.RecoverySkeinCertification,
             parameters.SkeinMacKeyBytes);
-        byte[] sha3Domain = locator.FormatVersion >= 4 ? Sha3KeyDomainV4 : Sha3KeyDomainV3;
-        byte[] skeinDomain = locator.FormatVersion >= 4 ? SkeinKeyDomainV4 : SkeinKeyDomainV3;
-        byte[] sha3Message = BuildKeyDerivationMessage(sha3Domain, locator);
-        byte[] skeinMessage = BuildKeyDerivationMessage(skeinDomain, locator);
+        byte[] sha3Message = BuildKeyDerivationMessage(Sha3KeyDomain, locator);
+        byte[] skeinMessage = BuildKeyDerivationMessage(SkeinKeyDomain, locator);
         try
         {
             byte[] sha3Key;
@@ -1121,7 +1069,7 @@ public sealed partial class RecoveryService
 
     private static byte[] BuildCertificationPrefix(RecoveryLocator locator, int payloadLength)
     {
-        byte[] domain = locator.FormatVersion >= 4 ? CertificationDomainV4 : CertificationDomainV3;
+        byte[] domain = CertificationDomain;
         byte[] context = BuildLocatorCertificationContext(locator);
         byte[] result = new byte[
             sizeof(int) + domain.Length
@@ -1158,10 +1106,7 @@ public sealed partial class RecoveryService
         WriteInt32(result, ref offset, locator.MetadataStripeCount);
         WriteInt64(result, ref offset, locator.ArchiveLength);
         WriteInt32(result, ref offset, locator.EncryptionSuite);
-        if (locator.FormatVersion >= 4)
-        {
-            WriteInt32(result, ref offset, locator.ContainerVersion);
-        }
+        WriteInt32(result, ref offset, locator.ContainerVersion);
         byte[] rawSalt = locator.GetRawSaltBytes();
         WriteInt32(result, ref offset, rawSalt.Length);
         locator.ArchiveId.CopyTo(result, offset);
@@ -1754,15 +1699,8 @@ public sealed partial class RecoveryService
             BinaryPrimitives.WriteInt32LittleEndian(block.AsSpan(56), locator.MetadataStripeCount);
             BinaryPrimitives.WriteInt32LittleEndian(block.AsSpan(60), locator.EncryptionSuite);
             BinaryPrimitives.WriteInt64LittleEndian(block.AsSpan(64), locator.ArchiveLength);
-            if (locator.FormatVersion >= 4)
-            {
-                BinaryPrimitives.WriteInt32LittleEndian(block.AsSpan(72), locator.ContainerVersion);
-                BinaryPrimitives.WriteInt32LittleEndian(block.AsSpan(76), 0);
-            }
-            else
-            {
-                BinaryPrimitives.WriteInt64LittleEndian(block.AsSpan(72), 0);
-            }
+            BinaryPrimitives.WriteInt32LittleEndian(block.AsSpan(72), locator.ContainerVersion);
+            BinaryPrimitives.WriteInt32LittleEndian(block.AsSpan(76), 0);
             BinaryPrimitives.WriteInt32LittleEndian(block.AsSpan(80), 0);
             int rawSaltLen = locator.ProtectionMode == RecoveryProtectionMode.DualAuthenticatedEncrypted
                 ? (locator.SaltSha3Round2 is not null ? 256 : 128)
@@ -1814,26 +1752,15 @@ public sealed partial class RecoveryService
         try
         {
             int formatVersion = BinaryPrimitives.ReadInt32LittleEndian(block.AsSpan(8));
-            if (formatVersion is not (LegacyVersion or Version))
+            if (formatVersion != Version)
             {
                 return false;
             }
 
-            int containerVersion = 0;
-            if (formatVersion >= 4)
+            int containerVersion = BinaryPrimitives.ReadInt32LittleEndian(block.AsSpan(72));
+            if (BinaryPrimitives.ReadInt32LittleEndian(block.AsSpan(76)) != 0)
             {
-                containerVersion = BinaryPrimitives.ReadInt32LittleEndian(block.AsSpan(72));
-                if (BinaryPrimitives.ReadInt32LittleEndian(block.AsSpan(76)) != 0)
-                {
-                    return false;
-                }
-            }
-            else
-            {
-                if (BinaryPrimitives.ReadInt64LittleEndian(block.AsSpan(72)) != 0)
-                {
-                    return false;
-                }
+                return false;
             }
 
             bool sha3Matches = CryptographicOperations.FixedTimeEquals(
@@ -1905,24 +1832,24 @@ public sealed partial class RecoveryService
 
     private static void ValidateLocator(RecoveryLocator locator, long recoveryLength)
     {
-        if (locator.FormatVersion is not (LegacyVersion or Version))
+        if (locator.FormatVersion != Version)
         {
-            throw new InvalidDataException($"Unsupported KPAR2 format version: {locator.FormatVersion}");
+            throw new InvalidDataException(
+                $"Unsupported KPAR2 format version: {locator.FormatVersion}. "
+                + $"Only KPAR2 v{Version} is supported; there is no legacy reader.");
         }
 
-        if (locator.FormatVersion >= 4)
+        if (locator.ProtectionMode == RecoveryProtectionMode.DualAuthenticatedEncrypted)
         {
-            if (locator.ProtectionMode == RecoveryProtectionMode.DualAuthenticatedEncrypted)
+            if (locator.ContainerVersion != ContainerKeyDerivation.ContainerVersion)
             {
-                if (locator.ContainerVersion is not (10 or 11))
-                {
-                    throw new InvalidDataException($"Unsupported container version {locator.ContainerVersion} in KPAR2 v4 locator.");
-                }
+                throw new InvalidDataException(
+                    $"Unsupported container version {locator.ContainerVersion} in KPAR2 v{Version} locator.");
             }
-            else if (locator.ContainerVersion != 0)
-            {
-                throw new InvalidDataException($"KPAR2 error-correction profile must have container version 0, got {locator.ContainerVersion}.");
-            }
+        }
+        else if (locator.ContainerVersion != 0)
+        {
+            throw new InvalidDataException($"KPAR2 error-correction profile must have container version 0, got {locator.ContainerVersion}.");
         }
         if (locator.ProtectionMode is not (
                 RecoveryProtectionMode.ErrorCorrectionOnly
@@ -2054,14 +1981,12 @@ public sealed partial class RecoveryService
                 "KPAR2 must not persist Argon2 memory/profile values.");
         }
 
-        bool isV4 = locator.FormatVersion == Version;
-        bool isV3 = locator.FormatVersion == LegacyVersion;
-        if (!isV4 && !isV3)
+        if (locator.FormatVersion != Version)
         {
             throw new InvalidDataException($"Unsupported KPAR2 locator format version: {locator.FormatVersion}");
         }
 
-        string expectedAlgorithm = isV4 ? RecoveryAlgorithm : LegacyRecoveryAlgorithm;
+        const string expectedAlgorithm = RecoveryAlgorithm;
         if (manifest.Version != locator.FormatVersion
             || !string.Equals(manifest.Algorithm, expectedAlgorithm, StringComparison.Ordinal)
             || manifest.ProtectionMode != locator.ProtectionMode
@@ -2089,19 +2014,16 @@ public sealed partial class RecoveryService
             throw new InvalidDataException("KPAR2 manifest does not match its authenticated locator context.");
         }
 
-        if (isV4)
+        if (locator.ProtectionMode == RecoveryProtectionMode.DualAuthenticatedEncrypted)
         {
-            if (locator.ProtectionMode == RecoveryProtectionMode.DualAuthenticatedEncrypted)
+            if (manifest.ContainerVersion != locator.ContainerVersion)
             {
-                if (manifest.ContainerVersion != locator.ContainerVersion)
-                {
-                    throw new InvalidDataException($"KPAR2 manifest container version {manifest.ContainerVersion} does not match locator container version {locator.ContainerVersion}.");
-                }
+                throw new InvalidDataException($"KPAR2 manifest container version {manifest.ContainerVersion} does not match locator container version {locator.ContainerVersion}.");
             }
-            else if (manifest.ContainerVersion != null)
-            {
-                throw new InvalidDataException($"KPAR2 unencrypted manifest must not carry container version, got {manifest.ContainerVersion}.");
-            }
+        }
+        else if (manifest.ContainerVersion != null)
+        {
+            throw new InvalidDataException($"KPAR2 unencrypted manifest must not carry container version, got {manifest.ContainerVersion}.");
         }
 
         if (locator.ProtectionMode == RecoveryProtectionMode.ErrorCorrectionOnly)

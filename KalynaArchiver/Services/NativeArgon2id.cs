@@ -105,7 +105,7 @@ internal static unsafe partial class NativeArgon2id
     }
 
     /// <summary>
-    /// One v10 Argon2id branch, with Argon2's optional secret and
+    /// One Argon2id branch, with Argon2's optional secret and
     /// associated-data inputs.
     /// </summary>
     /// <remarks>
@@ -120,7 +120,7 @@ internal static unsafe partial class NativeArgon2id
     /// happens one level up, in PasswordKeyService, so the order is visible and
     /// testable rather than buried behind a native lock.
     /// </remarks>
-    public static void HashRawV10(
+    public static void HashRaw(
         uint iterations,
         uint memoryKiB,
         uint parallelism,
@@ -136,7 +136,7 @@ internal static unsafe partial class NativeArgon2id
         ArgumentNullException.ThrowIfNull(output);
         if (associatedData.Length == 0)
         {
-            throw new ArgumentException("A v10 Argon2id branch requires associated data.", nameof(associatedData));
+            throw new ArgumentException("An Argon2id branch requires associated data.", nameof(associatedData));
         }
 
         EnsureLoaded();

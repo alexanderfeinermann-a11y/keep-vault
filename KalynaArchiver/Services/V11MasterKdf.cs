@@ -261,6 +261,13 @@ internal static class V11MasterKdf
             throw new ArgumentException($"Destination must be at least {MasterBytes} bytes.", nameof(destination));
         }
 
+        if (memoryKiB is < MemoryMinKiB or > MemoryMaxKiB
+            || (memoryKiB - MemoryMinKiB) % MemoryStepKiB != 0)
+        {
+            throw new CryptographicException(
+                $"The Argon2id memory cost {memoryKiB} KiB is not a value the v11 PMI can produce.");
+        }
+
         using LockedSensitiveBuffer left = LockedSensitiveBuffer.Create(BranchOutputBytes);
         using LockedSensitiveBuffer right = LockedSensitiveBuffer.Create(BranchOutputBytes);
 
@@ -306,6 +313,27 @@ internal static class V11MasterKdf
             throw new ArgumentException($"Output buffer must be exactly {BranchOutputBytes} bytes.", nameof(output));
         }
 
+        // Both inputs are copied into fixed-width locked buffers, so a short
+        // one would be silently zero-padded into a weaker Argon2id input
+        // instead of failing. Argon2 would then run happily on the padding.
+        if (credentialHash.Length != CredentialHashBytes)
+        {
+            throw new ArgumentException(
+                $"A credential hash must be exactly {CredentialHashBytes} bytes.", nameof(credentialHash));
+        }
+
+        if (!secret.IsEmpty && secret.Length != MasterBytes)
+        {
+            throw new ArgumentException(
+                $"The Argon2id secret must be the complete {MasterBytes}-byte master.", nameof(secret));
+        }
+
+        if (salt.Length != KdfSalts.SaltBytes)
+        {
+            throw new ArgumentException(
+                $"An Argon2id branch salt must be exactly {KdfSalts.SaltBytes} bytes.", nameof(salt));
+        }
+
         using LockedSensitiveBuffer passwordCopy = LockedSensitiveBuffer.Create(CredentialHashBytes);
         credentialHash.CopyTo(passwordCopy.Bytes);
         using LockedSensitiveBuffer? secretCopy = secret.IsEmpty
@@ -320,7 +348,7 @@ internal static class V11MasterKdf
         byte[] associatedData = AssociatedData(algorithm, sha3Branch, round);
         try
         {
-            NativeArgon2id.HashRawV10(
+            NativeArgon2id.HashRaw(
                 Iterations,
                 memoryKiB,
                 Parallelism,

@@ -4,6 +4,7 @@ using System.Diagnostics.CodeAnalysis;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
+using Microsoft.Win32.SafeHandles;
 
 namespace KalynaArchiver.Services;
 
@@ -38,6 +39,18 @@ public sealed partial class ZpaqService
         out string[] snapshotPaths)
     {
         MacInputSnapshot snapshot = MacInputSnapshot.Create(workingDirectory, inputPaths);
+        snapshotWorkingDirectory = snapshot.WorkingDirectory;
+        snapshotPaths = snapshot.InputPaths;
+        return snapshot;
+    }
+#else
+    internal static IDisposable CaptureInputSnapshotForTests(
+        string workingDirectory,
+        IReadOnlyList<string> inputPaths,
+        out string snapshotWorkingDirectory,
+        out string[] snapshotPaths)
+    {
+        WindowsInputSnapshot snapshot = WindowsInputSnapshot.Create(workingDirectory, inputPaths);
         snapshotWorkingDirectory = snapshot.WorkingDirectory;
         snapshotPaths = snapshot.InputPaths;
         return snapshot;
@@ -112,11 +125,11 @@ public sealed partial class ZpaqService
         bool archiveInstalled = false;
 #if KEEPVAULT_MACOS
         using MacInputSnapshot inputSnapshot = MacInputSnapshot.Create(workingDirectory, normalizedInputs);
+#else
+        using WindowsInputSnapshot inputSnapshot = WindowsInputSnapshot.Create(workingDirectory, normalizedInputs);
+#endif
         workingDirectory = inputSnapshot.WorkingDirectory;
         normalizedInputs = inputSnapshot.InputPaths;
-#else
-        using InputFileLeaseSet inputLeases = InputFileLeaseSet.Acquire(normalizedInputs);
-#endif
         using TrustedNativeFileLease executable = AcquireExecutable();
         var arguments = new List<string> { "add", temporaryArchivePath };
         arguments.AddRange(normalizedInputs.Select(path => Path.GetRelativePath(workingDirectory, path)));
@@ -260,11 +273,11 @@ public sealed partial class ZpaqService
         string[] normalizedInputs = NormalizeAndValidateInputPaths(inputPaths);
 #if KEEPVAULT_MACOS
         using MacInputSnapshot inputSnapshot = MacInputSnapshot.Create(workingDirectory, normalizedInputs);
+#else
+        using WindowsInputSnapshot inputSnapshot = WindowsInputSnapshot.Create(workingDirectory, normalizedInputs);
+#endif
         workingDirectory = inputSnapshot.WorkingDirectory;
         normalizedInputs = inputSnapshot.InputPaths;
-#else
-        using InputFileLeaseSet inputLeases = InputFileLeaseSet.Acquire(normalizedInputs);
-#endif
         using TrustedNativeFileLease executable = AcquireExecutable();
         var arguments = new List<string> { "--pipe", "add", "-" };
         arguments.AddRange(normalizedInputs.Select(path => Path.GetRelativePath(workingDirectory, path)));
@@ -676,6 +689,14 @@ public sealed partial class ZpaqService
         long totalBytes = 0;
         int fileCount = 0;
 
+#if !KEEPVAULT_MACOS
+        // Nothing ZPAQ writes on Windows is a reparse point, so one appearing
+        // in staging was put there by something else. Refusing it here keeps
+        // the limit walk inside the staged tree and keeps the installed result
+        // free of links the archive never contained.
+        RequireNoReparsePointsWindows(stagingDirectory);
+#endif
+
         foreach (string file in Directory.EnumerateFiles(stagingDirectory, "*", SearchOption.AllDirectories))
         {
             fileCount++;
@@ -707,6 +728,36 @@ public sealed partial class ZpaqService
 #endif
     }
 
+#if !KEEPVAULT_MACOS
+    /// <summary>
+    /// Walks the staged extraction tree one level at a time and refuses any
+    /// reparse point, without ever descending through one.
+    /// </summary>
+    private static void RequireNoReparsePointsWindows(string stagingDirectory)
+    {
+        var pending = new Stack<string>();
+        pending.Push(Path.TrimEndingDirectorySeparator(Path.GetFullPath(stagingDirectory)));
+        while (pending.Count > 0)
+        {
+            string current = pending.Pop();
+            foreach (string entry in Directory.EnumerateFileSystemEntries(current))
+            {
+                FileAttributes attributes = File.GetAttributes(entry);
+                if ((attributes & FileAttributes.ReparsePoint) != 0)
+                {
+                    throw new InvalidDataException(
+                        $"Das entpackte Verzeichnis enthält einen Reparse Point, den ZPAQ nicht erzeugt haben kann: {entry}");
+                }
+
+                if ((attributes & FileAttributes.Directory) != 0)
+                {
+                    pending.Push(entry);
+                }
+            }
+        }
+    }
+
+#endif
     private static async Task MonitorExtractionLimitsAsync(
         string stagingDirectory,
         Process process,
@@ -1339,103 +1390,6 @@ public sealed partial class ZpaqService
         }
     }
 
-    private sealed class InputFileLeaseSet : IDisposable
-    {
-        private readonly List<FileStream> _streams = [];
-
-        [SuppressMessage("Reliability", "CA2000:Dispose objects before losing scope", Justification = "Each stream is either transferred into the owning lease set and nulled or disposed by the per-file finally block; the outer catch disposes all previously transferred streams.")]
-        public static InputFileLeaseSet Acquire(IEnumerable<string> inputPaths)
-        {
-            var leases = new InputFileLeaseSet();
-            try
-            {
-                foreach (string inputPath in inputPaths)
-                {
-                    if (File.Exists(inputPath))
-                    {
-                        AcquireFileLease(inputPath, leases);
-                    }
-                    else if (Directory.Exists(inputPath))
-                    {
-                        AcquireDirectoryLeases(inputPath, leases);
-                    }
-                }
-
-                return leases;
-            }
-            catch
-            {
-                leases.Dispose();
-                throw;
-            }
-        }
-
-        private static void AcquireDirectoryLeases(string directoryPath, InputFileLeaseSet leases)
-        {
-            FileAttributes dirAttr = File.GetAttributes(directoryPath);
-            if ((dirAttr & FileAttributes.ReparsePoint) != 0)
-            {
-                throw new InvalidOperationException(
-                    $"ZPAQ input directory is a reparse point or junction: {directoryPath}");
-            }
-
-            foreach (string subDir in Directory.EnumerateDirectories(directoryPath, "*", SearchOption.AllDirectories))
-            {
-                FileAttributes subAttr = File.GetAttributes(subDir);
-                if ((subAttr & FileAttributes.ReparsePoint) != 0)
-                {
-                    throw new InvalidOperationException(
-                        $"ZPAQ input directory contains a reparse point subdirectory: {subDir}");
-                }
-            }
-
-            foreach (string filePath in Directory.EnumerateFiles(directoryPath, "*", SearchOption.AllDirectories))
-            {
-                AcquireFileLease(filePath, leases);
-            }
-        }
-
-        [SuppressMessage("Reliability", "CA2000:Dispose objects before losing scope", Justification = "Transferred to leases._streams")]
-        private static void AcquireFileLease(string filePath, InputFileLeaseSet leases)
-        {
-            FileAttributes fileAttr = File.GetAttributes(filePath);
-            if ((fileAttr & FileAttributes.ReparsePoint) != 0)
-            {
-                throw new InvalidOperationException(
-                    $"ZPAQ input file is a reparse point or symbolic link: {filePath}");
-            }
-
-            FileStream? stream = null;
-            try
-            {
-                stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read);
-                string resolvedPath = NativePathResolver.ResolveFinalDosPath(stream.SafeFileHandle);
-                if (!PathsEqual(filePath, resolvedPath))
-                {
-                    throw new InvalidOperationException(
-                        $"ZPAQ input path resolves through a reparse point or alias: {filePath} -> {resolvedPath}");
-                }
-
-                leases._streams.Add(stream);
-                stream = null;
-            }
-            finally
-            {
-                stream?.Dispose();
-            }
-        }
-
-        public void Dispose()
-        {
-            for (int index = _streams.Count - 1; index >= 0; index--)
-            {
-                _streams[index].Dispose();
-            }
-
-            _streams.Clear();
-        }
-    }
-
 #if KEEPVAULT_MACOS
     private sealed partial class MacInputSnapshot : IDisposable
     {
@@ -1630,6 +1584,531 @@ public sealed partial class ZpaqService
 
         [LibraryImport("libSystem.B.dylib", EntryPoint = "clonefile", SetLastError = true, StringMarshalling = StringMarshalling.Utf8)]
         private static partial int CloneFile(string source, string destination, uint flags);
+    }
+#endif
+
+#if !KEEPVAULT_MACOS
+    /// <summary>
+    /// Binds the tree native ZPAQ actually reads to exactly the objects this
+    /// process validated, for the whole duration of the operation.
+    /// </summary>
+    /// <remarks>
+    /// Leasing the files a path walk happened to find is not enough. The walk
+    /// runs over a namespace that keeps changing, and native ZPAQ afterwards
+    /// enumerates those same live directories a second time. Anything that
+    /// appears in between - a new file, a junction pointing out of the
+    /// selection - is invisible to the check and fully visible to ZPAQ.
+    ///
+    /// So the checked objects and the archived objects are made the same set:
+    /// <list type="bullet">
+    /// <item>every directory is opened no-follow, and its own handle has to
+    /// resolve back to the path we meant, which rejects a reparse point at the
+    /// directory itself and a junction swapped into any ancestor;</item>
+    /// <item>every regular file is opened <see cref="FileShare.Read"/> and held
+    /// open until ZPAQ is finished, so it can be neither replaced, renamed nor
+    /// written while it is being archived;</item>
+    /// <item>a private mirror is built from those verified objects - hard links
+    /// where the volume allows them, otherwise a copy read out of the open
+    /// handle - and ZPAQ is pointed at the mirror, never at the live tree.</item>
+    /// </list>
+    /// A hard link names a file record, not a path, so no later rename in the
+    /// live tree can change what the mirror contains. Nothing in the mirror is
+    /// ever a reparse point, because the mirror only ever gets directories this
+    /// process created and links or copies of files it verified.
+    /// </remarks>
+    private sealed partial class WindowsInputSnapshot : IDisposable
+    {
+        private const uint FileListDirectory = 0x00000001;
+        private const uint FileReadAttributes = 0x00000080;
+        private const uint ShareRead = 0x00000001;
+        private const uint ShareWrite = 0x00000002;
+        private const uint ShareDelete = 0x00000004;
+        private const uint OpenExisting = 3;
+        private const uint FileFlagBackupSemantics = 0x02000000;
+        private const uint FileFlagOpenReparsePoint = 0x00200000;
+        private const uint FileAttributeDirectory = 0x00000010;
+        private const uint FileAttributeReparsePoint = 0x00000400;
+
+        private readonly string _snapshotRoot;
+        private readonly List<FileStream> _fileLeases = [];
+        private readonly List<string> _readOnlyCopies = [];
+        private bool _disposed;
+
+        private WindowsInputSnapshot(string snapshotRoot)
+        {
+            _snapshotRoot = snapshotRoot;
+            WorkingDirectory = snapshotRoot;
+            InputPaths = [];
+        }
+
+        internal string WorkingDirectory { get; }
+        internal string[] InputPaths { get; private set; }
+
+        internal static WindowsInputSnapshot Create(string workingDirectory, IReadOnlyList<string> inputPaths)
+        {
+            string sourceRoot = Path.TrimEndingDirectorySeparator(Path.GetFullPath(workingDirectory));
+            string[] sources = NormalizeSnapshotSources(inputPaths);
+            var snapshot = new WindowsInputSnapshot(Directory.CreateTempSubdirectory("keep-vault-input-").FullName);
+            try
+            {
+                var staged = new string[sources.Length];
+                for (int index = 0; index < sources.Length; index++)
+                {
+                    string source = sources[index];
+                    string relative = Path.GetRelativePath(sourceRoot, source);
+                    ValidateRelativeSnapshotPath(relative);
+                    string destination = Path.GetFullPath(Path.Combine(snapshot._snapshotRoot, relative));
+                    snapshot.EnsureWithinSnapshot(destination);
+
+                    string? parent = Path.GetDirectoryName(destination);
+                    if (string.IsNullOrWhiteSpace(parent))
+                    {
+                        throw new IOException("A secure input snapshot destination has no parent directory.");
+                    }
+
+                    Directory.CreateDirectory(parent);
+                    if (File.Exists(destination) || Directory.Exists(destination))
+                    {
+                        throw new IOException($"Two archive inputs collide inside the private snapshot: {relative}");
+                    }
+
+                    FileAttributes attributes = File.GetAttributes(source);
+                    if ((attributes & FileAttributes.ReparsePoint) != 0)
+                    {
+                        throw new IOException($"Die Eingabe enthält einen symbolischen Link oder Reparse Point: {source}");
+                    }
+
+                    if ((attributes & FileAttributes.Directory) != 0)
+                    {
+                        snapshot.MirrorDirectoryTree(source, destination);
+                    }
+                    else
+                    {
+                        snapshot.MirrorFile(source, destination);
+                    }
+
+                    staged[index] = destination;
+                }
+
+                snapshot.InputPaths = staged;
+                return snapshot;
+            }
+            catch
+            {
+                snapshot.Dispose();
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// Drops duplicates and inputs already covered by a selected directory,
+        /// so one object is never mirrored twice under two names.
+        /// </summary>
+        private static string[] NormalizeSnapshotSources(IReadOnlyList<string> inputPaths)
+        {
+            string[] distinct = inputPaths
+                .Select(Path.GetFullPath)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+            return distinct
+                .Where(source => !distinct.Any(candidate =>
+                    !string.Equals(candidate, source, StringComparison.OrdinalIgnoreCase)
+                    && Directory.Exists(candidate)
+                    && IsPathWithinDirectory(source, candidate)))
+                .ToArray();
+        }
+
+        private static void ValidateRelativeSnapshotPath(string relative)
+        {
+            if (string.IsNullOrWhiteSpace(relative)
+                || Path.IsPathRooted(relative)
+                || string.Equals(relative, ".", StringComparison.Ordinal)
+                || relative.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+                    .Any(component => string.Equals(component, "..", StringComparison.Ordinal)))
+            {
+                throw new IOException("An input path escapes the secure snapshot root.");
+            }
+        }
+
+        private void EnsureWithinSnapshot(string path)
+        {
+            string prefix = Path.TrimEndingDirectorySeparator(_snapshotRoot) + Path.DirectorySeparatorChar;
+            if (!path.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new IOException("An input snapshot path escapes its private root.");
+            }
+        }
+
+        private void MirrorDirectoryTree(string sourceDirectory, string destinationDirectory)
+        {
+            Directory.CreateDirectory(destinationDirectory);
+            var pending = new Stack<(string Source, string Destination)>();
+            pending.Push((sourceDirectory, destinationDirectory));
+            while (pending.Count > 0)
+            {
+                (string currentSource, string currentDestination) = pending.Pop();
+
+                // The handle stays open for the whole enumeration of this
+                // directory, and it is the handle - not the path - that had to
+                // prove it is a real, non-reparse directory reachable under the
+                // name we walked to.
+                using SafeFileHandle directory = OpenDirectoryNoFollow(currentSource);
+                foreach (string entry in Directory.EnumerateFileSystemEntries(currentSource))
+                {
+                    string name = Path.GetFileName(entry);
+                    if (string.IsNullOrEmpty(name) || name is "." or "..")
+                    {
+                        throw new IOException($"Die Eingabe enthält einen unzulässigen Verzeichniseintrag: {entry}");
+                    }
+
+                    string destinationEntry = Path.GetFullPath(Path.Combine(currentDestination, name));
+                    EnsureWithinSnapshot(destinationEntry);
+
+                    FileAttributes attributes = File.GetAttributes(entry);
+                    if ((attributes & FileAttributes.ReparsePoint) != 0)
+                    {
+                        throw new IOException($"Die Eingabe enthält einen symbolischen Link oder Reparse Point: {entry}");
+                    }
+
+                    if ((attributes & FileAttributes.Directory) != 0)
+                    {
+                        Directory.CreateDirectory(destinationEntry);
+                        pending.Push((entry, destinationEntry));
+                    }
+                    else
+                    {
+                        MirrorFile(entry, destinationEntry);
+                    }
+                }
+            }
+        }
+
+        /// <summary>
+        /// Opens one directory without following a final reparse point and
+        /// proves the handle really is the directory the walk meant.
+        /// </summary>
+        /// <remarks>
+        /// The sharing mode is deliberately permissive: the handle is an
+        /// identity proof, not a lock. What makes the result trustworthy is the
+        /// final-path comparison, which also catches a junction swapped into an
+        /// ancestor after the walk passed through it.
+        /// </remarks>
+        private static SafeFileHandle OpenDirectoryNoFollow(string directoryPath)
+        {
+            string fullPath = Path.TrimEndingDirectorySeparator(Path.GetFullPath(directoryPath));
+            SafeFileHandle handle = CreateFile(
+                fullPath,
+                FileListDirectory | FileReadAttributes,
+                ShareRead | ShareWrite | ShareDelete,
+                nint.Zero,
+                OpenExisting,
+                FileFlagBackupSemantics | FileFlagOpenReparsePoint,
+                nint.Zero);
+            if (handle.IsInvalid)
+            {
+                int error = Marshal.GetLastPInvokeError();
+                handle.Dispose();
+                throw new IOException(
+                    $"Das Eingabeverzeichnis konnte nicht gebunden geöffnet werden: {fullPath}",
+                    new Win32Exception(error));
+            }
+
+            try
+            {
+                ByHandleFileInformation information = GetFileInformationOrThrow(handle, fullPath);
+                if ((information.FileAttributes & FileAttributeReparsePoint) != 0)
+                {
+                    throw new IOException($"Die Eingabe enthält einen symbolischen Link oder Reparse Point: {fullPath}");
+                }
+
+                if ((information.FileAttributes & FileAttributeDirectory) == 0)
+                {
+                    throw new IOException($"Der Eingabepfad ist kein Verzeichnis: {fullPath}");
+                }
+
+                string resolvedPath = Path.TrimEndingDirectorySeparator(
+                    NativePathResolver.ResolveFinalDosPath(handle));
+                if (!PathsEqual(fullPath, resolvedPath))
+                {
+                    throw new IOException(
+                        $"Das Eingabeverzeichnis wird über einen Reparse Point aufgelöst: {fullPath} -> {resolvedPath}");
+                }
+
+                return handle;
+            }
+            catch
+            {
+                handle.Dispose();
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// Leases one input file and mirrors it into the private snapshot.
+        /// </summary>
+        private void MirrorFile(string sourceFile, string destinationFile)
+        {
+            FileStream? lease = null;
+            try
+            {
+                lease = AcquireVerifiedFileLease(sourceFile);
+                _fileLeases.Add(lease);
+                FileStream owned = lease;
+                lease = null;
+
+                // A hard link shares one file record with the original, so its
+                // read-only flag cannot be cleared for cleanup without changing
+                // the user's file. Read-only inputs therefore take the copy
+                // path, which owns its own record.
+                ByHandleFileInformation information = GetFileInformationOrThrow(owned.SafeFileHandle, sourceFile);
+                bool readOnlySource = ((FileAttributes)information.FileAttributes & FileAttributes.ReadOnly) != 0;
+                if (readOnlySource || !TryCreateVerifiedHardLink(sourceFile, destinationFile, owned))
+                {
+                    CopyFromLease(owned, destinationFile);
+                    if (readOnlySource)
+                    {
+                        File.SetAttributes(destinationFile, File.GetAttributes(destinationFile) | FileAttributes.ReadOnly);
+                        _readOnlyCopies.Add(destinationFile);
+                    }
+                }
+            }
+            finally
+            {
+                lease?.Dispose();
+            }
+        }
+
+        /// <summary>
+        /// Opens an input file so that it cannot be replaced, renamed, deleted
+        /// or written while it is archived, and proves the path did not resolve
+        /// through a link.
+        /// </summary>
+        [SuppressMessage("Reliability", "CA2000:Dispose objects before losing scope", Justification = "The stream is returned to the caller, which transfers it into the lease list; every failing path disposes it here.")]
+        private static FileStream AcquireVerifiedFileLease(string filePath)
+        {
+            FileAttributes attributes = File.GetAttributes(filePath);
+            if ((attributes & FileAttributes.ReparsePoint) != 0)
+            {
+                throw new IOException($"Die Eingabedatei ist ein Reparse Point oder symbolischer Link: {filePath}");
+            }
+
+            FileStream? stream = null;
+            try
+            {
+                stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read);
+                _ = NativePathResolver.RequireCanonicalFilePath(stream.SafeFileHandle, filePath, "ZPAQ input");
+                FileStream leased = stream;
+                stream = null;
+                return leased;
+            }
+            finally
+            {
+                stream?.Dispose();
+            }
+        }
+
+        /// <summary>
+        /// Hard-links the leased file into the snapshot and proves the new name
+        /// really refers to the leased file record.
+        /// </summary>
+        /// <returns>
+        /// false when the volume cannot provide a hard link at all, which is the
+        /// only case the caller may answer with a copy. A link that appears but
+        /// names a different object is an attack, not a limitation, and throws.
+        /// </returns>
+        private static bool TryCreateVerifiedHardLink(string sourceFile, string destinationFile, FileStream lease)
+        {
+            if (!CreateHardLink(destinationFile, sourceFile, nint.Zero))
+            {
+                return false;
+            }
+
+            try
+            {
+                using SafeFileHandle linked = CreateFile(
+                    destinationFile,
+                    FileReadAttributes,
+                    ShareRead | ShareWrite | ShareDelete,
+                    nint.Zero,
+                    OpenExisting,
+                    FileFlagOpenReparsePoint,
+                    nint.Zero);
+                if (linked.IsInvalid)
+                {
+                    throw new IOException(
+                        $"Die gebundene Kopie konnte nicht geprüft werden: {destinationFile}",
+                        new Win32Exception(Marshal.GetLastPInvokeError()));
+                }
+
+                ByHandleFileInformation linkInformation = GetFileInformationOrThrow(linked, destinationFile);
+                ByHandleFileInformation sourceInformation = GetFileInformationOrThrow(lease.SafeFileHandle, sourceFile);
+                if (linkInformation.VolumeSerialNumber != sourceInformation.VolumeSerialNumber
+                    || linkInformation.FileIndexHigh != sourceInformation.FileIndexHigh
+                    || linkInformation.FileIndexLow != sourceInformation.FileIndexLow)
+                {
+                    throw new IOException(
+                        $"Die gebundene Kopie verweist nicht auf die geprüfte Eingabedatei: {sourceFile}");
+                }
+
+                return true;
+            }
+            catch
+            {
+                TryDeleteSnapshotFile(destinationFile);
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// Copies the bytes out of the already verified handle, never off the
+        /// path, for volumes that cannot hard-link.
+        /// </summary>
+        private static void CopyFromLease(FileStream lease, string destinationFile)
+        {
+            lease.Position = 0;
+            try
+            {
+                using (var destination = new FileStream(destinationFile, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                {
+                    lease.CopyTo(destination);
+                }
+
+                ByHandleFileInformation information = GetFileInformationOrThrow(lease.SafeFileHandle, destinationFile);
+                File.SetLastWriteTimeUtc(destinationFile, FileTimeToUtc(information.LastWriteTimeHigh, information.LastWriteTimeLow));
+            }
+            finally
+            {
+                lease.Position = 0;
+            }
+        }
+
+        private static DateTime FileTimeToUtc(uint high, uint low)
+        {
+            long fileTime = ((long)high << 32) | low;
+            return fileTime <= 0 ? DateTime.UnixEpoch : DateTime.FromFileTimeUtc(fileTime);
+        }
+
+        private static ByHandleFileInformation GetFileInformationOrThrow(SafeFileHandle handle, string path)
+        {
+            if (!GetFileInformationByHandle(handle, out ByHandleFileInformation information))
+            {
+                throw new IOException(
+                    $"Die Dateiidentität konnte nicht gelesen werden: {path}",
+                    new Win32Exception(Marshal.GetLastPInvokeError()));
+            }
+
+            return information;
+        }
+
+        private static void TryDeleteSnapshotFile(string path)
+        {
+            try
+            {
+                File.Delete(path);
+            }
+            catch (IOException)
+            {
+            }
+            catch (UnauthorizedAccessException)
+            {
+            }
+        }
+
+        private static void TryDeletePrivateTree(string path)
+        {
+            try
+            {
+                if (Directory.Exists(path))
+                {
+                    Directory.Delete(path, recursive: true);
+                }
+            }
+            catch (IOException)
+            {
+            }
+            catch (UnauthorizedAccessException)
+            {
+            }
+        }
+
+        public void Dispose()
+        {
+            if (_disposed)
+            {
+                return;
+            }
+
+            _disposed = true;
+            for (int index = _fileLeases.Count - 1; index >= 0; index--)
+            {
+                _fileLeases[index].Dispose();
+            }
+
+            _fileLeases.Clear();
+            foreach (string copy in _readOnlyCopies)
+            {
+                try
+                {
+                    if (File.Exists(copy))
+                    {
+                        File.SetAttributes(copy, File.GetAttributes(copy) & ~FileAttributes.ReadOnly);
+                    }
+                }
+                catch (IOException)
+                {
+                }
+                catch (UnauthorizedAccessException)
+                {
+                }
+            }
+
+            _readOnlyCopies.Clear();
+            TryDeletePrivateTree(_snapshotRoot);
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct ByHandleFileInformation
+        {
+            public uint FileAttributes;
+            public uint CreationTimeLow;
+            public uint CreationTimeHigh;
+            public uint LastAccessTimeLow;
+            public uint LastAccessTimeHigh;
+            public uint LastWriteTimeLow;
+            public uint LastWriteTimeHigh;
+            public uint VolumeSerialNumber;
+            public uint FileSizeHigh;
+            public uint FileSizeLow;
+            public uint NumberOfLinks;
+            public uint FileIndexHigh;
+            public uint FileIndexLow;
+        }
+
+        [LibraryImport("kernel32.dll", EntryPoint = "CreateFileW", SetLastError = true, StringMarshalling = StringMarshalling.Utf16)]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+        private static partial SafeFileHandle CreateFile(
+            string fileName,
+            uint desiredAccess,
+            uint shareMode,
+            nint securityAttributes,
+            uint creationDisposition,
+            uint flagsAndAttributes,
+            nint templateFile);
+
+        [LibraryImport("kernel32.dll", SetLastError = true)]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static partial bool GetFileInformationByHandle(
+            SafeFileHandle file,
+            out ByHandleFileInformation information);
+
+        [LibraryImport("kernel32.dll", EntryPoint = "CreateHardLinkW", SetLastError = true, StringMarshalling = StringMarshalling.Utf16)]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static partial bool CreateHardLink(
+            string fileName,
+            string existingFileName,
+            nint securityAttributes);
     }
 #endif
 

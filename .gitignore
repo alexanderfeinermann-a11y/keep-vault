@@ -33,3 +33,13 @@ KeepVaultMac/Native/*/libcryptopp.a
 
 # Downloaded vendor archives: the extracted trees beside them are what builds.
 external/skein-reference.zip
+
+# Generated audit/analysis artifacts. These are build outputs, not fixtures:
+# they carry stale results and absolute developer paths, and a later audit must
+# never mistake them for current test evidence.
+KalynaArchiver.Tests/*.out
+KeepVaultMac.Tests/*.out
+*.nativecodeanalysis.xml
+*.sarif
+build-analysis/*
+!build-analysis/.gitkeep

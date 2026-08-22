@@ -17,13 +17,13 @@ internal enum KeyRolePurpose
 }
 
 /// <summary>
-/// Turns the 1024-bit v10 master into the individual cipher, MAC and recovery
+/// Turns the 1024-bit v11 master into the individual cipher, MAC and recovery
 /// keys.
 /// </summary>
 /// <remarks>
 /// v9 sliced one flat Argon2id output into cipher and MAC keys, so the same
 /// cipher in two positions could end up sharing structure and every role's key
-/// was a function of where it happened to sit in that buffer. v10 derives each
+/// was a function of where it happened to sit in that buffer. v11 derives each
 /// role separately from a canonical, domain-separated context instead.
 ///
 /// Each role runs through two independent PRF families and the results are
@@ -48,9 +48,21 @@ internal static class SuiteKeySchedule
     public const int MasterBytes = 128;
     public const int RoleBytes = 128;
 
-    private const string RoleDomain = "Kalyna-ZPAQ/v10/RoleKey";
-    private const string Sha3RoleDomain = "Kalyna-ZPAQ/v10/RoleKey/HKDF-HMAC-SHA3-512";
-    private const string SkeinRoleDomain = "Kalyna-ZPAQ/v10/RoleKey/Skein-MAC-1024-1024";
+    /// <summary>
+    /// The role schedule belongs to the container generation it serves, so
+    /// every domain string and the context's own version field say v11.
+    /// </summary>
+    /// <remarks>
+    /// There is one generation and no second set of domains to select between.
+    /// That is deliberate: a schedule that could still be asked for older
+    /// domains is a second derivation to attack and a second thing to get
+    /// wrong, and nothing in this build can read an older container anyway.
+    /// </remarks>
+    public const int ContextVersion = 11;
+
+    private const string RoleDomain = "Kalyna-ZPAQ/v11/RoleKey";
+    private const string Sha3RoleDomain = "Kalyna-ZPAQ/v11/RoleKey/HKDF-HMAC-SHA3-512";
+    private const string SkeinRoleDomain = "Kalyna-ZPAQ/v11/RoleKey/Skein-MAC-1024-1024";
 
     /// <summary>
     /// The stage index reserved for keys that belong to the container as a
@@ -81,7 +93,7 @@ internal static class SuiteKeySchedule
 
     /// <summary>
     /// The canonical context that makes one role distinct from every other.
-    /// Format: LP(D_ROLE) || LE32(10) || LP(Algorithm) || LE32(StageIndex) || LP(Cipher) || LP(Purpose) || LE32(KeyBits)
+    /// Format: LP(D_ROLE) || LE32(version) || LP(Algorithm) || LE32(StageIndex) || LP(Cipher) || LP(Purpose) || LE32(KeyBits)
     /// </summary>
     /// <remarks>
     /// KeyBits is part of the context on purpose: a role that asks for 256 bits
@@ -115,7 +127,7 @@ internal static class SuiteKeySchedule
         int offset = 0;
 
         WriteLengthPrefixed(result, ref offset, roleDomainBytes);
-        System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(result.AsSpan(offset), 10);
+        System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(result.AsSpan(offset), ContextVersion);
         offset += sizeof(int);
         WriteLengthPrefixed(result, ref offset, algorithmBytes);
         System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(result.AsSpan(offset), stageIndex);
@@ -154,7 +166,7 @@ internal static class SuiteKeySchedule
     {
         if (master.Length != MasterBytes)
         {
-            throw new ArgumentException($"The v10 master must be {MasterBytes} bytes.", nameof(master));
+            throw new ArgumentException($"The container master must be {MasterBytes} bytes.", nameof(master));
         }
 
         if (destination.Length < RoleBytes)

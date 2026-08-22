@@ -3,7 +3,7 @@ using System.Security.Cryptography;
 namespace KalynaArchiver.Services;
 
 /// <summary>
-/// The whole v10 key derivation, from the four things the user holds to the
+/// The whole v11 key derivation, from the four things the user holds to the
 /// keys one suite needs.
 /// </summary>
 /// <remarks>
@@ -15,9 +15,19 @@ namespace KalynaArchiver.Services;
 /// a second round whose Argon2id secret is the first round's complete master,
 /// so round two cannot be attacked without finishing round one — four
 /// sequential 1&#160;GiB-plus Argon2id calls in total.
+///
+/// There is exactly one derivation generation. Earlier container versions are
+/// not readable and no code path can select an older KDF, older domains or an
+/// older role schedule: a version that is not <see cref="ContainerVersion"/>
+/// never reaches this class.
 /// </remarks>
-internal static class V10KeyDerivation
+internal static class ContainerKeyDerivation
 {
+    /// <summary>
+    /// The one container generation this build derives keys for.
+    /// </summary>
+    public const int ContainerVersion = 11;
+
     public const int MinPinLength = 6;
     public const int MaxPinSyntaxLength = 16;
     public const int MaxPinCreationLength = 16;
@@ -374,15 +384,12 @@ internal static class V10KeyDerivation
         string pin,
         string factorAHex,
         string factorBHex,
-        V10Salts salts,
+        KdfSalts salts,
         IProgress<string>? progress,
         CancellationToken cancellationToken,
-        int version = 11)
+        int version = ContainerVersion)
     {
-        if (version != 10 && version != 11)
-        {
-            throw new ArgumentOutOfRangeException(nameof(version), $"Unsupported key derivation version: {version}");
-        }
+        RequireSupportedVersion(version);
 
         ArgumentNullException.ThrowIfNull(parameters);
         ArgumentNullException.ThrowIfNull(salts);
@@ -399,49 +406,26 @@ internal static class V10KeyDerivation
         }
 
         string algorithm = parameters.Algorithm;
-        using LockedSensitiveBuffer sha3Credential = LockedSensitiveBuffer.Create(V10MasterKdf.CredentialHashBytes);
-        using LockedSensitiveBuffer skeinCredential = LockedSensitiveBuffer.Create(V10MasterKdf.CredentialHashBytes);
+        using LockedSensitiveBuffer sha3Credential = LockedSensitiveBuffer.Create(V11MasterKdf.CredentialHashBytes);
+        using LockedSensitiveBuffer skeinCredential = LockedSensitiveBuffer.Create(V11MasterKdf.CredentialHashBytes);
 
-        if (version == 10)
-        {
-            V10MasterKdf.DeriveSha3CredentialHash(
-                algorithm, userPassword, pin, factorA.Bytes, factorB.Bytes, sha3Credential.Bytes);
-            V10MasterKdf.DeriveSkeinCredentialHash(
-                algorithm, userPassword, pin, factorA.Bytes, factorB.Bytes, skeinCredential.Bytes);
-        }
-        else
-        {
-            V11MasterKdf.DeriveSha3CredentialHash(
-                algorithm, userPassword, pin, factorA.Bytes, factorB.Bytes, sha3Credential.Bytes);
-            V11MasterKdf.DeriveSkeinCredentialHash(
-                algorithm, userPassword, pin, factorA.Bytes, factorB.Bytes, skeinCredential.Bytes);
-        }
+        V11MasterKdf.DeriveSha3CredentialHash(
+            algorithm, userPassword, pin, factorA.Bytes, factorB.Bytes, sha3Credential.Bytes);
+        V11MasterKdf.DeriveSkeinCredentialHash(
+            algorithm, userPassword, pin, factorA.Bytes, factorB.Bytes, skeinCredential.Bytes);
 
         cancellationToken.ThrowIfCancellationRequested();
-        (_, uint memory1) = version == 10
-            ? V10MasterKdf.DerivePmi(
-                algorithm, 1, sha3Credential.Bytes, skeinCredential.Bytes,
-                ReadOnlySpan<byte>.Empty, salts.Sha3Round1, salts.SkeinRound1)
-            : V11MasterKdf.DerivePmi(
-                algorithm, 1, sha3Credential.Bytes, skeinCredential.Bytes,
-                ReadOnlySpan<byte>.Empty, salts.Sha3Round1, salts.SkeinRound1);
+        (_, uint memory1) = V11MasterKdf.DerivePmi(
+            algorithm, 1, sha3Credential.Bytes, skeinCredential.Bytes,
+            ReadOnlySpan<byte>.Empty, salts.Sha3Round1, salts.SkeinRound1);
         progress?.Report(paranoia ? "Key derivation, round 1 of 2" : "Key derivation");
 
-        LockedSensitiveBuffer? round1Master = LockedSensitiveBuffer.Create(V10MasterKdf.MasterBytes);
+        LockedSensitiveBuffer? round1Master = LockedSensitiveBuffer.Create(V11MasterKdf.MasterBytes);
         try
         {
-            if (version == 10)
-            {
-                V10MasterKdf.DeriveRoundMaster(
-                    algorithm, 1, sha3Credential.Bytes, skeinCredential.Bytes,
-                    salts.Sha3Round1, salts.SkeinRound1, ReadOnlySpan<byte>.Empty, memory1, round1Master.Bytes);
-            }
-            else
-            {
-                V11MasterKdf.DeriveRoundMaster(
-                    algorithm, 1, sha3Credential.Bytes, skeinCredential.Bytes,
-                    salts.Sha3Round1, salts.SkeinRound1, ReadOnlySpan<byte>.Empty, memory1, round1Master.Bytes);
-            }
+            V11MasterKdf.DeriveRoundMaster(
+                algorithm, 1, sha3Credential.Bytes, skeinCredential.Bytes,
+                salts.Sha3Round1, salts.SkeinRound1, ReadOnlySpan<byte>.Empty, memory1, round1Master.Bytes);
 
             if (!paranoia)
             {
@@ -451,32 +435,19 @@ internal static class V10KeyDerivation
             }
 
             cancellationToken.ThrowIfCancellationRequested();
-            (_, uint memory2) = version == 10
-                ? V10MasterKdf.DerivePmi(
-                    algorithm, 2, sha3Credential.Bytes, skeinCredential.Bytes,
-                    round1Master.Bytes, salts.Sha3Round2!, salts.SkeinRound2!)
-                : V11MasterKdf.DerivePmi(
-                    algorithm, 2, sha3Credential.Bytes, skeinCredential.Bytes,
-                    round1Master.Bytes, salts.Sha3Round2!, salts.SkeinRound2!);
+            (_, uint memory2) = V11MasterKdf.DerivePmi(
+                algorithm, 2, sha3Credential.Bytes, skeinCredential.Bytes,
+                round1Master.Bytes, salts.Sha3Round2!, salts.SkeinRound2!);
             progress?.Report("Key derivation, round 2 of 2");
             // The first master is the Argon2id secret here, not the password:
             // it makes round two unreachable without round one, and it keeps
             // the credentials themselves in the same position in both rounds.
-            LockedSensitiveBuffer? round2Master = LockedSensitiveBuffer.Create(V10MasterKdf.MasterBytes);
+            LockedSensitiveBuffer? round2Master = LockedSensitiveBuffer.Create(V11MasterKdf.MasterBytes);
             try
             {
-                if (version == 10)
-                {
-                    V10MasterKdf.DeriveRoundMaster(
-                        algorithm, 2, sha3Credential.Bytes, skeinCredential.Bytes,
-                        salts.Sha3Round2!, salts.SkeinRound2!, round1Master.Bytes, memory2, round2Master.Bytes);
-                }
-                else
-                {
-                    V11MasterKdf.DeriveRoundMaster(
-                        algorithm, 2, sha3Credential.Bytes, skeinCredential.Bytes,
-                        salts.Sha3Round2!, salts.SkeinRound2!, round1Master.Bytes, memory2, round2Master.Bytes);
-                }
+                V11MasterKdf.DeriveRoundMaster(
+                    algorithm, 2, sha3Credential.Bytes, skeinCredential.Bytes,
+                    salts.Sha3Round2!, salts.SkeinRound2!, round1Master.Bytes, memory2, round2Master.Bytes);
                 var result = new MasterResult(round2Master, memory1, memory2);
                 round2Master = null; // ownership transferred to result
                 return result;
@@ -493,6 +464,21 @@ internal static class V10KeyDerivation
     }
 
     /// <summary>
+    /// Refuses anything but the current container generation, so a header that
+    /// claims an older version can never select an older derivation.
+    /// </summary>
+    internal static void RequireSupportedVersion(int version)
+    {
+        if (version != ContainerVersion)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(version),
+                version,
+                $"Only container version {ContainerVersion} is supported; there is no backward-compatible key derivation.");
+        }
+    }
+
+    /// <summary>
     /// The suite's cipher and MAC keys, derived through the role key schedule.
     /// </summary>
     public static RoleKeyMaterial DeriveSuiteKeys(
@@ -501,7 +487,7 @@ internal static class V10KeyDerivation
         string pin,
         string factorAHex,
         string factorBHex,
-        V10Salts salts,
+        KdfSalts salts,
         IProgress<string>? progress,
         CancellationToken cancellationToken,
         int version = 11)

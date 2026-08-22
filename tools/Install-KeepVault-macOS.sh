@@ -79,7 +79,27 @@ if [[ ${source_app} != ${repo_root}/* ]]; then
   print -u2 "The install source must remain inside the Keep Vault workspace: ${source_app}"
   exit 1
 fi
-applications_dir=${applications_dir:A}
+# The installation root must be validated as the caller named it. Resolving the
+# path physically first (:A) would silently follow a symbolic link and make the
+# -L test below inspect the resolved target instead of the object the caller
+# handed us. Keep the raw argument, derive the logical absolute form (:a, no
+# symlink resolution) and the physical form (:A) separately, and refuse any
+# divergence before this directory is accepted as an installation root.
+applications_dir_raw=${applications_dir}
+applications_dir_logical=${applications_dir_raw:a}
+applications_dir_physical=${applications_dir_raw:A}
+if [[ -L ${applications_dir_logical} ]]; then
+  release_lock
+  print -u2 "Applications directory is a symbolic link and will not be used as an installation root: ${applications_dir_logical}"
+  exit 1
+fi
+if [[ ${applications_dir_logical} != ${applications_dir_physical} ]]; then
+  release_lock
+  print -u2 "Applications directory path traverses a symbolic link: ${applications_dir_logical} -> ${applications_dir_physical}"
+  print -u2 "Pass the fully resolved directory with --applications-dir if this location is intended."
+  exit 1
+fi
+applications_dir=${applications_dir_physical}
 if [[ ! -d ${applications_dir} || -L ${applications_dir} || ! -w ${applications_dir} ]]; then
   release_lock
   print -u2 "Applications directory is unavailable, a symbolic link, or not writable: ${applications_dir}"
@@ -129,14 +149,30 @@ recorded_version=0
 rollback_failed=0
 
 anchor_directory='/Library/Application Support/Keep Vault'
+anchor_parent=${anchor_directory:h}
 anchor_path=${anchor_directory}/minimum-version
 
-if [[ -e ${anchor_path} || -L ${anchor_path} ]]; then
-  if [[ -L ${anchor_path} || ! -f ${anchor_path} ]]; then
-    release_lock
-    print -u2 "The machine-wide rollback anchor is corrupted or a symlink: ${anchor_path}"
-    exit 1
-  fi
+# The anchor directory has to be validated before *any* privileged mutation,
+# not only when the anchor file already exists. Without the anchor file the
+# privileged mkdir/chown/chmod/write block below would otherwise be the first
+# thing to touch a prepared symbolic link, and the post-update symlink check
+# would come far too late to prevent the side effects. The privileged block
+# repeats these checks atomically under root; this pre-check fails early and
+# without an authentication prompt.
+if [[ -L ${anchor_parent} || ! -d ${anchor_parent} ]]; then
+  release_lock
+  print -u2 "The rollback anchor parent directory is invalid or a symlink: ${anchor_parent}"
+  exit 1
+fi
+anchor_parent_uid=$(stat -f '%u' ${anchor_parent} 2>/dev/null || print -1)
+anchor_parent_mode=$(stat -f '%Lp' ${anchor_parent} 2>/dev/null || print 0)
+if (( anchor_parent_uid != 0 || (8#${anchor_parent_mode} & 8#022) != 0 )); then
+  release_lock
+  print -u2 "The rollback anchor parent directory has insecure owner/permissions: ${anchor_parent}"
+  exit 1
+fi
+
+if [[ -e ${anchor_directory} || -L ${anchor_directory} ]]; then
   if [[ -L ${anchor_directory} || ! -d ${anchor_directory} ]]; then
     release_lock
     print -u2 "The rollback anchor directory is invalid or a symlink: ${anchor_directory}"
@@ -147,6 +183,14 @@ if [[ -e ${anchor_path} || -L ${anchor_path} ]]; then
   if (( anchor_dir_uid != 0 || (8#${anchor_dir_mode} & 8#022) != 0 )); then
     release_lock
     print -u2 "The rollback anchor directory has insecure owner/permissions: ${anchor_directory}"
+    exit 1
+  fi
+fi
+
+if [[ -e ${anchor_path} || -L ${anchor_path} ]]; then
+  if [[ -L ${anchor_path} || ! -f ${anchor_path} ]]; then
+    release_lock
+    print -u2 "The machine-wide rollback anchor is corrupted or a symlink: ${anchor_path}"
     exit 1
   fi
   anchor_uid=$(stat -f '%u' ${anchor_path} 2>/dev/null || print -1)
@@ -222,13 +266,16 @@ execute_rollback() {
     # Rollback Anchor if modified
     if (( anchor_updated )); then
       if (( had_existing_anchor )); then
-        anchor_tmp="${anchor_directory}/.minimum-version.rollback.tmp.$$"
-        ANCHOR_DIR=${anchor_directory} ANCHOR_PATH=${anchor_path} ANCHOR_TMP=${anchor_tmp} PREV_VERSION=${recorded_version} osascript <<'APPLESCRIPT' || rollback_errors+=("Failed to restore rollback anchor")
+        ANCHOR_DIR=${anchor_directory} ANCHOR_PATH=${anchor_path} PREV_VERSION=${recorded_version} osascript <<'APPLESCRIPT' || rollback_errors+=("Failed to restore rollback anchor")
 set anchorDir to system attribute "ANCHOR_DIR"
 set anchorPath to system attribute "ANCHOR_PATH"
-set anchorTmp to system attribute "ANCHOR_TMP"
 set prevVersion to system attribute "PREV_VERSION"
-set commandText to "/usr/bin/printf '%s' " & quoted form of prevVersion & " > " & quoted form of anchorTmp & " && /usr/sbin/chown 0:0 " & quoted form of anchorTmp & " && /bin/chmod 0644 " & quoted form of anchorTmp & " && /bin/mv -f " & quoted form of anchorTmp & " " & quoted form of anchorPath
+set commandText to "set -e; " & ¬
+  "dir=" & quoted form of anchorDir & "; anchor=" & quoted form of anchorPath & "; version=" & quoted form of prevVersion & "; " & ¬
+  "if [ -L \"$dir\" ] || [ ! -d \"$dir\" ]; then echo 'rollback anchor directory is not a real directory' >&2; exit 1; fi; " & ¬
+  "if [ -L \"$anchor\" ]; then echo 'rollback anchor is a symbolic link' >&2; exit 1; fi; " & ¬
+  "tmp=$(/usr/bin/mktemp \"$dir/.minimum-version.XXXXXXXX\"); " & ¬
+  "/usr/bin/printf '%s' \"$version\" > \"$tmp\"; /usr/sbin/chown 0:0 \"$tmp\"; /bin/chmod 0644 \"$tmp\"; /bin/mv -f \"$tmp\" \"$anchor\""
 do shell script commandText with administrator privileges
 APPLESCRIPT
       else
@@ -488,13 +535,25 @@ fi
 
 if (( update_anchor )); then
   anchor_updated=1
-  anchor_tmp="${anchor_directory}/.minimum-version.tmp.$$"
-  ANCHOR_DIR=${anchor_directory} ANCHOR_PATH=${anchor_path} ANCHOR_TMP=${anchor_tmp} NEW_VERSION=${installed_version} osascript <<'APPLESCRIPT' || {
+  ANCHOR_PARENT=${anchor_parent} ANCHOR_DIR=${anchor_directory} ANCHOR_PATH=${anchor_path} NEW_VERSION=${installed_version} osascript <<'APPLESCRIPT' || {
+set anchorParent to system attribute "ANCHOR_PARENT"
 set anchorDir to system attribute "ANCHOR_DIR"
 set anchorPath to system attribute "ANCHOR_PATH"
-set anchorTmp to system attribute "ANCHOR_TMP"
 set newVersion to system attribute "NEW_VERSION"
-set commandText to "/bin/mkdir -p " & quoted form of anchorDir & " && /usr/sbin/chown 0:0 " & quoted form of anchorDir & " && /bin/chmod 0755 " & quoted form of anchorDir & " && /usr/bin/printf '%s' " & quoted form of newVersion & " > " & quoted form of anchorTmp & " && /usr/sbin/chown 0:0 " & quoted form of anchorTmp & " && /bin/chmod 0644 " & quoted form of anchorTmp & " && /bin/mv -f " & quoted form of anchorTmp & " " & quoted form of anchorPath
+-- Every check is repeated here, under root, immediately before the mutation it
+-- guards: the unprivileged pre-check cannot rule out a swap between check and
+-- use. `mkdir` without -p never follows a symbolic link, and mktemp creates the
+-- staging file exclusively inside the validated directory.
+set commandText to "set -e; " & ¬
+  "parent=" & quoted form of anchorParent & "; dir=" & quoted form of anchorDir & "; anchor=" & quoted form of anchorPath & "; version=" & quoted form of newVersion & "; " & ¬
+  "if [ -L \"$parent\" ] || [ ! -d \"$parent\" ]; then echo 'rollback anchor parent is not a real directory' >&2; exit 1; fi; " & ¬
+  "if [ -L \"$dir\" ]; then echo 'rollback anchor directory is a symbolic link' >&2; exit 1; fi; " & ¬
+  "if [ ! -d \"$dir\" ]; then /bin/mkdir \"$dir\"; fi; " & ¬
+  "if [ -L \"$dir\" ] || [ ! -d \"$dir\" ]; then echo 'rollback anchor directory is not a real directory' >&2; exit 1; fi; " & ¬
+  "/usr/sbin/chown 0:0 \"$dir\"; /bin/chmod 0755 \"$dir\"; " & ¬
+  "if [ -L \"$anchor\" ]; then echo 'rollback anchor is a symbolic link' >&2; exit 1; fi; " & ¬
+  "tmp=$(/usr/bin/mktemp \"$dir/.minimum-version.XXXXXXXX\"); " & ¬
+  "/usr/bin/printf '%s' \"$version\" > \"$tmp\"; /usr/sbin/chown 0:0 \"$tmp\"; /bin/chmod 0644 \"$tmp\"; /bin/mv -f \"$tmp\" \"$anchor\""
 do shell script commandText with administrator privileges
 APPLESCRIPT
     print -u2 "Failed to update machine-wide rollback anchor to version ${installed_version}"
@@ -538,9 +597,11 @@ fi
 transaction_committed=1
 
 recovery_path=''
+recovery_dir=''
 post_commit_recovery_failed=0
 preserve_install_root=0
 retained_paths=()
+relocated_paths=()
 
 if [[ -d ${backup_path} && ! -L ${backup_path} ]] || [[ -d ${scanner_backup_path} && ! -L ${scanner_backup_path} ]]; then
   trash_dir=${HOME}/.Trash
@@ -548,7 +609,6 @@ if [[ -d ${backup_path} && ! -L ${backup_path} ]] || [[ -d ${scanner_backup_path
     mkdir -p ${trash_dir} 2>/dev/null || true
   fi
 
-  recovery_dir=''
   if [[ -d ${trash_dir} ]] && recovery_dir=$(mktemp -d "${trash_dir}/Keep Vault previous.XXXXXXXX" 2>/dev/null); then
     :
   elif recovery_dir=$(mktemp -d "${TMPDIR:-/tmp}/Keep Vault previous.XXXXXXXX" 2>/dev/null); then
@@ -566,7 +626,7 @@ if [[ -d ${backup_path} && ! -L ${backup_path} ]] || [[ -d ${scanner_backup_path
   else
     if [[ -d ${backup_path} && ! -L ${backup_path} ]]; then
       if mv ${backup_path} ${recovery_dir}/Keep\ Vault.app 2>/dev/null; then
-        :
+        relocated_paths+=(${recovery_dir}/Keep\ Vault.app)
       else
         print -u2 "Warning: Could not move previous Keep Vault backup to ${recovery_dir}; backup remains at ${backup_path}"
         post_commit_recovery_failed=1
@@ -577,7 +637,7 @@ if [[ -d ${backup_path} && ! -L ${backup_path} ]] || [[ -d ${scanner_backup_path
         old_sidecar=${backup_dir}/Keep\ Vault.app.launcher${launcher_sidecar_suffix}
         if [[ -f ${old_sidecar} && ! -L ${old_sidecar} ]]; then
           if mv ${old_sidecar} ${recovery_dir}/Keep\ Vault.app.launcher${launcher_sidecar_suffix} 2>/dev/null; then
-            :
+            relocated_paths+=(${recovery_dir}/Keep\ Vault.app.launcher${launcher_sidecar_suffix})
           else
             print -u2 "Warning: Could not move launcher signature ${launcher_sidecar_suffix} to ${recovery_dir}; remains at ${old_sidecar}"
             post_commit_recovery_failed=1
@@ -590,7 +650,7 @@ if [[ -d ${backup_path} && ! -L ${backup_path} ]] || [[ -d ${scanner_backup_path
 
     if [[ -d ${scanner_backup_path} && ! -L ${scanner_backup_path} ]]; then
       if mv ${scanner_backup_path} ${recovery_dir}/QR-Scanner.app 2>/dev/null; then
-        :
+        relocated_paths+=(${recovery_dir}/QR-Scanner.app)
       else
         print -u2 "Warning: Could not move previous QR-Scanner backup to ${recovery_dir}; backup remains at ${scanner_backup_path}"
         post_commit_recovery_failed=1
@@ -601,7 +661,7 @@ if [[ -d ${backup_path} && ! -L ${backup_path} ]] || [[ -d ${scanner_backup_path
         old_scanner_sidecar=${backup_dir}/QR-Scanner.app${scanner_sidecar_suffix}
         if [[ -f ${old_scanner_sidecar} && ! -L ${old_scanner_sidecar} ]]; then
           if mv ${old_scanner_sidecar} ${recovery_dir}/QR-Scanner.app${scanner_sidecar_suffix} 2>/dev/null; then
-            :
+            relocated_paths+=(${recovery_dir}/QR-Scanner.app${scanner_sidecar_suffix})
           else
             print -u2 "Warning: Could not move scanner signature ${scanner_sidecar_suffix} to ${recovery_dir}; remains at ${old_scanner_sidecar}"
             post_commit_recovery_failed=1
@@ -663,7 +723,13 @@ fi
 print "installed_app=${destination}"
 if [[ -n ${recovery_path} ]]; then
   print "previous_version_recoverable_at=${recovery_path}"
-elif (( ${#retained_paths[@]} > 0 )); then
+else
+  # A partially failed relocation leaves the old material in two places. Both
+  # sets have to be reported, otherwise the caller only learns about the
+  # backups that could *not* be moved and would never find the ones that were.
+  for moved in ${relocated_paths[@]}; do
+    print "previous_version_recoverable_at=${moved}"
+  done
   for ret in ${retained_paths[@]}; do
     print "previous_version_retained_at=${ret}"
   done

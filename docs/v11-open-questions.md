@@ -1,7 +1,8 @@
-# Open questions for v11
+# Open questions
 
-Everything here was found or raised during v10 and deliberately not fixed in
-v10. Each entry says what is wrong, why it was left, and what would close it.
+Everything here was found or raised while v11 was being built and deliberately
+not fixed. Each entry says what is wrong, why it was left, and what would close
+it.
 
 ## 1. The two signing keys share one wrapping key
 
@@ -11,7 +12,7 @@ private halves are protected by the same 32-byte AES key held in one Keychain
 item. Whoever obtains that key obtains both halves, and the hybrid signature
 stops being a hybrid at exactly the moment it would matter.
 
-Not fixed in v10 because re-wrapping requires the plaintext ML-DSA key, which
+Not fixed because re-wrapping requires the plaintext ML-DSA key, which
 exists only on the offline backup medium — the migration cannot be done from a
 build machine that only has the envelopes.
 
@@ -54,8 +55,8 @@ a local observer can estimate the PMI of a derivation it watches, and 16 bits of
 memory profile is a small space to search.
 
 This is documented rather than fixed because the alternative — a constant memory
-cost — gives the same information away to everyone unconditionally. It is worth
-restating in v11 whether the variable cost earns its complexity.
+cost — gives the same information away to everyone unconditionally. Whether the
+variable cost earns its complexity is still open.
 
 ## 5. The XOR combiner in the role key schedule
 
@@ -75,7 +76,10 @@ break in Argon2's compression function affects both. Calling the two branches
 
 ## 7. Windows
 
-`KalynaArchiver` has been carried along to v10 as source, but the WPF
-application can only be built on Windows and has never been built or tested
-against v10. Either build and test it on Windows or state plainly that the
-Windows tree is unsupported.
+`KalynaArchiver` has been carried along to v11 as source. It compiles — the
+project builds on macOS with `-p:EnableWindowsTargeting=true`, which is how the
+v11 changes to the Windows-only code paths were checked — but it has never been
+*run* or tested on Windows. In particular the Windows ZPAQ input snapshot
+(`WindowsInputSnapshot` in `ZpaqService.cs`) and its adversarial regression
+matrix have only been compiled, never executed. Either run the Windows test
+suite on Windows or state plainly that the Windows tree is unsupported.

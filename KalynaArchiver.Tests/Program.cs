@@ -64,7 +64,7 @@ if (args is ["--recovery-only"])
     RunProcessHardeningTests();
     RunNativeIntegrityTests();
     await RunRecoveryTestsAsync();
-    Console.WriteLine("KPAR2 v2 focused recovery tests passed.");
+    Console.WriteLine("KPAR2 v4 focused recovery tests passed (current writer; v3 legacy fixtures are covered by the macOS suite).");
     return;
 }
 
@@ -95,11 +95,13 @@ if (failure is not null)
 
 Console.WriteLine("Settings persistence, drag-and-drop, and key sheet tests passed.");
 await RunEntropyGeneratorTestsAsync();
-Console.WriteLine("Two generated 512-bit password factors and entropy mixer tests passed.");
+Console.WriteLine("Two generated 1024-bit password factors and entropy mixer tests passed.");
 RunNativeIntegrityTests();
 Console.WriteLine("Native tool integrity and signature checks passed.");
 await RunZpaqTraversalTestsAsync();
 Console.WriteLine("ZPAQ path-traversal and extraction-directory tests passed.");
+await RunZpaqInputBindingTestsAsync();
+Console.WriteLine("ZPAQ input-binding matrix (reparse points, post-check insertion, leases) passed.");
 await RunMalformedZpaqCorpusTestsAsync();
 Console.WriteLine("Mutated ZPAQ pipe-parser crash/hang corpus passed.");
 await RunCompressionLevelMatrixTestsAsync();
@@ -131,7 +133,7 @@ Console.WriteLine("Mixed text, empty, compressible, and random sample-data tests
 await RunShortReadKalynaStreamTestAsync();
 Console.WriteLine("Short-read Kalyna stream test passed.");
 await RunRecoveryTestsAsync();
-Console.WriteLine("KPAR2 v2 dual-certification, metadata redundancy, and recovery-boundary tests passed.");
+Console.WriteLine("KPAR2 v4 dual-certification, metadata redundancy, and recovery-boundary tests passed.");
 await RunLargeStreamingContainerTestAsync();
 Console.WriteLine("Large streaming container test passed.");
 await RunCryptographicEraseTestsAsync();
@@ -163,10 +165,26 @@ static void RunSettingsPersistenceTests()
             "GUI rename preserves the existing subtitle");
         Assert(typeof(MainWindow).Assembly.GetName().Name == "Keep Vault", "application assembly and executable identity use the product name");
         Assert(firstWindow.Argon2ProfileText.Text.Contains("1 GiB", StringComparison.Ordinal), "GUI displays the fixed 1 GiB Argon2 profile");
+        // The help text is localized user-facing prose, not a specification of
+        // the key derivation. Assert only the user semantics it must convey,
+        // and assert the cryptographic contract directly against the KDF.
         Assert(
-            firstWindow.PasswordGeneratorHelpText.Text.Contains("Argon2id(SHA3-512(UserPassword, A)", StringComparison.Ordinal)
+            firstWindow.PasswordGeneratorHelpText.Text.Contains("Nine independent pools", StringComparison.OrdinalIgnoreCase)
+            && firstWindow.PasswordGeneratorHelpText.Text.Contains("atomically", StringComparison.OrdinalIgnoreCase)
             && !firstWindow.PasswordGeneratorHelpText.Text.Contains("BCryptGenRandom", StringComparison.Ordinal),
-            "archive entropy help emphasizes the actual dual-SHA3 Argon2id key function instead of nonce internals");
+            "archive entropy help describes the nine pools and atomic factor generation instead of nonce internals");
+        Assert(
+            V11MasterKdf.KdfMode == "DualArgon2id-SplitSHA3+Skein1024-Sequential-Master1024"
+            && V11MasterKdf.KdfInputMode == "DualBranch-v11: SplitFactorsSHA3-512-1024 || KeyedSkeinMAC-1024-1024"
+            && V11MasterKdf.PasswordMode == "UserPassword24to256+PIN6to16+GeneratedHex1024x2",
+            "the v11 key-derivation contract strings are unchanged");
+        Assert(
+            V11MasterKdf.FactorBytes == 128
+            && V11MasterKdf.FactorHalfBytes == 64
+            && V11MasterKdf.MasterBytes == 128
+            && V11MasterKdf.Iterations == 4
+            && V11MasterKdf.Parallelism == 4,
+            "the v11 factor split, master width and Argon2id cost parameters are unchanged");
         Assert(
             !firstWindow.CreateArchiveButton.IsEnabled
             && !firstWindow.ExtractArchiveButton.IsEnabled
@@ -203,18 +221,29 @@ static void RunSettingsPersistenceTests()
             && firstWindow.EmergencyRecoveryButton.IsEnabled
             && firstWindow.CreatePanel.IsEnabled,
             "operation gate restores trusted controls after completion");
+        // The distribution oracle is the concrete EntropyPurpose set, not the
+        // aggregated GUI counters: those are min()/alias views and cannot show
+        // whether every pool actually received its share.
+        EntropyPurpose[] allPurposes = Enum.GetValues<EntropyPurpose>();
+        Assert(
+            allPurposes.Length == 9
+            && allPurposes.SequenceEqual(
+            [
+                EntropyPurpose.FactorA1,
+                EntropyPurpose.FactorA2,
+                EntropyPurpose.FactorB1,
+                EntropyPurpose.FactorB2,
+                EntropyPurpose.SaltSha3,
+                EntropyPurpose.SaltSkein,
+                EntropyPurpose.NonceFirst,
+                EntropyPurpose.NonceSecond,
+                EntropyPurpose.NonceThird,
+            ]),
+            "the entropy architecture still has exactly the nine expected purposes");
+        const int DistributionSampleCount = 27;
         long samplesBeforeTabMoves = EntropyMixer.SampleCount;
-        long[] purposeCountsBeforeTabMoves =
-        [
-            EntropyMixer.FirstGeneratedPasswordSampleCount,
-            EntropyMixer.SecondGeneratedPasswordSampleCount,
-            EntropyMixer.SaltSampleCount,
-            EntropyMixer.NonceFirstSampleCount,
-            EntropyMixer.NonceSecondSampleCount,
-        EntropyMixer.NonceThirdSampleCount,
-            EntropyMixer.NonceThirdSampleCount,
-        ];
-        for (int index = 0; index < 10; index++)
+        long[] purposeCountsBeforeTabMoves = [.. allPurposes.Select(EntropyMixer.GetSampleCount)];
+        for (int index = 0; index < DistributionSampleCount; index++)
         {
             firstWindow.MainTabs.SelectedIndex = index % firstWindow.MainTabs.Items.Count;
             var selectedTab = (System.Windows.Controls.TabItem)firstWindow.MainTabs.SelectedItem;
@@ -227,20 +256,20 @@ static void RunSettingsPersistenceTests()
             });
         }
 
-        Assert(EntropyMixer.SampleCount == samplesBeforeTabMoves + 10, "handled mouse moves remain visible to the window across all tabs");
-        long[] purposeCountsAfterTabMoves =
-        [
-            EntropyMixer.FirstGeneratedPasswordSampleCount,
-            EntropyMixer.SecondGeneratedPasswordSampleCount,
-            EntropyMixer.SaltSampleCount,
-            EntropyMixer.NonceFirstSampleCount,
-            EntropyMixer.NonceSecondSampleCount,
-        EntropyMixer.NonceThirdSampleCount,
-            EntropyMixer.NonceThirdSampleCount,
-        ];
         Assert(
-            purposeCountsAfterTabMoves.Zip(purposeCountsBeforeTabMoves, (after, before) => after - before).All(delta => delta == 2),
-            "tab-spanning mouse moves are distributed evenly across all five entropy pools");
+            EntropyMixer.SampleCount == samplesBeforeTabMoves + DistributionSampleCount,
+            "handled mouse moves remain visible to the window across all tabs");
+        long[] purposeCountsAfterTabMoves = [.. allPurposes.Select(EntropyMixer.GetSampleCount)];
+        long[] purposeDeltas = [.. purposeCountsAfterTabMoves.Zip(purposeCountsBeforeTabMoves, (after, before) => after - before)];
+        Assert(
+            purposeDeltas.Sum() == DistributionSampleCount,
+            "every collected mouse sample lands in exactly one entropy purpose");
+        Assert(
+            purposeDeltas.All(delta => delta >= 0),
+            "no entropy purpose loses samples while collecting");
+        Assert(
+            purposeDeltas.Max() - purposeDeltas.Min() <= 1,
+            "tab-spanning mouse moves are distributed evenly across all nine entropy pools");
         integrityField.SetValue(firstWindow, false);
         updateGate.Invoke(firstWindow, null);
         firstWindow.CipherSuiteBox.SelectedIndex = 1;
@@ -1229,6 +1258,211 @@ static async Task RunZpaqTraversalTestsAsync()
     }
 }
 
+/// <summary>
+/// The Windows input-binding matrix: what the security check validated has to
+/// be exactly what native ZPAQ later reads, for the whole operation.
+/// </summary>
+/// <remarks>
+/// Every adversarial case here used to be invisible to the old design, which
+/// leased the files a path walk found and then handed the original directory
+/// paths to ZPAQ so it could walk the live namespace a second time.
+/// </remarks>
+static async Task RunZpaqInputBindingTestsAsync()
+{
+    string root = Path.Combine(Path.GetTempPath(), $"kalyna-zpaq-binding-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(root);
+    try
+    {
+        string outside = Path.Combine(root, "outside");
+        Directory.CreateDirectory(outside);
+        await File.WriteAllTextAsync(Path.Combine(outside, "secret.txt"), "must never enter an archive");
+
+        string tree = Path.Combine(root, "tree");
+        string nested = Path.Combine(tree, "nested");
+        string empty = Path.Combine(tree, "empty");
+        Directory.CreateDirectory(nested);
+        Directory.CreateDirectory(empty);
+        await File.WriteAllTextAsync(Path.Combine(tree, "a.txt"), "alpha");
+        await File.WriteAllTextAsync(Path.Combine(nested, "b.txt"), "beta");
+
+        // 1 + 2: an ordinary file and an ordinary tree still archive, and an
+        // empty directory still survives the private mirror.
+        var zpaq = new ZpaqService();
+        string fileArchive = Path.Combine(root, "single.zpaq");
+        ProcessResult single = await zpaq.AddAsync(fileArchive, [Path.Combine(tree, "a.txt")], 0, null, CancellationToken.None);
+        Assert(single.Succeeded, $"a single regular file archives through the bound snapshot: {single.StandardError}");
+
+        string treeArchive = Path.Combine(root, "tree.zpaq");
+        ProcessResult treeAdd = await zpaq.AddAsync(treeArchive, [tree], 0, null, CancellationToken.None);
+        Assert(treeAdd.Succeeded, $"a regular directory tree archives through the bound snapshot: {treeAdd.StandardError}");
+        string treeOutput = Path.Combine(root, "tree-out");
+        ProcessResult treeExtract = await zpaq.ExtractAsync(treeArchive, treeOutput, null, CancellationToken.None);
+        Assert(treeExtract.Succeeded, "the bound snapshot produces an extractable archive");
+        Assert(
+            await File.ReadAllTextAsync(Path.Combine(treeOutput, "tree", "a.txt")) == "alpha"
+            && await File.ReadAllTextAsync(Path.Combine(treeOutput, "tree", "nested", "b.txt")) == "beta",
+            "archive member names and contents are unchanged by the private mirror");
+        Assert(
+            Directory.Exists(Path.Combine(treeOutput, "tree", "empty")),
+            "an empty input directory is preserved by the private mirror");
+
+        // 11: a hard link is an ordinary file object and must archive normally.
+        string hardLink = Path.Combine(tree, "hardlink.txt");
+        if (TryCreateHardLinkForTests(hardLink, Path.Combine(tree, "a.txt")))
+        {
+            string linkArchive = Path.Combine(root, "hardlink.zpaq");
+            ProcessResult linkAdd = await zpaq.AddAsync(linkArchive, [hardLink], 0, null, CancellationToken.None);
+            Assert(linkAdd.Succeeded, $"a hard-linked input archives normally: {linkAdd.StandardError}");
+            File.Delete(hardLink);
+        }
+
+        // 3 + 4 + 5: reparse points are refused as the selected root, as an
+        // ancestor of the selected root, and anywhere inside the tree.
+        string junctionRoot = Path.Combine(root, "junction-root");
+        if (TryCreateJunctionForTests(junctionRoot, tree))
+        {
+            await AssertThrowsAsync<IOException>(
+                () => zpaq.AddAsync(Path.Combine(root, "junction-root.zpaq"), [junctionRoot], 0, null, CancellationToken.None),
+                "a junction selected as the input root is refused");
+
+            string throughJunction = Path.Combine(junctionRoot, "nested");
+            await AssertThrowsAsync<IOException>(
+                () => zpaq.AddAsync(Path.Combine(root, "junction-ancestor.zpaq"), [throughJunction], 0, null, CancellationToken.None),
+                "an input reached through a junction ancestor is refused");
+
+            Directory.Delete(junctionRoot);
+        }
+
+        string nestedJunction = Path.Combine(nested, "escape");
+        if (TryCreateJunctionForTests(nestedJunction, outside))
+        {
+            await AssertThrowsAsync<IOException>(
+                () => zpaq.AddAsync(Path.Combine(root, "nested-junction.zpaq"), [tree], 0, null, CancellationToken.None),
+                "a junction nested inside the input tree is refused before ZPAQ starts");
+            Directory.Delete(nestedJunction);
+        }
+
+        // 6 + 7 + 8 + 9 + 10: everything that changes after the snapshot was
+        // taken must be invisible to the archive, and the leased objects must
+        // not be replaceable while the snapshot is alive.
+        using (IDisposable snapshot = ZpaqService.CaptureInputSnapshotForTests(
+            Path.GetDirectoryName(tree)!,
+            [tree],
+            out string snapshotWorkingDirectory,
+            out string[] snapshotPaths))
+        {
+            Assert(snapshotPaths.Length == 1, "one selected directory produces one mirrored input");
+            Assert(
+                !string.Equals(snapshotWorkingDirectory, root, StringComparison.OrdinalIgnoreCase)
+                && snapshotPaths[0].StartsWith(snapshotWorkingDirectory, StringComparison.OrdinalIgnoreCase),
+                "the mirror is private and never the live input tree");
+
+            string lateJunction = Path.Combine(nested, "late-escape");
+            bool lateJunctionCreated = TryCreateJunctionForTests(lateJunction, outside);
+            string lateFile = Path.Combine(nested, "late.txt");
+            await File.WriteAllTextAsync(lateFile, "appeared after the security check");
+
+            string[] mirrored = Directory.GetFileSystemEntries(snapshotPaths[0], "*", SearchOption.AllDirectories);
+            Assert(
+                !mirrored.Any(entry => entry.EndsWith("late.txt", StringComparison.OrdinalIgnoreCase)),
+                "a file created after the security check cannot reach the archived set");
+            Assert(
+                !mirrored.Any(entry => entry.EndsWith("late-escape", StringComparison.OrdinalIgnoreCase)),
+                "a junction inserted after the security check cannot reach the archived set");
+            Assert(
+                mirrored.All(entry => (File.GetAttributes(entry) & FileAttributes.ReparsePoint) == 0),
+                "the private mirror contains no reparse point at all");
+            Assert(
+                await File.ReadAllTextAsync(Path.Combine(snapshotPaths[0], "a.txt")) == "alpha",
+                "the mirror holds the verified file contents");
+
+            AssertThrows<IOException>(
+                () => File.Move(Path.Combine(tree, "a.txt"), Path.Combine(tree, "renamed.txt")),
+                "a leased input file cannot be renamed while the snapshot is alive");
+            AssertThrows<IOException>(
+                () => File.WriteAllText(Path.Combine(tree, "a.txt"), "overwritten"),
+                "a leased input file cannot be rewritten while the snapshot is alive");
+
+            if (lateJunctionCreated)
+            {
+                Directory.Delete(lateJunction);
+            }
+
+            File.Delete(lateFile);
+        }
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+static bool TryCreateJunctionForTests(string linkPath, string targetPath)
+{
+    try
+    {
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "cmd.exe"),
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true,
+        };
+        startInfo.ArgumentList.Add("/c");
+        startInfo.ArgumentList.Add("mklink");
+        startInfo.ArgumentList.Add("/J");
+        startInfo.ArgumentList.Add(linkPath);
+        startInfo.ArgumentList.Add(targetPath);
+        using Process? process = Process.Start(startInfo);
+        if (process is null)
+        {
+            return false;
+        }
+
+        process.WaitForExit();
+        return process.ExitCode == 0
+            && Directory.Exists(linkPath)
+            && (File.GetAttributes(linkPath) & FileAttributes.ReparsePoint) != 0;
+    }
+    catch (SystemException)
+    {
+        return false;
+    }
+}
+
+static bool TryCreateHardLinkForTests(string linkPath, string existingPath)
+{
+    try
+    {
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "cmd.exe"),
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true,
+        };
+        startInfo.ArgumentList.Add("/c");
+        startInfo.ArgumentList.Add("mklink");
+        startInfo.ArgumentList.Add("/H");
+        startInfo.ArgumentList.Add(linkPath);
+        startInfo.ArgumentList.Add(existingPath);
+        using Process? process = Process.Start(startInfo);
+        if (process is null)
+        {
+            return false;
+        }
+
+        process.WaitForExit();
+        return process.ExitCode == 0 && File.Exists(linkPath);
+    }
+    catch (SystemException)
+    {
+        return false;
+    }
+}
+
 static async Task<ProcessResult> RunToolInDirectoryAsync(
     string executable,
     IReadOnlyList<string> arguments,
@@ -1793,20 +2027,20 @@ static async Task RunEntropyGeneratorTestsAsync()
         () => PasswordKeyService.ValidateUserPasswordForCreation(TestConstants.TestUserPassword, generatedPasswordA, generatedPasswordA),
         "generated password factors A and B must differ");
 
-    V10KeyDerivation.ValidatePinForCreation(TestConstants.TestPin);
-    PinPolicyAnalysis validPinAnalysis = V10KeyDerivation.AnalyzePinForCreation(TestConstants.TestPin);
+    ContainerKeyDerivation.ValidatePinForCreation(TestConstants.TestPin);
+    PinPolicyAnalysis validPinAnalysis = ContainerKeyDerivation.AnalyzePinForCreation(TestConstants.TestPin);
     Assert(validPinAnalysis.IsAccepted, "valid PIN is accepted by policy");
-    AssertThrows<PinPolicyException>(() => V10KeyDerivation.ValidatePinForCreation("12345"), "too short PIN is rejected");
-    AssertThrows<PinPolicyException>(() => V10KeyDerivation.ValidatePinForCreation("111111"), "repeated digit PIN is rejected");
-    AssertThrows<PinPolicyException>(() => V10KeyDerivation.ValidatePinForCreation("123456"), "sequential ascending PIN is rejected");
+    AssertThrows<PinPolicyException>(() => ContainerKeyDerivation.ValidatePinForCreation("12345"), "too short PIN is rejected");
+    AssertThrows<PinPolicyException>(() => ContainerKeyDerivation.ValidatePinForCreation("111111"), "repeated digit PIN is rejected");
+    AssertThrows<PinPolicyException>(() => ContainerKeyDerivation.ValidatePinForCreation("123456"), "sequential ascending PIN is rejected");
 
     PasswordPolicyAnalysis hexRunAnalysis = PasswordKeyService.AnalyzeUserPassword("Abcd1234!NqRsTuVwXyZ#98$LmNo", generatedPasswordA, generatedPasswordB);
     Assert(hexRunAnalysis.Violations.Contains(PasswordPolicyViolation.HexadecimalRunTooLong), "eight-character hexadecimal run is rejected case-insensitively");
     PasswordPolicyAnalysis nonHexAnalysis = PasswordKeyService.AnalyzeUserPassword("A1b2C3d4E5f6A1b2C3d4E5f6", generatedPasswordA, generatedPasswordB);
     Assert(nonHexAnalysis.Violations.Contains(PasswordPolicyViolation.NotEnoughNonHexCharacters), "hexadecimal-only user password does not satisfy non-hex requirement");
 
-    V10Salts salts = new(new byte[64], new byte[64], null, null);
-    using V10KeyDerivation.MasterResult first = V10KeyDerivation.DeriveMaster(
+    KdfSalts salts = new(new byte[64], new byte[64], null, null);
+    using ContainerKeyDerivation.MasterResult first = ContainerKeyDerivation.DeriveMaster(
         EncryptionSuiteCatalog.Get(EncryptionSuite.Kalyna512_512),
         TestConstants.TestUserPassword,
         TestConstants.TestPin,
@@ -1815,7 +2049,7 @@ static async Task RunEntropyGeneratorTestsAsync()
         salts,
         null,
         CancellationToken.None);
-    using V10KeyDerivation.MasterResult differentFirstGenerated = V10KeyDerivation.DeriveMaster(
+    using ContainerKeyDerivation.MasterResult differentFirstGenerated = ContainerKeyDerivation.DeriveMaster(
         EncryptionSuiteCatalog.Get(EncryptionSuite.Kalyna512_512),
         TestConstants.TestUserPassword,
         TestConstants.TestPin,
@@ -1824,7 +2058,7 @@ static async Task RunEntropyGeneratorTestsAsync()
         salts,
         null,
         CancellationToken.None);
-    using V10KeyDerivation.MasterResult differentSecondGenerated = V10KeyDerivation.DeriveMaster(
+    using ContainerKeyDerivation.MasterResult differentSecondGenerated = ContainerKeyDerivation.DeriveMaster(
         EncryptionSuiteCatalog.Get(EncryptionSuite.Kalyna512_512),
         TestConstants.TestUserPassword,
         TestConstants.TestPin,
@@ -1833,7 +2067,7 @@ static async Task RunEntropyGeneratorTestsAsync()
         salts,
         null,
         CancellationToken.None);
-    using V10KeyDerivation.MasterResult differentUser = V10KeyDerivation.DeriveMaster(
+    using ContainerKeyDerivation.MasterResult differentUser = ContainerKeyDerivation.DeriveMaster(
         EncryptionSuiteCatalog.Get(EncryptionSuite.Kalyna512_512),
         TestConstants.TestUserPassword + "X",
         TestConstants.TestPin,
@@ -1842,7 +2076,7 @@ static async Task RunEntropyGeneratorTestsAsync()
         salts,
         null,
         CancellationToken.None);
-    using V10KeyDerivation.MasterResult differentPin = V10KeyDerivation.DeriveMaster(
+    using ContainerKeyDerivation.MasterResult differentPin = ContainerKeyDerivation.DeriveMaster(
         EncryptionSuiteCatalog.Get(EncryptionSuite.Kalyna512_512),
         TestConstants.TestUserPassword,
         "98765432",
@@ -2492,7 +2726,7 @@ static async Task RunPdfRoundTripTestsAsync()
             plainArchive,
             null,
             CancellationToken.None);
-        Assert(plainPdfRecovery.Repaired && plainPdfRecovery.OutputPath is not null, "plain sample PDF archive is reconstructed through KPAR2 v2");
+        Assert(plainPdfRecovery.Repaired && plainPdfRecovery.OutputPath is not null, "plain sample PDF archive is reconstructed through KPAR2 v4");
         Directory.CreateDirectory(plainRecoveredExtractDir);
         ProcessResult recoveredPlainExtract = await zpaq.ExtractAsync(
             plainPdfRecovery.OutputPath!,
@@ -2557,7 +2791,7 @@ static async Task RunPdfRoundTripTestsAsync()
         Assert(info.RequiresGeneratedPassword
             && info.GeneratedPasswordBits == 1024
             && info.GeneratedPasswordFactorCount == 2
-            && (info.Version == 10 || info.Version == 11)
+            && info.Version == 11
             && info.Suite == EncryptionSuite.Kalyna512_512
             && info.Hint == "test hint",
             "v11 Kalyna container declares two generated 1024-bit factors");
@@ -2697,7 +2931,7 @@ static async Task RunPdfRoundTripTestsAsync()
         Assert(threefishAddResult.Succeeded, "streaming ZPAQ add into Threefish container");
         AssertContainerHeader(threefishArchive, EncryptionSuite.Threefish1024);
         KalynaContainerInfo threefishInfo = await kalyna.ReadContainerInfoAsync(threefishArchive, CancellationToken.None);
-        Assert((threefishInfo.Version == 10 || threefishInfo.Version == 11)
+        Assert(threefishInfo.Version == 11
             && threefishInfo.Suite == EncryptionSuite.Threefish1024
             && threefishInfo.NonceBits == 1024
             && threefishInfo.SaltBits == 512,
@@ -3636,7 +3870,7 @@ static async Task<long> ReadKpar2MetadataOffsetAsync(string recoveryPath)
     {
         await using FileStream stream = File.OpenRead(recoveryPath);
         await stream.ReadExactlyAsync(locatorPrefix);
-        Assert(locatorPrefix.AsSpan(0, 8).SequenceEqual("KPR2LOC2"u8), "KPAR2 v2 locator magic for test geometry");
+        Assert(locatorPrefix.AsSpan(0, 8).SequenceEqual("KPR2LOC2"u8), "KPAR2 locator magic for test geometry");
         return BinaryPrimitives.ReadInt64LittleEndian(locatorPrefix.AsSpan(32));
     }
     finally

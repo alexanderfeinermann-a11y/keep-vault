@@ -131,15 +131,23 @@ for component in ${components[@]}; do
   done
 done
 
-# The ML-DSA reference adapter is a test oracle only: it is deliberately not
-# shipped inside the app, so it comes from the project tree rather than from the
-# signed bundle and carries no hybrid sidecars.
-mldsa_reference=${mac_project}/Native/osx-arm64/libmldsa87_ref.dylib
-if [[ ! -f ${mldsa_reference} || -L ${mldsa_reference} ]]; then
-  print -u2 "ML-DSA-87 reference oracle is missing: ${mldsa_reference}"
-  exit 1
-fi
-ditto ${mldsa_reference} ${destination}/libmldsa87_ref.dylib
+# The ML-DSA and SHA3 reference adapters are test oracles only: they are
+# deliberately not shipped inside the app, so they come from the project tree
+# rather than from the signed bundle and carry no hybrid sidecars.
+#
+# Both have to be staged. The differential group resolves them from the test
+# output directory unless KEEPVAULT_MLDSA_REFERENCE / KEEPVAULT_SHA3_REFERENCE
+# override it, and the release gate in Build-KeepVault-macOS.sh sets neither.
+# Leaving the SHA3 oracle out therefore failed every release build, not just an
+# ad-hoc test run.
+for reference_oracle in libmldsa87_ref.dylib libsha3_ref.dylib; do
+  reference_path=${mac_project}/Native/osx-arm64/${reference_oracle}
+  if [[ ! -f ${reference_path} || -L ${reference_path} ]]; then
+    print -u2 "Reference oracle is missing: ${reference_path}"
+    exit 1
+  fi
+  ditto ${reference_path} ${destination}/${reference_oracle}
+done
 
 build_root=$(mktemp -d "${TMPDIR:-/tmp}/keep-vault-test-natives.XXXXXXXX")
 cleanup() {

@@ -15,7 +15,7 @@ public sealed class PasswordKeyService
     public const double MinimumConservativeEntropyBits = 128.0;
 
     /// <summary>
-    /// A v10 factor is 1024 bits, written as 256 uppercase hexadecimal
+    /// A factor is 1024 bits, written as 256 uppercase hexadecimal
     /// characters on the key sheet and in the interface.
     /// </summary>
     public const int GeneratedPasswordLength = 256;
@@ -91,8 +91,8 @@ public sealed class PasswordKeyService
         ArgumentNullException.ThrowIfNull(firstGeneratedPassword);
         ArgumentNullException.ThrowIfNull(secondGeneratedPassword);
 
-        using (var firstBuf = V10KeyDerivation.ParseFactor(firstGeneratedPassword, nameof(firstGeneratedPassword)))
-        using (var secondBuf = V10KeyDerivation.ParseFactor(secondGeneratedPassword, nameof(secondGeneratedPassword)))
+        using (var firstBuf = ContainerKeyDerivation.ParseFactor(firstGeneratedPassword, nameof(firstGeneratedPassword)))
+        using (var secondBuf = ContainerKeyDerivation.ParseFactor(secondGeneratedPassword, nameof(secondGeneratedPassword)))
         {
             if (CryptographicOperations.FixedTimeEquals(firstBuf.Bytes, secondBuf.Bytes))
             {
@@ -186,7 +186,7 @@ public sealed class PasswordKeyService
         {
             try
             {
-                userBuf = V10KeyDerivation.ParseFactor(userPassword, nameof(userPassword));
+                userBuf = ContainerKeyDerivation.ParseFactor(userPassword, nameof(userPassword));
             }
             catch (ArgumentException)
             {
@@ -202,7 +202,7 @@ public sealed class PasswordKeyService
 
                 try
                 {
-                    using var genBuf = V10KeyDerivation.ParseFactor(generatedPassword, nameof(generatedPassword));
+                    using var genBuf = ContainerKeyDerivation.ParseFactor(generatedPassword, nameof(generatedPassword));
                     if (CryptographicOperations.FixedTimeEquals(userBuf.Bytes, genBuf.Bytes))
                     {
                         return true;

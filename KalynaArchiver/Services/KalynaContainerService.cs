@@ -11,7 +11,16 @@ namespace KalynaArchiver.Services;
 public sealed partial class KalynaContainerService
 {
     private static readonly byte[] Magic = "KZPAQ1\0"u8.ToArray();
-    internal static readonly byte[] ThreefishTweakDomain = "Kalyna-ZPAQ/v10/Threefish-1024/CTR-Tweak"u8.ToArray();
+    /// <summary>
+    /// The CTR tweak domain names the container generation it belongs to.
+    /// </summary>
+    /// <remarks>
+    /// SHA3-512 over the domain, the algorithm, the stage index and the whole
+    /// nonce. There is one domain because there is one readable container
+    /// generation; a second one would only exist to serve archives this build
+    /// refuses to open.
+    /// </remarks>
+    internal static readonly byte[] ThreefishTweakDomain = "Kalyna-ZPAQ/v11/Threefish-1024/CTR-Tweak"u8.ToArray();
     // Version 8 introduces the cascade suite and drops every earlier version.
     // There is deliberately no reader for v7: a format this app writes once and
     // reads years later is safer with one shape than with a compatibility path
@@ -19,7 +28,7 @@ public sealed partial class KalynaContainerService
     private const int CurrentVersion = 11;
 
     /// <summary>
-    /// The width of the v10 master key. Every role key is cut from a value of
+    /// The width of the master key. Every role key is cut from a value of
     /// this width, so it is what the header records instead of a per-suite
     /// Argon2id output length.
     /// </summary>
@@ -162,7 +171,7 @@ public sealed partial class KalynaContainerService
         PasswordKeyService.ValidateUserPasswordForCreation(userPassword, firstGeneratedPassword, secondGeneratedPassword);
         // Checked before any work starts. The derivation would refuse it too,
         // but only after the archive has been compressed and streamed.
-        V10KeyDerivation.ValidatePinForCreation(pin);
+        ContainerKeyDerivation.ValidatePinForCreation(pin);
         PasswordKeyService.ValidateArgon2Profile(argon2Profile);
         ValidateHintForCreation(hint);
 
@@ -225,7 +234,7 @@ public sealed partial class KalynaContainerService
             kdfSecondSalt = secondSalt.Length == 0 ? [] : (byte[])secondSalt.Clone();
             try
             {
-                keyMaterial = await DeriveV10KeyMaterialAsync(
+                keyMaterial = await DeriveContainerKeyMaterialAsync(
                     parameters,
                     userPassword,
                     pin,
@@ -552,7 +561,7 @@ public sealed partial class KalynaContainerService
             secondNonce = string.IsNullOrEmpty(header.SecondNonce) ? [] : Convert.FromBase64String(header.SecondNonce);
             chunkNonceBase = BuildChunkNonceBase(nonce, secondNonce);
             tweak = string.IsNullOrEmpty(header.Tweak) ? [] : Convert.FromBase64String(header.Tweak);
-            keyMaterial = await DeriveV10KeyMaterialAsync(
+            keyMaterial = await DeriveContainerKeyMaterialAsync(
                 parameters,
                 userPassword,
                 pin,
@@ -780,7 +789,7 @@ public sealed partial class KalynaContainerService
             }
             try
             {
-                keyMaterial = await DeriveV10KeyMaterialAsync(
+                keyMaterial = await DeriveContainerKeyMaterialAsync(
                     parameters,
                     userPassword,
                     pin,
@@ -1005,14 +1014,15 @@ public sealed partial class KalynaContainerService
                 CryptographicOperations.ZeroMemory(canonicalHeader);
             }
 
-            if (header.Version != 10 && header.Version != 11)
+            // There is exactly one readable container generation. An older
+            // version is not opened with an older key derivation - it is
+            // refused, because keeping a second derivation alive is a second
+            // attack surface and there is nothing here it would still buy.
+            if (header.Version != CurrentVersion)
             {
                 throw new InvalidDataException(
-                    header.Version < 10
-                        ? $"This archive uses container version {header.Version}. Keep Vault {CurrentVersion} "
-                          + "derives its keys from four credentials including a PIN and cannot open it. "
-                          + "Open it with the version that wrote it and create a new archive."
-                        : $"Only encrypted container versions 10 and 11 are supported.");
+                    $"This archive declares container version {header.Version}. "
+                    + $"Keep Vault reads container version {CurrentVersion} only and has no backward-compatible mode.");
             }
 
             ValidateHeader(header);
@@ -1132,7 +1142,7 @@ public sealed partial class KalynaContainerService
     /// cores read each byte before writing the same index and never declare
     /// their buffers restricted, so the aliasing is defined.
     /// </remarks>
-    private static readonly byte[] ChunkNonceDomain = "Kalyna-ZPAQ/v10/chunk-nonce"u8.ToArray();
+    private static readonly byte[] ChunkNonceDomain = "Kalyna-ZPAQ/v11/chunk-nonce"u8.ToArray();
 
     /// <summary>
     /// Gives every chunk its own nonce instead of running one counter across
@@ -1456,6 +1466,7 @@ public sealed partial class KalynaContainerService
 
     internal static byte[] CreateSuiteTweak(EncryptionSuiteParameters parameters, byte[] nonce)
     {
+        byte[] threefishTweakDomain = ThreefishTweakDomain;
         if (parameters.TweakBytes == 0)
         {
             return [];
@@ -1469,16 +1480,16 @@ public sealed partial class KalynaContainerService
 
         byte[] algorithmBytes = System.Text.Encoding.UTF8.GetBytes(parameters.Algorithm);
         byte[] material = new byte[
-            sizeof(int) + ThreefishTweakDomain.Length +
+            sizeof(int) + threefishTweakDomain.Length +
             sizeof(int) + algorithmBytes.Length +
             sizeof(int) +
             sizeof(int) + nonce.Length];
 
         int offset = 0;
-        BinaryPrimitives.WriteInt32LittleEndian(material.AsSpan(offset, sizeof(int)), ThreefishTweakDomain.Length);
+        BinaryPrimitives.WriteInt32LittleEndian(material.AsSpan(offset, sizeof(int)), threefishTweakDomain.Length);
         offset += sizeof(int);
-        ThreefishTweakDomain.CopyTo(material, offset);
-        offset += ThreefishTweakDomain.Length;
+        threefishTweakDomain.CopyTo(material, offset);
+        offset += threefishTweakDomain.Length;
 
         BinaryPrimitives.WriteInt32LittleEndian(material.AsSpan(offset, sizeof(int)), algorithmBytes.Length);
         offset += sizeof(int);
@@ -1612,10 +1623,10 @@ public sealed partial class KalynaContainerService
 
         ValidatePasswordMode(header);
         if (header.Argon2MemoryKiB != 0
-            || header.Argon2Iterations != (int)V10MasterKdf.Iterations
-            || header.Argon2Parallelism != (int)V10MasterKdf.Parallelism)
+            || header.Argon2Iterations != (int)V11MasterKdf.Iterations
+            || header.Argon2Parallelism != (int)V11MasterKdf.Parallelism)
         {
-            throw new InvalidDataException("Container header does not use the fixed v10 Argon2id profile.");
+            throw new InvalidDataException("Container header does not use the fixed v11 Argon2id profile.");
         }
 
         if (header.Hint is { Length: > 180 } || header.Hint?.Any(char.IsControl) == true)
@@ -1774,27 +1785,16 @@ public sealed partial class KalynaContainerService
             throw new InvalidDataException("Container header contains no valid four-credential KDF model.");
         }
 
-        if (header.Version == 10)
-        {
-            if (!string.Equals(header.PasswordMode, V10MasterKdf.PasswordMode, StringComparison.Ordinal)
-                || !string.Equals(header.KdfInputMode, V10MasterKdf.KdfInputMode, StringComparison.Ordinal)
-                || !string.Equals(header.KdfMode, V10MasterKdf.KdfMode, StringComparison.Ordinal))
-            {
-                throw new InvalidDataException("Container header contains no valid v10 four-credential KDF model.");
-            }
-        }
-        else if (header.Version == 11)
-        {
-            if (!string.Equals(header.PasswordMode, V11MasterKdf.PasswordMode, StringComparison.Ordinal)
-                || !string.Equals(header.KdfInputMode, V11MasterKdf.KdfInputMode, StringComparison.Ordinal)
-                || !string.Equals(header.KdfMode, V11MasterKdf.KdfMode, StringComparison.Ordinal))
-            {
-                throw new InvalidDataException("Container header contains no valid v11 four-credential KDF model.");
-            }
-        }
-        else
+        if (header.Version != CurrentVersion)
         {
             throw new InvalidDataException($"Unsupported container version: {header.Version}");
+        }
+
+        if (!string.Equals(header.PasswordMode, V11MasterKdf.PasswordMode, StringComparison.Ordinal)
+            || !string.Equals(header.KdfInputMode, V11MasterKdf.KdfInputMode, StringComparison.Ordinal)
+            || !string.Equals(header.KdfMode, V11MasterKdf.KdfMode, StringComparison.Ordinal))
+        {
+            throw new InvalidDataException("Container header contains no valid v11 four-credential KDF model.");
         }
     }
 
@@ -1819,7 +1819,7 @@ public sealed partial class KalynaContainerService
     /// keys.
     /// </summary>
     /// <remarks>
-    /// A v10 salt field is a pair — the SHA3 branch's 512-bit salt followed by
+    /// A salt field is a pair — the SHA3 branch's 512-bit salt followed by
     /// the Skein branch's — because every path that carries one carries the
     /// other. Splitting them here, at the one place that talks to the KDF,
     /// keeps the container plumbing to a single salt per round.
@@ -1828,7 +1828,7 @@ public sealed partial class KalynaContainerService
     /// a gibibyte each would otherwise block whichever thread called in, which
     /// on the desktop is the interface thread.
     /// </remarks>
-    private static Task<SuiteKeyMaterial> DeriveV10KeyMaterialAsync(
+    private static Task<SuiteKeyMaterial> DeriveContainerKeyMaterialAsync(
         EncryptionSuiteParameters parameters,
         string userPassword,
         string pin,
@@ -1841,11 +1841,11 @@ public sealed partial class KalynaContainerService
         int version = CurrentVersion)
     {
         ArgumentNullException.ThrowIfNull(salt);
-        V10Salts salts = SplitSaltPairs(salt, secondSalt, parameters.UsesTwoKdfRounds);
+        KdfSalts salts = SplitSaltPairs(salt, secondSalt, parameters.UsesTwoKdfRounds);
         return Task.Run(
             () =>
             {
-                using RoleKeyMaterial roles = V10KeyDerivation.DeriveSuiteKeys(
+                using RoleKeyMaterial roles = ContainerKeyDerivation.DeriveSuiteKeys(
                     parameters,
                     userPassword,
                     pin,
@@ -1860,16 +1860,16 @@ public sealed partial class KalynaContainerService
             cancellationToken);
     }
 
-    private static V10Salts SplitSaltPairs(byte[] salt, byte[]? secondSalt, bool paranoia)
+    private static KdfSalts SplitSaltPairs(byte[] salt, byte[]? secondSalt, bool paranoia)
     {
         if (salt.Length != EntropyMixer.SaltPairBytes)
         {
             throw new InvalidDataException(
-                $"A v10 salt field must be {EntropyMixer.SaltPairBytes} bytes.");
+                $"A salt field must be {EntropyMixer.SaltPairBytes} bytes.");
         }
 
-        byte[] sha3Round1 = salt[..V10Salts.SaltBytes];
-        byte[] skeinRound1 = salt[V10Salts.SaltBytes..];
+        byte[] sha3Round1 = salt[..KdfSalts.SaltBytes];
+        byte[] skeinRound1 = salt[KdfSalts.SaltBytes..];
         byte[]? sha3Round2 = null;
         byte[]? skeinRound2 = null;
         if (paranoia)
@@ -1877,18 +1877,18 @@ public sealed partial class KalynaContainerService
             if (secondSalt is null || secondSalt.Length != EntropyMixer.SaltPairBytes)
             {
                 throw new InvalidDataException(
-                    "The two-round suite is missing its second v10 salt pair.");
+                    "The two-round suite is missing its second salt pair.");
             }
 
-            sha3Round2 = secondSalt[..V10Salts.SaltBytes];
-            skeinRound2 = secondSalt[V10Salts.SaltBytes..];
+            sha3Round2 = secondSalt[..KdfSalts.SaltBytes];
+            skeinRound2 = secondSalt[KdfSalts.SaltBytes..];
         }
         else if (secondSalt is { Length: > 0 })
         {
             throw new InvalidDataException("A single-round suite must not carry a second salt pair.");
         }
 
-        var salts = new V10Salts(sha3Round1, skeinRound1, sha3Round2, skeinRound2);
+        var salts = new KdfSalts(sha3Round1, skeinRound1, sha3Round2, skeinRound2);
         salts.Validate(paranoia);
         return salts;
     }
@@ -1914,10 +1914,10 @@ public sealed partial class KalynaContainerService
         public byte[] SkeinMacKey { get; }
 
         /// <summary>
-        /// Takes over the keys the v10 role schedule derived.
+        /// Takes over the keys the role schedule derived.
         /// </summary>
         /// <remarks>
-        /// v10 derives each role from its own domain-separated context rather
+        /// v11 derives each role from its own domain-separated context rather
         /// than slicing one flat Argon2id output, so there is nothing to slice
         /// here — only three finished keys to copy into locked storage.
         /// </remarks>
@@ -1928,7 +1928,7 @@ public sealed partial class KalynaContainerService
                 || roles.Sha3MacKey.Bytes.Length != parameters.Sha3MacKeyBytes
                 || roles.SkeinMacKey.Bytes.Length != parameters.SkeinMacKeyBytes)
             {
-                throw new CryptographicException("The v10 role schedule returned an invalid key length.");
+                throw new CryptographicException("The role schedule returned an invalid key length.");
             }
 
             var material = new SuiteKeyMaterial(parameters);

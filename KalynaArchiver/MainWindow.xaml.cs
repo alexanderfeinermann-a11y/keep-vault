@@ -1246,7 +1246,7 @@ public sealed partial class MainWindow : Window, IDisposable
         }
 
         string pin = CreatePinBox.Password;
-        PinPolicyAnalysis analysis = V10KeyDerivation.AnalyzePinForCreation(pin);
+        PinPolicyAnalysis analysis = ContainerKeyDerivation.AnalyzePinForCreation(pin);
         if (!analysis.IsAccepted)
         {
             throw new InvalidOperationException(PinViolationText(analysis.Violations[0]));
@@ -1263,7 +1263,7 @@ public sealed partial class MainWindow : Window, IDisposable
         string pin = ExtractPinBox.Password;
         try
         {
-            V10KeyDerivation.ValidatePinSyntax(pin);
+            ContainerKeyDerivation.ValidatePinSyntax(pin);
         }
         catch (ArgumentException ex)
         {
@@ -1438,7 +1438,7 @@ public sealed partial class MainWindow : Window, IDisposable
         using LockedSensitiveBuffer skeinFingerprint = LockedSensitiveBuffer.Create(Skein1024Digest.DigestSize);
         using IncrementalHash hasher = IncrementalHash.CreateHash(HashAlgorithmName.SHA3_512);
         using var skein = new Skein1024Digest();
-        AppendFingerprintPart(hasher, skein, "Kalyna-ZPAQ/v10/key-sheet-fingerprint"u8);
+        AppendFingerprintPart(hasher, skein, "Kalyna-ZPAQ/v11/key-sheet-fingerprint"u8);
         AppendFingerprintPart(hasher, skein, pathBytes.Bytes);
         AppendFingerprintPart(hasher, skein, suiteBytes.Bytes);
         AppendFingerprintPart(hasher, skein, firstBytes.Bytes);
@@ -1655,7 +1655,7 @@ public sealed partial class MainWindow : Window, IDisposable
         string confirm = CreatePinConfirmBox.Password;
         string? failure = null;
 
-        PinPolicyAnalysis analysis = V10KeyDerivation.AnalyzePinForCreation(pin);
+        PinPolicyAnalysis analysis = ContainerKeyDerivation.AnalyzePinForCreation(pin);
         if (!analysis.IsAccepted)
         {
             failure = PinViolationText(analysis.Violations[0]);
@@ -1671,10 +1671,10 @@ public sealed partial class MainWindow : Window, IDisposable
 
     private string PinViolationText(PinPolicyViolation violation) => violation switch
     {
-        PinPolicyViolation.TooShort => string.Format(T("pinTooShort"), V10KeyDerivation.MinPinLength),
-        PinPolicyViolation.TooLong => string.Format(T("pinTooLong"), V10KeyDerivation.MaxPinCreationLength),
+        PinPolicyViolation.TooShort => string.Format(T("pinTooShort"), ContainerKeyDerivation.MinPinLength),
+        PinPolicyViolation.TooLong => string.Format(T("pinTooLong"), ContainerKeyDerivation.MaxPinCreationLength),
         PinPolicyViolation.NonDigit => T("pinNonDigit"),
-        PinPolicyViolation.NotEnoughDistinctDigits => string.Format(T("pinDistinct"), V10KeyDerivation.MinDistinctPinDigits),
+        PinPolicyViolation.NotEnoughDistinctDigits => string.Format(T("pinDistinct"), ContainerKeyDerivation.MinDistinctPinDigits),
         PinPolicyViolation.RepeatedDigitsTriple => T("pinRepeatedTriple"),
         PinPolicyViolation.SequentialAscending => T("pinSequentialAscending"),
         PinPolicyViolation.SequentialDescending => T("pinSequentialDescending"),
@@ -2536,7 +2536,7 @@ public sealed partial class MainWindow : Window, IDisposable
             ("en", "listContents") => "Show contents",
             ("en", "emergencyRecoveryButton") => "Emergency recovery to new file",
             ("en", "emergencyRecoveryTitle") => "Unauthenticated emergency recovery",
-            ("en", "emergencyRecoveryMissing") => "No valid KPAR2 v2 recovery file was found for this archive.",
+            ("en", "emergencyRecoveryMissing") => "No valid KPAR2 recovery file was found for this archive.",
             ("en", "emergencyRecoveryEncryptedWarning") => "Emergency mode skips KPAR2 metadata authentication and never modifies the original. It writes a new file and still requires all password factors plus successful SHA3-512/Skein-1024 container authentication. Continue?",
             ("en", "emergencyRecoveryPlainWarning") => "This unencrypted KPAR2 profile provides error correction only, not protection against malicious changes. Emergency mode never modifies the original and writes a new file. Continue?",
             ("en", "encryptedHeaderWithoutRecovery") => "This .kzpaq file has no valid encrypted-container header and no usable KPAR2 recovery file. It is blocked instead of being treated as an unencrypted ZPAQ archive.",
@@ -2716,7 +2716,7 @@ public sealed partial class MainWindow : Window, IDisposable
             (_, "listContents") => "Inhalt anzeigen",
             (_, "emergencyRecoveryButton") => "Notfallwiederherstellung in neue Datei",
             (_, "emergencyRecoveryTitle") => "Nicht authentifizierte Notfallwiederherstellung",
-            (_, "emergencyRecoveryMissing") => "Für dieses Archiv wurde keine gültige KPAR2-v2-Wiederherstellungsdatei gefunden.",
+            (_, "emergencyRecoveryMissing") => "Für dieses Archiv wurde keine gültige KPAR2-Wiederherstellungsdatei gefunden.",
             (_, "emergencyRecoveryEncryptedWarning") => "Der Notfallmodus überspringt die KPAR2-Metadaten-Authentifizierung und verändert niemals das Original. Er schreibt eine neue Datei und verlangt weiterhin alle Passwortfaktoren sowie eine erfolgreiche SHA3-512-/Skein-1024-Container-Authentifizierung. Fortfahren?",
             (_, "emergencyRecoveryPlainWarning") => "Dieses unverschlüsselte KPAR2-Profil bietet nur Fehlerkorrektur und keinen Schutz gegen absichtliche Änderungen. Der Notfallmodus verändert niemals das Original und schreibt eine neue Datei. Fortfahren?",
             (_, "encryptedHeaderWithoutRecovery") => "Diese .kzpaq-Datei besitzt keinen gültigen Kopf eines verschlüsselten Containers und keine nutzbare KPAR2-Wiederherstellungsdatei. Sie wird blockiert, statt als unverschlüsseltes ZPAQ-Archiv behandelt zu werden.",

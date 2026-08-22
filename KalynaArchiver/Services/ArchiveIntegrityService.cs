@@ -15,7 +15,7 @@ namespace KalynaArchiver.Services;
 /// cryptographic origin authenticity or anti-tamper security against an active adversary who has write access
 /// to overwrite both the archive and its companion manifest files.
 /// Full cryptographic tamper rejection and origin authenticity is provided exclusively by authenticated
-/// encrypted v10 containers (.kzpaq) or digital hybrid signatures (.khsig).
+/// encrypted containers (.kzpaq) or digital hybrid signatures (.khsig).
 /// </remarks>
 public sealed class ArchiveIntegrityService
 {

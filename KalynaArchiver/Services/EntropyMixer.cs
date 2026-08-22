@@ -13,11 +13,15 @@ namespace KalynaArchiver.Services;
 public static partial class EntropyMixer
 {
     private const int BcryptUseSystemPreferredRng = 0x00000002;
-    // Six pools: two factors, the salt, and three nonce parts. The third nonce
-    // pool exists for the cascade, whose two layers each need their own nonce —
-    // 64 bytes for Kalyna and 128 for Threefish. Deriving the second nonce from
-    // the first would make one layer's keystream a function of the other's, and
-    // the whole point of the cascade is that the two are independent.
+    // Nine pools: one per 512-bit factor half, one per salt branch, and three
+    // nonce parts. Each factor half draws from its own pool so that the v11
+    // split - A1+B1 into one SHA3 half, A2+B2 into the other - is backed by
+    // separately collected material rather than by one pool cut in two. The
+    // third nonce pool exists for the cascade, whose two layers each need their
+    // own nonce - 64 bytes for Kalyna and 128 for Threefish. Deriving the
+    // second nonce from the first would make one layer's keystream a function
+    // of the other's, and the whole point of the cascade is that the two are
+    // independent.
     private const int PurposeCount = 9;
     /// <summary>
     /// Mouse samples each pool needs before factors can be generated.
@@ -234,7 +238,7 @@ public static partial class EntropyMixer
     /// password and salt pools are simply not used.
     /// </remarks>
     /// <summary>
-    /// One v10 salt pair: the SHA3 branch's 512-bit salt followed by the Skein
+    /// One salt pair: the SHA3 branch's 512-bit salt followed by the Skein
     /// branch's.
     /// </summary>
     internal const int SaltPairBytes = 2 * 64;
@@ -259,7 +263,7 @@ public static partial class EntropyMixer
         try
         {
             FillSystemRandom(passwordBytes.Bytes);
-            // A v10 factor is 1024 bits and comes from two pools laid end to
+            // A factor is 1024 bits and comes from two pools laid end to
             // end: A = A1 || A2, B = B1 || B2. Splitting a factor across two
             // pools is defence in depth, not a claim that either pool holds 512
             // bits of real entropy; the system CSPRNG XORed in below stays the
@@ -314,7 +318,7 @@ public static partial class EntropyMixer
     /// Takes a full-width salt pair and nonce out of one expanded pool block.
     /// </summary>
     /// <remarks>
-    /// The salt buffer is the v10 pair: the SHA3 branch's salt followed by the
+    /// The salt buffer is the pair: the SHA3 branch's salt followed by the
     /// Skein branch's, each from its own pool. They travel together because
     /// every path that handles a salt handles both of them.
     /// </remarks>
@@ -856,7 +860,7 @@ public static partial class EntropyMixer
 }
 
 /// <summary>
-/// How full each of the nine v10 pools is.
+/// How full each of the nine pools is.
 /// </summary>
 /// <remarks>
 /// A1/A2 and B1/B2 are reported separately because they are separate pools, but
@@ -933,7 +937,7 @@ internal sealed class TwoRoundEncryptionParameters : IDisposable
 }
 
 /// <summary>
-/// The nine independent mouse-entropy pools a v10 archive draws on.
+/// The nine independent mouse-entropy pools an archive draws on.
 /// </summary>
 /// <remarks>
 /// A1/A2 and B1/B2 are internal sources, not four user-facing factors: each
@@ -1004,8 +1008,8 @@ internal sealed class GeneratedArchiveEntropy : IDisposable
         LockedSensitiveBuffer? second = null;
         try
         {
-            first = V10KeyDerivation.ParseFactor(firstPassword, nameof(firstPassword));
-            second = V10KeyDerivation.ParseFactor(secondPassword, nameof(secondPassword));
+            first = ContainerKeyDerivation.ParseFactor(firstPassword, nameof(firstPassword));
+            second = ContainerKeyDerivation.ParseFactor(secondPassword, nameof(secondPassword));
 
             _firstFactor = first;
             first = null; // ownership transferred to this instance
@@ -1047,8 +1051,8 @@ internal sealed class GeneratedArchiveEntropy : IDisposable
                 throw new ObjectDisposedException(nameof(GeneratedArchiveEntropy));
             }
 
-            using var suppliedFirst = V10KeyDerivation.ParseFactor(firstPassword, nameof(firstPassword));
-            using var suppliedSecond = V10KeyDerivation.ParseFactor(secondPassword, nameof(secondPassword));
+            using var suppliedFirst = ContainerKeyDerivation.ParseFactor(firstPassword, nameof(firstPassword));
+            using var suppliedSecond = ContainerKeyDerivation.ParseFactor(secondPassword, nameof(secondPassword));
             if (!CryptographicOperations.FixedTimeEquals(_firstFactor.Bytes, suppliedFirst.Bytes)
                 || !CryptographicOperations.FixedTimeEquals(_secondFactor.Bytes, suppliedSecond.Bytes))
             {
@@ -1178,8 +1182,8 @@ internal sealed class GeneratedArchiveEntropy : IDisposable
                 throw new ObjectDisposedException(nameof(GeneratedArchiveEntropy));
             }
 
-            using var suppliedFirst = V10KeyDerivation.ParseFactor(firstPassword, nameof(firstPassword));
-            using var suppliedSecond = V10KeyDerivation.ParseFactor(secondPassword, nameof(secondPassword));
+            using var suppliedFirst = ContainerKeyDerivation.ParseFactor(firstPassword, nameof(firstPassword));
+            using var suppliedSecond = ContainerKeyDerivation.ParseFactor(secondPassword, nameof(secondPassword));
             if (!CryptographicOperations.FixedTimeEquals(_firstFactor.Bytes, suppliedFirst.Bytes)
                 || !CryptographicOperations.FixedTimeEquals(_secondFactor.Bytes, suppliedSecond.Bytes))
             {

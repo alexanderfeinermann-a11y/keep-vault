@@ -1384,7 +1384,7 @@ public sealed partial class MainWindow : Window, IDisposable
 
         string pin = CreatePinBox.Text ?? string.Empty;
         string pinConfirm = CreatePinConfirmBox.Text ?? string.Empty;
-        V10KeyDerivation.ValidatePinForCreation(pin);
+        ContainerKeyDerivation.ValidatePinForCreation(pin);
         if (!string.Equals(pin, pinConfirm, StringComparison.Ordinal))
         {
             throw new InvalidOperationException(T("pinMismatch"));
@@ -1400,7 +1400,7 @@ public sealed partial class MainWindow : Window, IDisposable
         }
 
         string pin = ExtractPinBox.Text ?? string.Empty;
-        V10KeyDerivation.ValidatePinSyntax(pin);
+        ContainerKeyDerivation.ValidatePinSyntax(pin);
 
         string first = ExtractGeneratedPasswordFirstBox.Text ?? string.Empty;
         string second = ExtractGeneratedPasswordSecondBox.Text ?? string.Empty;
@@ -1521,7 +1521,7 @@ public sealed partial class MainWindow : Window, IDisposable
         string confirm = CreatePinConfirmBox.Text ?? string.Empty;
         string? failure = null;
 
-        PinPolicyAnalysis analysis = V10KeyDerivation.AnalyzePinForCreation(pin);
+        PinPolicyAnalysis analysis = ContainerKeyDerivation.AnalyzePinForCreation(pin);
         if (!analysis.IsAccepted)
         {
             failure = PinViolationText(analysis.Violations[0]);
@@ -1537,10 +1537,10 @@ public sealed partial class MainWindow : Window, IDisposable
 
     private string PinViolationText(PinPolicyViolation violation) => violation switch
     {
-        PinPolicyViolation.TooShort => string.Format(CultureInfo.CurrentCulture, T("pinTooShort"), V10KeyDerivation.MinPinLength),
-        PinPolicyViolation.TooLong => string.Format(CultureInfo.CurrentCulture, T("pinTooLong"), V10KeyDerivation.MaxPinCreationLength),
+        PinPolicyViolation.TooShort => string.Format(CultureInfo.CurrentCulture, T("pinTooShort"), ContainerKeyDerivation.MinPinLength),
+        PinPolicyViolation.TooLong => string.Format(CultureInfo.CurrentCulture, T("pinTooLong"), ContainerKeyDerivation.MaxPinCreationLength),
         PinPolicyViolation.NonDigit => T("pinNonDigit"),
-        PinPolicyViolation.NotEnoughDistinctDigits => string.Format(CultureInfo.CurrentCulture, T("pinDistinct"), V10KeyDerivation.MinDistinctPinDigits),
+        PinPolicyViolation.NotEnoughDistinctDigits => string.Format(CultureInfo.CurrentCulture, T("pinDistinct"), ContainerKeyDerivation.MinDistinctPinDigits),
         PinPolicyViolation.RepeatedDigitsTriple => T("pinRepeatedTriple"),
         PinPolicyViolation.SequentialAscending => T("pinSequentialAscending"),
         PinPolicyViolation.SequentialDescending => T("pinSequentialDescending"),

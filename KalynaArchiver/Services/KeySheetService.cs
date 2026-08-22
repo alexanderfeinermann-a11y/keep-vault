@@ -344,7 +344,7 @@ public sealed class KeySheetService
         y += 48;
         gfx.DrawString($"Generated 1024-bit hexadecimal factor {factorName}", headingFont, XBrushes.Black, new XPoint(margin, y));
         y += 15;
-        // A v10 factor is 256 hexadecimal characters in 32 groups, which needs
+        // A factor is 256 hexadecimal characters in 32 groups, which needs
         // roughly twice the height the 512-bit factor did. Sized generously
         // rather than exactly: a factor clipped at the bottom of the page is a
         // sheet that cannot open its own archive.

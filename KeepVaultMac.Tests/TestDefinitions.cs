@@ -196,6 +196,27 @@ internal static class TestRunner
             }
             else
             {
+                // A mapping entry that names no existing test would silently
+                // select nothing for the file that produced it, so a renamed
+                // security test could stop running without anyone noticing.
+                // Refuse the run instead of quietly covering less.
+                var knownNames = new HashSet<string>(
+                    smokeTests.Select(t => t.Name).Concat(comprehensiveTests.Select(t => t.Name)),
+                    StringComparer.Ordinal)
+                {
+                    "ALL_SMOKE",
+                    "ALL_COMPREHENSIVE",
+                };
+                string[] unknown = [.. affectedNames.Where(name => !knownNames.Contains(name)).OrderBy(name => name, StringComparer.Ordinal)];
+                if (unknown.Length > 0)
+                {
+                    Console.Error.WriteLine(
+                        "The changed-file impact map names tests that do not exist: "
+                        + string.Join(", ", unknown)
+                        + ". Update the map in TestDefinitions.cs.");
+                    return 1;
+                }
+
                 selectedSmoke.AddRange(smokeTests.Where(t => affectedNames.Contains(t.Name) || affectedNames.Contains("ALL_SMOKE")));
                 selectedComprehensive.AddRange(comprehensiveTests.Where(t => affectedNames.Contains(t.Name) || affectedNames.Contains("ALL_COMPREHENSIVE")));
                 if (selectedSmoke.Count == 0 && selectedComprehensive.Count == 0)
@@ -533,16 +554,18 @@ internal static class TestRunner
             foreach (string file in allFiles)
             {
                 bool matched = false;
-                if (file.Contains("V10MasterKdf") || file.Contains("V10Primitives") || file.Contains("PasswordKeyService") || file.Contains("V10KeyDerivation") || file.Contains("SecureMemory"))
+                if (file.Contains("V11MasterKdf") || file.Contains("KdfPrimitives") || file.Contains("KdfSalts") || file.Contains("SuiteKeySchedule") || file.Contains("PasswordKeyService") || file.Contains("ContainerKeyDerivation") || file.Contains("SecureMemory"))
                 {
                     matched = true;
-                    affected.Add("v10 primitives against independent second implementations");
-                    affected.Add("v10 master KDF: credential binding, PMI range and round chaining");
+                    affected.Add("KDF primitives against independent second implementations");
+                    affected.Add("KDF properties: credential binding, PMI range and round chaining");
+                    affected.Add("v11 master KDF and 512/512 factor split mutation isolation");
                     affected.Add("Argon2id fixed 1 GiB profile and independent equivalence");
-                    affected.Add("v10 peak memory stays at one Argon2 matrix, and the header leaks nothing");
+                    affected.Add("peak memory stays at one Argon2 matrix, and the header leaks nothing");
                     affected.Add("password policy and KEEPVAULT term rejection");
-                    affected.Add("v10 creation PIN policy and weak-pattern rejection");
-                    affected.Add("v10 suite roundtrips and manipulation rejection");
+                    affected.Add("creation PIN policy and weak-pattern rejection");
+                    affected.Add("v11 suite roundtrips and manipulation rejection");
+                    affected.Add("v11 container header, decryption and KPAR2 round trip");
                 }
                 if (file.Contains("ZpaqService") || file.Contains("MacPlatformSecurity") || file.Contains("MacSecureFile") || file.Contains("MacOriginalDeletionService"))
                 {
@@ -560,8 +583,8 @@ internal static class TestRunner
                 if (file.Contains("RecoveryService") || file.Contains("Kpar2"))
                 {
                     matched = true;
-                    affected.Add("KPAR2-v3 repair, authentication and transplantation rejection");
-                    affected.Add("KPAR2-v3 accepts every catalogued suite, not just the first two");
+                    affected.Add("KPAR2 v4 repair, authentication and transplantation rejection");
+                    affected.Add("KPAR2 v4 accepts every catalogued suite, not just the first two");
                 }
                 if (file.Contains("MainWindow") || file.Contains("MacGuiTests") || file.Contains("Avalonia"))
                 {
@@ -595,9 +618,9 @@ internal static class TestRunner
                     matched = true;
                     affected.Add("SHA3, Skein, Kalyna and Threefish reference vectors");
                     affected.Add("cascade layering: the outer layer alone reveals nothing");
-                    affected.Add("v10 two-round key derivation from one pool consumption");
+                    affected.Add("two-round key derivation from one pool consumption");
                     affected.Add("salt and nonce for every single-round suite without prepared entropy");
-                    affected.Add("v10 per-chunk nonces across a multi-chunk archive");
+                    affected.Add("per-chunk nonces across a multi-chunk archive");
                     affected.Add("MARS and SHACAL-2 published vectors and CTR behaviour");
                     affected.Add("randomised differential testing against every reference library");
                 }

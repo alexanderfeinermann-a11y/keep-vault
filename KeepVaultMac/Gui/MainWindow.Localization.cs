@@ -326,7 +326,7 @@ public sealed partial class MainWindow
             "zpaqExtractFailed" => en ? "ZPAQ could not extract the archive." : "ZPAQ konnte das Archiv nicht entpacken.",
             "zpaqListFailed" => en ? "ZPAQ could not list the archive." : "ZPAQ konnte den Archivinhalt nicht anzeigen.",
             "extractedTo" => en ? "Extracted to" : "Entpackt nach",
-            "emergencyRecoveryMissing" => en ? "No valid KPAR2-v3 recovery data was found." : "Es wurden keine gültigen KPAR2-v3-Wiederherstellungsdaten gefunden.",
+            "emergencyRecoveryMissing" => en ? "No valid KPAR2 recovery data was found." : "Es wurden keine gültigen KPAR2-Wiederherstellungsdaten gefunden.",
             "emergencyEncryptedWarning" => en
                 ? "Emergency mode skips KPAR2 metadata authentication, never changes the original and writes a new file. All factors and successful dual container authentication remain required. Continue?"
                 : "Der Notfallmodus überspringt die KPAR2-Metadaten-Authentifizierung, verändert niemals das Original und schreibt eine neue Datei. Alle Faktoren und eine erfolgreiche doppelte Container-Authentifizierung bleiben erforderlich. Fortfahren?",

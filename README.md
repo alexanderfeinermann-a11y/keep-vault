@@ -1,7 +1,7 @@
 # Keep Vault
 
 Archiving, extraction and cryptographic erasure of ZPAQ archives for **macOS**.
-Encrypted archives use container format **v10**: a chosen cascade of up to six
+Encrypted archives use container format **v11**: a chosen cascade of up to six
 independent ciphers over the compressed stream, keys from two Argon2id branches
 whose memory cost is itself derived from your credentials, two separate MACs,
 and a four-part credential made of a passphrase, a PIN, and two 1024-bit factors
@@ -10,10 +10,10 @@ the app generates.
 The application is under development. It is not a substitute for an external
 cryptographic audit, an HSM, or operating-system hardening.
 
-> **macOS only.** The Windows source tree has been carried to v10 but the WPF
-> application can only be built on Windows and has never been built or tested
-> against v10. No Windows package is published, and the macOS version is the
-> only one that should be used.
+> **macOS only.** The Windows source tree has been carried to v11 and compiles,
+> but the WPF application has never been run or tested on Windows. No Windows
+> package is published, and the macOS version is the only one that should be
+> used.
 
 ---
 
@@ -71,12 +71,18 @@ attacker, obtain the verifier and its pins through a separate, trusted channel.
 
 ## Format policy
 
-The app writes and reads container format **version 10 only**. Every other
-version is refused, including version 9; there is no legacy decryption path and
-none is planned. Archives written with v9 or earlier cannot be opened with this
+The app writes and reads container format **version 11 only**. Every other
+version is refused, including version 10; there is no legacy decryption path and
+none is planned. Archives written with v10 or earlier cannot be opened with this
 release, and the reader says so by name rather than failing as a wrong password.
 
-The key-derivation domain separators carry `v10`, and the header carries an
+That is a deliberate choice, not an oversight. A second, older derivation kept
+alive for compatibility is a second construction to attack, a second set of
+domains to get wrong, and a permanent argument for whichever of the two is
+weaker. The application is still in development and there are no archives worth
+carrying forward, so there is nothing to weigh against removing it.
+
+The key-derivation domain separators carry `v11`, and the header carries an
 explicit `KdfMode` string naming the construction. A version number alone turned
 out not to be enough: 4.0.0/4.0.1 and 4.0.2 both wrote `"Version": 9` while
 deriving different Paranoia keys. `KdfMode` exists so that a future correction
@@ -117,7 +123,7 @@ layer, 128 and 128 for the outer Threefish layer.
 
 v9 cut those keys out of one flat Argon2id output, so a layer's key was a
 function of where it happened to sit in that buffer, and the same cipher in two
-positions could share structure. v10 derives each key separately from a
+positions could share structure. v11 derives each key separately from a
 canonical context — algorithm, stage index, cipher, purpose and key width — run
 through two PRF families and combined:
 
@@ -152,7 +158,7 @@ one key leaks the XOR of two plaintexts.
 
 ### The master key derivation
 
-v10 asks for four credentials, and all four are mandatory: a passphrase of 24 to
+v11 asks for four credentials, and all four are mandatory: a passphrase of 24 to
 256 characters, a PIN of 6 to 16 digits, and the two 1024-bit factors from the
 printed key sheets. There is no reduced mode and no suite that skips one.
 
@@ -219,7 +225,7 @@ secret and the salts change.
 
 This replaces the v9 arrangement, where both rounds shared one 128-byte
 credential prehash. Because the PHC adapter clears the password it is given,
-4.0.0 and 4.0.1 ran their second round over 128 zero bytes. v10 does not share a
+4.0.0 and 4.0.1 ran their second round over 128 zero bytes. v11 does not share a
 buffer between rounds at all, and the regression is checked by changing one bit
 of round one and observing round two change with it — not by a round-trip, which
 would pass while both sides were equally wrong.
@@ -233,7 +239,7 @@ the machine that wrote it.
 - Magic `KZPAQ1\0`, UTF-8 JSON header, 64-byte HMAC-SHA3-512 tag, 128-byte
   Skein-1024 MAC tag, then ciphertext
 - Password mode `UserPassword24to256+PIN6to16+GeneratedHex1024x2`
-- KDF input mode `DualBranch-v10: DualSHA3-512-1024 || KeyedSkeinMAC-1024-1024`
+- KDF input mode `DualBranch-v11: SplitFactorsSHA3-512-1024 || KeyedSkeinMAC-1024-1024`
 - KDF mode `DualArgon2id-SHA3+Skein1024-Sequential-Master1024`
 - One 1024-bit salt pair per round; Argon2id 0x13 with `t=4`, `p=4` and a memory
   cost derived from the credentials — `Argon2MemoryKiB` is stored as `0`
@@ -246,7 +252,7 @@ MACs cover the same magic, header length, header and the entire ciphertext, and
 both tags are compared in full and without short-circuiting before any plaintext
 reaches the ZPAQ pipe.
 
-The v10 reader accepts only `t=4`, `p=4` and a zero memory field. Deviating
+The v11 reader accepts only `t=4`, `p=4` and a zero memory field. Deviating
 header values are rejected before the KDF, so a manipulated archive can force
 neither weaker nor higher Argon2 cost — and because the cost is not in the header
 at all, there is no field to manipulate. The native adapter enforces its own
@@ -287,7 +293,7 @@ plaintext is written. Extraction only ever goes into a new or empty folder. A
 `.kzpaq` with neither a valid container header nor usable KPAR2 data is refused
 outright and never handed to the native parser as plain ZPAQ.
 
-**Cryptographic erase** — analyse a valid encrypted v10 container, then destroy
+**Cryptographic erase** — analyse a valid encrypted v11 container, then destroy
 the reconstructable recovery sidecar first and afterwards corrupt and delete the
 container itself, through the same exclusive file handle. The button refuses
 until the SSD/APFS limitation is explicitly acknowledged.
@@ -351,7 +357,7 @@ other's output.
 
 `Q_S` and `Q_K` go into their own Argon2id branch untruncated, each with its own
 512-bit salt. The app compiles the unmodified PHC Argon2 reference sources; tests
-compare the native adapter against the PHC CLI, and the v10 branch additionally
+compare the native adapter against the PHC CLI, and the v11 branch additionally
 against Bouncy Castle's independent Argon2id implementation.
 
 Every intermediate buffer — the encoding targets, the length frames, both
@@ -484,7 +490,7 @@ archive and both sidecars.
 
 ## Bit-error correction
 
-Every archive gets a non-backward-compatible KPAR2-v3 sidecar
+Every archive gets a KPAR2-v4 sidecar
 `<archive>.kpar2`:
 
 - Reed-Solomon `RS(20,3)`: 20 data plus 3 parity shards, 15 percent overhead
@@ -509,17 +515,24 @@ validated the locator's suite id against a hard-coded range that admitted only
 the first two, which meant most suites produced an archive the app would encrypt
 and then refuse to protect.
 
-KPAR2 is now at **v3**, and its bootstrap is the container's. v2 stored a single
-64-byte salt and derived the recovery MAC parents with one Argon2id round even
-for Paranoia — so anyone holding both key-sheet factors had a cheaper offline
-oracle for the passphrase through the recovery file than through the container it
-protects. v3 stores every salt pair the container uses, one per round, and runs
-exactly the same derivation the container runs, both Paranoia rounds included.
-The certification keys are still not the container's keys: they come from their
-own role purposes in the same schedule. They now simply cost the same to attack.
+KPAR2 is at **v4** and nothing older is read. Its bootstrap is the container's:
+it stores every salt pair the container uses, one per round, and runs exactly the
+same derivation the container runs, both Paranoia rounds included. An earlier
+development format stored a single 64-byte salt and derived the recovery MAC
+parents with one Argon2id round even for Paranoia, which handed anyone holding
+both key-sheet factors a cheaper offline oracle for the passphrase through the
+recovery file than through the container it protects. The certification keys are
+still not the container's keys: they come from their own role purposes in the
+same schedule. They simply cost the same to attack.
 
-The Argon2id cost fields are gone from the v3 locator and manifest, and are
-rejected if present. A v10 memory cost is derived from the credentials, and
+v4 additionally binds the container version into the authenticated recovery
+context — both into the recovery-key derivation and into the certification
+prefix — so the unkeyed version field in the locator cannot select a different
+key derivation. Since only container version 11 exists, any other value is
+refused outright.
+
+The Argon2id cost fields are gone from the locator and manifest, and are
+rejected if present. The memory cost is derived from the credentials, and
 publishing it beside the salt would undo that.
 
 For **unencrypted archives** the same SHA3 and Skein values are explicitly
@@ -669,7 +682,7 @@ SHA3, Skein, Kalyna and Threefish reference vectors; ML-DSA-87 interoperability
 against the compiled reference adapter in both directions; randomised
 differential testing against every reference library; the fixed Argon2id profile
 against PHC and Bouncy Castle; ZPAQ levels, streaming, traversal and a malformed
-corpus; v10 round-trips and manipulation rejection; that the outer cascade layer
+corpus; v11 round-trips and manipulation rejection; that the outer cascade layer
 alone reveals nothing; two-round derivation from one pool consumption; per-chunk
 nonces across a multi-chunk archive; salt and nonce for every single-round suite;
 MARS and SHACAL-2 published vectors; KPAR2 repair, authentication,
