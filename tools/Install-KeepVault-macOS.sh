@@ -681,24 +681,116 @@ fi
 launch_services='/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister'
 if [[ -x ${launch_services} ]]; then
   ${launch_services} -f ${destination} 2>/dev/null || true
+  (( install_scanner )) && ${launch_services} -f ${scanner_destination} 2>/dev/null || true
+
+  # Keep Launchpad showing one Keep Vault.
+  #
+  # Retained rollback material and relocated backups are still complete app
+  # bundles, and LaunchServices indexes /Applications including the
+  # dot-prefixed names this installer uses for them. Every failed or superseded
+  # install therefore added another icon that never went away. Unregistering is
+  # not deleting: the files stay exactly where the recovery messages say they
+  # are, they simply stop being offered as applications to launch.
+  unregister_stale_bundle() {
+    local stale=$1
+    [[ -n ${stale} ]] || return 0
+    [[ ${stale} == ${destination} ]] && return 0
+    (( install_scanner )) && [[ ${stale} == ${scanner_destination} ]] && return 0
+    ${launch_services} -u ${stale} 2>/dev/null || true
+  }
+
+  for moved in ${relocated_paths[@]}; do
+    [[ ${moved} == *.app ]] && unregister_stale_bundle ${moved}
+  done
+
+  for trashed in ${HOME}/.Trash/Keep\ Vault\ previous*/*.app(N) ${HOME}/.Trash/Keep\ Vault\ previous*.app(N); do
+    unregister_stale_bundle ${trashed}
+  done
+fi
+
+# MOVE LEFTOVERS FROM EARLIER RUNS OUT OF THE APPLICATIONS FOLDER
+#
+# Rollback material and abandoned installation roots are deliberately kept when
+# an install fails, and they are complete app bundles sitting in the folder
+# LaunchServices scans. Unregistering them is not enough: the folder is
+# rescanned and they come back, so Launchpad ends up offering several Keep
+# Vaults. They are moved out instead - never deleted - into the same recovery
+# directory the superseded backups go to, and every new location is printed.
+#
+# Only this installer's own naming patterns are touched, never the destination,
+# the scanner, or this run's installation root.
+stale_leftovers=()
+for candidate in \
+  ${applications_dir}/.Keep\ Vault.previous.*.app(N) \
+  ${applications_dir}/.Keep\ Vault.failed.*.app(N) \
+  ${applications_dir}/.QR-Scanner.previous.*.app(N) \
+  ${applications_dir}/.QR-Scanner.failed.*.app(N) \
+  ${applications_dir}/.keep-vault-install.*(N/); do
+  [[ ${candidate} == ${destination} || ${candidate} == ${scanner_destination} ]] && continue
+  [[ -n ${install_root:-} && ${candidate} == ${install_root} ]] && continue
+  [[ -L ${candidate} ]] && continue
+  stale_leftovers+=(${candidate})
+done
+
+if (( ${#stale_leftovers[@]} > 0 )); then
+  leftover_dir=${recovery_dir:-}
+  if [[ -z ${leftover_dir} || ! -d ${leftover_dir} ]]; then
+    leftover_trash=${HOME}/.Trash
+    [[ -d ${leftover_trash} ]] || mkdir -p ${leftover_trash} 2>/dev/null || true
+    if [[ -d ${leftover_trash} ]]; then
+      leftover_dir=$(mktemp -d "${leftover_trash}/Keep Vault leftovers.XXXXXXXX" 2>/dev/null) || leftover_dir=''
+    else
+      leftover_dir=''
+    fi
+  fi
+
+  for stale in ${stale_leftovers[@]}; do
+    if [[ -x ${launch_services} ]]; then
+      ${launch_services} -u ${stale} 2>/dev/null || true
+    fi
+
+    if [[ -n ${leftover_dir} && -d ${leftover_dir} ]] \
+      && mv ${stale} ${leftover_dir}/${stale:t} 2>/dev/null; then
+      print "previous_install_leftover_moved_to=${leftover_dir}/${stale:t}"
+    else
+      print -u2 "Warning: could not move an earlier installation leftover; it remains at: ${stale}"
+    fi
+  done
 fi
 
 if (( create_desktop_alias )); then
-  temporary_alias_name=.Keep\ Vault.$RANDOM.$$.alias
-  temporary_alias_path=${desktop_dir}/${temporary_alias_name}
+  # Finder names the new alias itself - "Keep Vault", or "Keep Vault 2" when
+  # that name is taken - and reports where it put it. Renaming it here rather
+  # than inside the AppleScript means a failure leaves nothing behind: the
+  # script knows the exact path of whatever Finder created and can remove it.
   alias_creation_status=0
-  APP_TARGET=${destination} ALIAS_DIR=${desktop_dir} ALIAS_NAME=${temporary_alias_name} \
-    osascript <<'APPLESCRIPT' || alias_creation_status=$?
-set targetPath to system attribute "APP_TARGET"
-set destinationPath to system attribute "ALIAS_DIR"
-set requestedName to system attribute "ALIAS_NAME"
-tell application "Finder"
-  set createdAlias to make new alias file at POSIX file destinationPath to POSIX file targetPath
-  set name of createdAlias to requestedName
-end tell
-APPLESCRIPT
-  if (( alias_creation_status != 0 )) || [[ ! -f ${temporary_alias_path} || -L ${temporary_alias_path} || $(file -b ${temporary_alias_path}) != 'MacOS Alias file' ]]; then
+  created_alias_path=$(APP_TARGET=${destination} ALIAS_DIR=${desktop_dir} osascript \
+    -e 'set targetPath to system attribute "APP_TARGET"' \
+    -e 'set destinationPath to system attribute "ALIAS_DIR"' \
+    -e 'tell application "Finder"' \
+    -e 'set createdAlias to make new alias file at POSIX file destinationPath to POSIX file targetPath' \
+    -e 'return POSIX path of (createdAlias as alias)' \
+    -e 'end tell' 2>/dev/null) || alias_creation_status=$?
+  temporary_alias_path=''
+  if (( alias_creation_status == 0 )) && [[ -n ${created_alias_path} ]]; then
+    created_alias_path=${created_alias_path%/}
+    if [[ ${created_alias_path:h} == ${desktop_dir} && -f ${created_alias_path} && ! -L ${created_alias_path} ]]; then
+      temporary_alias_name=.Keep\ Vault.$RANDOM.$$.alias
+      temporary_alias_path=${desktop_dir}/${temporary_alias_name}
+      if ! mv -f ${created_alias_path} ${temporary_alias_path} 2>/dev/null; then
+        rm -f -- ${created_alias_path}
+        temporary_alias_path=''
+      fi
+    else
+      print -u2 'Warning: Finder reported an unexpected alias location; leaving it untouched.'
+      created_alias_path=''
+    fi
+  fi
+
+  if [[ -z ${temporary_alias_path} ]] || [[ ! -f ${temporary_alias_path} || -L ${temporary_alias_path} || $(file -b ${temporary_alias_path}) != 'MacOS Alias file' ]]; then
     print -u2 'Warning: Finder did not create a valid Keep Vault alias.'
+    [[ -n ${temporary_alias_path} && -f ${temporary_alias_path} ]] && rm -f -- ${temporary_alias_path}
+    temporary_alias_path=''
   else
     if mv -f ${temporary_alias_path} ${alias_path} 2>/dev/null; then
       resolved_alias=$(ALIAS_PATH=${alias_path} osascript <<'APPLESCRIPT' 2>/dev/null || print ''
