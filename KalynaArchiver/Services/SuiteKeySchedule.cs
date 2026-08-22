@@ -21,7 +21,7 @@ internal enum KeyRolePurpose
 /// keys.
 /// </summary>
 /// <remarks>
-/// v9 sliced one flat Argon2id output into cipher and MAC keys, so the same
+/// An earlier design sliced one flat Argon2id output into cipher and MAC keys, so the same
 /// cipher in two positions could end up sharing structure and every role's key
 /// was a function of where it happened to sit in that buffer. v11 derives each
 /// role separately from a canonical, domain-separated context instead.

@@ -712,7 +712,7 @@ static void CreateSyntheticKalynaContainer(string path, string hint)
         Argon2Parallelism = 4,
         Argon2OutputBits = PasswordKeyService.KalynaDerivedKeySize * 8,
         PasswordMode = "UserPassword+GeneratedHex512x2",
-        KdfInputMode = EncryptionSuiteCatalog.KdfInputMode,
+        KdfInputMode = V11MasterKdf.KdfInputMode,
         GeneratedPasswordBits = 1024,
         GeneratedPasswordFactorCount = 2,
     });
@@ -1955,17 +1955,17 @@ static async Task RunEntropyGeneratorTestsAsync()
 
     Assert(PasswordKeyService.MinPasswordLength == 24, "minimum password length is 24");
     Assert(PasswordKeyService.MaxPasswordLength == 128, "maximum password length is 128");
-    Assert(Argon2Profile.Default.MemoryKiB == 1024 * 1024, "default Argon2 memory is exactly 1 GiB");
-    Assert(Argon2Profile.Default.Iterations == 4, "default Argon2 iteration count is exactly four");
-    Assert(Argon2Profile.Default.Parallelism == 4, "default Argon2 parallelism is portable and not CPU-dependent");
+    Assert(Argon2ExecutionProfile.Default.Iterations == 4, "default Argon2 iteration count is exactly four");
+    Assert(Argon2ExecutionProfile.Default.Parallelism == 4, "default Argon2 parallelism is portable and not CPU-dependent");
+    // Memory is not part of the execution profile: v11 derives it from PMI16.
+    Assert(V11MasterKdf.MemoryMinKiB == 1_048_576, "v11 minimum Argon2 memory is 1 GiB");
+    Assert(V11MasterKdf.MemoryMaxKiB == 2_097_136, "v11 maximum Argon2 memory is 2 GiB minus 16 KiB");
+    Assert(V11MasterKdf.MemoryStepKiB == 16, "v11 Argon2 memory grid is 16 KiB");
     AssertThrows<ArgumentOutOfRangeException>(
-        () => PasswordKeyService.ValidateArgon2Profile(new Argon2Profile(256 * 1024, 4, 4)),
-        "legacy 256 MiB Argon2 profile is rejected");
-    AssertThrows<ArgumentOutOfRangeException>(
-        () => PasswordKeyService.ValidateArgon2Profile(new Argon2Profile(1024 * 1024, 3, 4)),
+        () => PasswordKeyService.ValidateArgon2Profile(new Argon2ExecutionProfile(3, 4)),
         "weakened Argon2 iteration count is rejected");
     AssertThrows<ArgumentOutOfRangeException>(
-        () => PasswordKeyService.ValidateArgon2Profile(new Argon2Profile(1024 * 1024, 4, 3)),
+        () => PasswordKeyService.ValidateArgon2Profile(new Argon2ExecutionProfile(4, 3)),
         "weakened Argon2 parallelism is rejected");
     byte[] nativeProfilePassword = new byte[PasswordKeyService.Argon2PasswordInputSize];
     byte[] nativeProfileSalt = new byte[PasswordKeyService.SaltSize];
@@ -2425,7 +2425,6 @@ static async Task RunArgon2WorkingSetStressAsync(int repetitions)
         argon2Exe,
         password,
         salt,
-        Argon2Profile.Default,
         PasswordKeyService.KalynaDerivedKeySize);
     using Process process = Process.GetCurrentProcess();
     process.Refresh();
@@ -2515,9 +2514,9 @@ static async Task RunNativeArgon2WithSecureMemoryChurnAsync(
     {
         Assert(churnStarted.Wait(TimeSpan.FromSeconds(10)), "all secure-memory churn workers started");
         NativeArgon2id.HashRaw(
-            (uint)Argon2Profile.Default.Iterations,
-            (uint)Argon2Profile.Default.MemoryKiB,
-            (uint)Argon2Profile.Default.Parallelism,
+            (uint)Argon2ReferenceProfile.Iterations,
+            (uint)Argon2ReferenceProfile.MemoryKiB,
+            (uint)Argon2ReferenceProfile.Parallelism,
             password,
             salt,
             output);
@@ -2532,7 +2531,7 @@ static async Task RunNativeArgon2WithSecureMemoryChurnAsync(
         Volatile.Read(ref churnIterations) >= churnWorkerCount,
         "all managed secure-memory workers overlap the native Argon2id call");
     Assert(
-        Volatile.Read(ref maximumObservedReservation) >= (long)Argon2Profile.Default.MemoryKiB * 1024,
+        Volatile.Read(ref maximumObservedReservation) >= (long)Argon2ReferenceProfile.MemoryKiB * 1024,
         "native Argon2id exposes its 1 GiB working-set reservation to every managed lock worker");
     Assert(
         SecureMemory.ReservedWorkingSetBytesForTests == reservationBaseline,
@@ -2571,9 +2570,9 @@ static async Task RunArgon2ReferenceCliTestAsync()
         await RunArgon2WorkingSetStressAsync(3);
 
         int outputLength = 64;
-        byte[] reference = RunBouncyArgon2id(testPassword, salt, Argon2Profile.Default, outputLength);
+        byte[] reference = RunBouncyArgon2id(testPassword, salt, outputLength);
         byte[] managed = new byte[outputLength];
-        NativeArgon2id.HashRaw((uint)Argon2Profile.Default.Iterations, (uint)Argon2Profile.Default.MemoryKiB, (uint)Argon2Profile.Default.Parallelism, testPassword, salt, managed);
+        NativeArgon2id.HashRaw((uint)Argon2ReferenceProfile.Iterations, (uint)Argon2ReferenceProfile.MemoryKiB, (uint)Argon2ReferenceProfile.Parallelism, testPassword, salt, managed);
         try
         {
             Assert(managed.Length == outputLength, "Argon2id output length");
@@ -2594,14 +2593,14 @@ static async Task RunArgon2ReferenceCliTestAsync()
     }
 }
 
-static byte[] RunBouncyArgon2id(byte[] password, byte[] salt, Argon2Profile profile, int outputLength)
+static byte[] RunBouncyArgon2id(byte[] password, byte[] salt, int outputLength)
 {
     var parameters = new Org.BouncyCastle.Crypto.Parameters.Argon2Parameters.Builder(
         Org.BouncyCastle.Crypto.Parameters.Argon2Parameters.Argon2id)
         .WithVersion(Org.BouncyCastle.Crypto.Parameters.Argon2Parameters.Version13)
-        .WithMemoryAsKB(profile.MemoryKiB)
-        .WithIterations(profile.Iterations)
-        .WithParallelism(profile.Parallelism)
+        .WithMemoryAsKB(Argon2ReferenceProfile.MemoryKiB)
+        .WithIterations(Argon2ReferenceProfile.Iterations)
+        .WithParallelism(Argon2ReferenceProfile.Parallelism)
         .WithSalt((byte[])salt.Clone())
         .Build();
     var generator = new Argon2BytesGenerator();
@@ -2616,11 +2615,10 @@ static async Task<byte[]> RunArgon2ReferenceCliAsync(
     string argon2Exe,
     byte[] passwordBytes,
     byte[] salt,
-    Argon2Profile profile,
     int outputLength)
 {
-    int memoryExponent = (int)Math.Log2(profile.MemoryKiB);
-    Assert(1 << memoryExponent == profile.MemoryKiB, "Argon2 memory profile is a power of two for CLI comparison");
+    int memoryExponent = (int)Math.Log2(Argon2ReferenceProfile.MemoryKiB);
+    Assert(1 << memoryExponent == Argon2ReferenceProfile.MemoryKiB, "Argon2 memory profile is a power of two for CLI comparison");
 
     var startInfo = new ProcessStartInfo
     {
@@ -2634,11 +2632,11 @@ static async Task<byte[]> RunArgon2ReferenceCliAsync(
     startInfo.ArgumentList.Add(System.Text.Encoding.ASCII.GetString(salt));
     startInfo.ArgumentList.Add("-id");
     startInfo.ArgumentList.Add("-t");
-    startInfo.ArgumentList.Add(profile.Iterations.ToString());
+    startInfo.ArgumentList.Add(Argon2ReferenceProfile.Iterations.ToString());
     startInfo.ArgumentList.Add("-m");
     startInfo.ArgumentList.Add(memoryExponent.ToString());
     startInfo.ArgumentList.Add("-p");
-    startInfo.ArgumentList.Add(profile.Parallelism.ToString());
+    startInfo.ArgumentList.Add(Argon2ReferenceProfile.Parallelism.ToString());
     startInfo.ArgumentList.Add("-l");
     startInfo.ArgumentList.Add(outputLength.ToString());
     startInfo.ArgumentList.Add("-r");
@@ -4036,7 +4034,7 @@ static string QuoteCmdArgument(string value)
 static void AssertContainerHeader(
     string encryptedArchive,
     EncryptionSuite expectedSuite,
-    int expectedArgon2Parallelism = Argon2Profile.DefaultParallelism)
+    int expectedArgon2Parallelism = Argon2ExecutionProfile.DefaultParallelism)
 {
     using FileStream input = File.OpenRead(encryptedArchive);
     byte[] magic = new byte[7];
@@ -4063,7 +4061,7 @@ static void AssertContainerHeader(
     Assert(root.GetProperty("SkeinMacKeyBits").GetInt32() == parameters.SkeinMacKeyBytes * 8, "container Skein MAC-key size");
     Assert(root.GetProperty("SkeinTagBits").GetInt32() == 1024, "container Skein-1024 MAC tag size");
     Assert(root.GetProperty("PasswordMode").GetString() == "UserPassword+GeneratedHex512x2", "container password mode label");
-    Assert(root.GetProperty("KdfInputMode").GetString() == EncryptionSuiteCatalog.KdfInputMode, "container dual-SHA3 KDF input label");
+    Assert(root.GetProperty("KdfInputMode").GetString() == V11MasterKdf.KdfInputMode, "container v11 split-SHA3 KDF input label");
     Assert(root.GetProperty("GeneratedPasswordBits").GetInt32() == 1024, "container generated-password bit label");
     Assert(root.GetProperty("GeneratedPasswordFactorCount").GetInt32() == 2, "container generated-password factor count");
     Assert(root.GetProperty("SaltBits").GetInt32() == 512, "container salt bit label");

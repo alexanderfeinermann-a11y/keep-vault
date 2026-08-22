@@ -3,7 +3,7 @@ using System.Security.Cryptography;
 
 namespace KalynaArchiver.Services;
 
-// Interop for the two v9 cascade layers that come from Crypto++.
+// Interop for the two cascade layers that come from Crypto++.
 //
 // Both follow NativeKalyna exactly: the library is loaded through
 // NativeToolIntegrity so its manifests and hybrid signatures are checked before

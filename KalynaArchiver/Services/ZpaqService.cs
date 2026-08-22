@@ -98,8 +98,8 @@ public sealed partial class ZpaqService
         }
 
         ValidateCompressionLevel(compressionLevel);
-        string workingDirectory = GetArchiveWorkingDirectory(inputPaths);
         string[] normalizedInputs = NormalizeAndValidateInputPaths(inputPaths);
+        string workingDirectory = GetArchiveWorkingDirectory(normalizedInputs);
         string fullArchivePath = Path.GetFullPath(archivePath);
         ValidateArchiveTarget(fullArchivePath, normalizedInputs);
         if (File.Exists(fullArchivePath) || Directory.Exists(fullArchivePath))
@@ -269,8 +269,8 @@ public sealed partial class ZpaqService
         }
 
         ValidateCompressionLevel(compressionLevel);
-        string workingDirectory = GetArchiveWorkingDirectory(inputPaths);
         string[] normalizedInputs = NormalizeAndValidateInputPaths(inputPaths);
+        string workingDirectory = GetArchiveWorkingDirectory(normalizedInputs);
 #if KEEPVAULT_MACOS
         using MacInputSnapshot inputSnapshot = MacInputSnapshot.Create(workingDirectory, normalizedInputs);
 #else
@@ -621,7 +621,13 @@ public sealed partial class ZpaqService
                 throw new FileNotFoundException("ZPAQ input does not exist.", fullPath);
             }
 
-            normalized[index] = fullPath;
+            // A directory chosen through the folder picker arrives as
+            // "/path/to/folder/". Left in place, the trailing separator makes
+            // the snapshot's own parent directory equal to the destination it
+            // is about to check for collisions, and archiving a folder fails
+            // outright. Canonicalise it once, here, so nothing downstream has
+            // to know about it. A volume root keeps its separator.
+            normalized[index] = Path.TrimEndingDirectorySeparator(fullPath);
         }
 
         return normalized;
@@ -1899,7 +1905,16 @@ public sealed partial class ZpaqService
             FileStream? stream = null;
             try
             {
-                stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read);
+                // FileShare.Read keeps every other writer out for as long as
+                // the lease is held. FileShare.Delete is added so that this
+                // process can unlink the snapshot's hard link - a second name
+                // for the same file record - while the lease is still blocking
+                // writes. Without it the snapshot names could only be removed
+                // after the leases were closed, and in that window a hard link
+                // to the user's file would sit unprotected in a directory
+                // another process can reach.
+                stream = new FileStream(
+                    filePath, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete);
                 _ = NativePathResolver.RequireCanonicalFilePath(stream.SafeFileHandle, filePath, "ZPAQ input");
                 FileStream leased = stream;
                 stream = null;
@@ -2043,12 +2058,13 @@ public sealed partial class ZpaqService
             }
 
             _disposed = true;
-            for (int index = _fileLeases.Count - 1; index >= 0; index--)
-            {
-                _fileLeases[index].Dispose();
-            }
 
-            _fileLeases.Clear();
+            // Order matters. The snapshot's hard links name the same file
+            // records as the user's originals, so they are removed first,
+            // while the leases still deny every other writer. Only then are
+            // the leases released. Reversing this leaves writable second names
+            // for the user's files in a directory this process no longer
+            // guards.
             foreach (string copy in _readOnlyCopies)
             {
                 try
@@ -2068,6 +2084,13 @@ public sealed partial class ZpaqService
 
             _readOnlyCopies.Clear();
             TryDeletePrivateTree(_snapshotRoot);
+
+            for (int index = _fileLeases.Count - 1; index >= 0; index--)
+            {
+                _fileLeases[index].Dispose();
+            }
+
+            _fileLeases.Clear();
         }
 
         [StructLayout(LayoutKind.Sequential)]

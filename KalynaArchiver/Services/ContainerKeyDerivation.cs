@@ -386,11 +386,8 @@ internal static class ContainerKeyDerivation
         string factorBHex,
         KdfSalts salts,
         IProgress<string>? progress,
-        CancellationToken cancellationToken,
-        int version = ContainerVersion)
+        CancellationToken cancellationToken)
     {
-        RequireSupportedVersion(version);
-
         ArgumentNullException.ThrowIfNull(parameters);
         ArgumentNullException.ThrowIfNull(salts);
         ArgumentNullException.ThrowIfNull(userPassword);
@@ -464,21 +461,6 @@ internal static class ContainerKeyDerivation
     }
 
     /// <summary>
-    /// Refuses anything but the current container generation, so a header that
-    /// claims an older version can never select an older derivation.
-    /// </summary>
-    internal static void RequireSupportedVersion(int version)
-    {
-        if (version != ContainerVersion)
-        {
-            throw new ArgumentOutOfRangeException(
-                nameof(version),
-                version,
-                $"Only container version {ContainerVersion} is supported; there is no backward-compatible key derivation.");
-        }
-    }
-
-    /// <summary>
     /// The suite's cipher and MAC keys, derived through the role key schedule.
     /// </summary>
     public static RoleKeyMaterial DeriveSuiteKeys(
@@ -489,11 +471,10 @@ internal static class ContainerKeyDerivation
         string factorBHex,
         KdfSalts salts,
         IProgress<string>? progress,
-        CancellationToken cancellationToken,
-        int version = 11)
+        CancellationToken cancellationToken)
     {
         using MasterResult result = DeriveMaster(
-            parameters, userPassword, pin, factorAHex, factorBHex, salts, progress, cancellationToken, version);
+            parameters, userPassword, pin, factorAHex, factorBHex, salts, progress, cancellationToken);
         return SuiteKeySchedule.DeriveSuiteKeys(result.Master.Bytes, parameters);
     }
 }

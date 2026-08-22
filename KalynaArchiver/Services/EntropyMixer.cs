@@ -378,7 +378,7 @@ public static partial class EntropyMixer
     /// generator, so neither salt nor either nonce set can be derived from the
     /// other.
     ///
-    /// Both salts and both nonce sets have to reach the container header. A v9
+    /// Both salts and both nonce sets have to reach the container header. An
     /// archive whose header carries only the first round cannot be decrypted by
     /// anyone, including the machine that wrote it.
     /// </remarks>
@@ -594,7 +594,7 @@ public static partial class EntropyMixer
     /// through SHA-512.
     /// </summary>
     /// <remarks>
-    /// Container v9's paranoia suite runs Argon2id twice, and the second round
+    /// The paranoia suite runs Argon2id twice, and the second round
     /// needs its own salt and its own nonces. It cannot simply call the
     /// single-round expansion again: that call *consumes* the pools — it swaps
     /// in fresh buffers and resets every sample count to zero — so a second

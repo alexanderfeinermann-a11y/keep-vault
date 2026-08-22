@@ -21,7 +21,7 @@ public sealed partial class KalynaContainerService
     /// refuses to open.
     /// </remarks>
     internal static readonly byte[] ThreefishTweakDomain = "Kalyna-ZPAQ/v11/Threefish-1024/CTR-Tweak"u8.ToArray();
-    // Version 8 introduces the cascade suite and drops every earlier version.
+    // Version 11 is the only container generation this build reads or writes.
     // There is deliberately no reader for v7: a format this app writes once and
     // reads years later is safer with one shape than with a compatibility path
     // that is exercised rarely and audited less.
@@ -92,7 +92,7 @@ public sealed partial class KalynaContainerService
             firstGeneratedPassword,
             secondGeneratedPassword,
             suite,
-            Argon2Profile.Default,
+            Argon2ExecutionProfile.Default,
             hint,
             progress,
             cancellationToken,
@@ -119,7 +119,7 @@ public sealed partial class KalynaContainerService
             firstGeneratedPassword,
             secondGeneratedPassword,
             suite,
-            Argon2Profile.Default,
+            Argon2ExecutionProfile.Default,
             hint,
             progress,
             cancellationToken);
@@ -132,7 +132,7 @@ public sealed partial class KalynaContainerService
         string pin,
         string firstGeneratedPassword,
         string secondGeneratedPassword,
-        Argon2Profile argon2Profile,
+        Argon2ExecutionProfile argon2Profile,
         string? hint,
         IProgress<string>? progress,
         CancellationToken cancellationToken)
@@ -159,7 +159,7 @@ public sealed partial class KalynaContainerService
         string firstGeneratedPassword,
         string secondGeneratedPassword,
         EncryptionSuite suite,
-        Argon2Profile argon2Profile,
+        Argon2ExecutionProfile argon2Profile,
         string? hint,
         IProgress<string>? progress,
         CancellationToken cancellationToken,
@@ -230,7 +230,7 @@ public sealed partial class KalynaContainerService
         IDisposable? nonceLock = null;
         IDisposable? tweakLock = null;
         IDisposable? counterLock = null;
-        Argon2Profile effectiveProfile;
+        Argon2ExecutionProfile effectiveProfile;
         try
         {
             kdfSalt = (byte[])salt.Clone();
@@ -584,8 +584,7 @@ public sealed partial class KalynaContainerService
                 salt,
                 secondSalt,
                 progress,
-                cancellationToken,
-                header.Version).ConfigureAwait(false);
+                cancellationToken).ConfigureAwait(false);
 
             (actualSha3Tag, actualSkeinTag) = await ComputeCiphertextAuthenticationAsync(
                 input,
@@ -818,8 +817,7 @@ public sealed partial class KalynaContainerService
                     salt,
                     verifySecondSalt,
                     progress: null,
-                    cancellationToken,
-                    header.Version).ConfigureAwait(false);
+                    cancellationToken).ConfigureAwait(false);
             }
             finally
             {
@@ -1001,7 +999,7 @@ public sealed partial class KalynaContainerService
                 parameters.Suite,
                 header.Algorithm,
                 salt,
-                Argon2Profile.Default,
+                Argon2ExecutionProfile.Default,
                 header.Version);
             salt = null;
             return result;
@@ -1026,7 +1024,7 @@ public sealed partial class KalynaContainerService
             {
                 if (!headerBytes.AsSpan().SequenceEqual(canonicalHeader))
                 {
-                    throw new InvalidDataException("Container header is not in the unique canonical v9 JSON representation.");
+                    throw new InvalidDataException("Container header is not in the unique canonical JSON representation.");
                 }
             }
             finally
@@ -1050,7 +1048,7 @@ public sealed partial class KalynaContainerService
         }
         catch (JsonException ex)
         {
-            throw new InvalidDataException("Container header is not valid canonical v9 JSON.", ex);
+            throw new InvalidDataException("Container header is not valid canonical JSON.", ex);
         }
     }
 
@@ -1619,7 +1617,7 @@ public sealed partial class KalynaContainerService
     private static void ValidateHeader(ContainerHeader header)
     {
         EncryptionSuiteParameters parameters = EncryptionSuiteCatalog.FromAlgorithm(header.Algorithm);
-        if ((header.Version != 10 && header.Version != 11)
+        if (header.Version != CurrentVersion
             || header.BlockBits != parameters.BlockBytes * 8
             || !string.Equals(header.CounterEndian, EncryptionSuiteCatalog.CounterEndian, StringComparison.Ordinal)
             || header.EncryptionKeyBits != parameters.EncryptionKeyBytes * 8
@@ -1857,8 +1855,7 @@ public sealed partial class KalynaContainerService
         byte[] salt,
         byte[] secondSalt,
         IProgress<string>? progress,
-        CancellationToken cancellationToken,
-        int version = CurrentVersion)
+        CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(salt);
         KdfSalts salts = SplitSaltPairs(salt, secondSalt, parameters.UsesTwoKdfRounds);
@@ -1873,8 +1870,7 @@ public sealed partial class KalynaContainerService
                     secondGeneratedPassword,
                     salts,
                     progress,
-                    cancellationToken,
-                    version);
+                    cancellationToken);
                 return SuiteKeyMaterial.FromRoleKeys(roles, parameters);
             },
             cancellationToken);
@@ -2093,13 +2089,13 @@ internal sealed class ContainerRecoveryKdfInfo : IDisposable
         EncryptionSuite suite,
         string algorithm,
         byte[] salt,
-        Argon2Profile argon2Profile,
+        Argon2ExecutionProfile argon2Profile,
         int containerVersion)
     {
         Suite = suite;
         Algorithm = algorithm;
         Salt = salt;
-        Argon2Profile = argon2Profile;
+        Argon2ExecutionProfile = argon2Profile;
         ContainerVersion = containerVersion;
     }
 
@@ -2109,7 +2105,7 @@ internal sealed class ContainerRecoveryKdfInfo : IDisposable
 
     public byte[] Salt { get; }
 
-    public Argon2Profile Argon2Profile { get; }
+    public Argon2ExecutionProfile Argon2ExecutionProfile { get; }
 
     public int ContainerVersion { get; }
 

@@ -21,7 +21,52 @@ internal sealed record TestCase(
     Func<Task> Run,
     TestResource Resource,
     string Category = "General",
-    bool IsSmoke = false);
+    bool IsSmoke = false)
+{
+    /// <summary>
+    /// A stable identifier a worker process can be told to run.
+    /// </summary>
+    /// <remarks>
+    /// Derived from the category and the name rather than stored separately, so
+    /// a new test cannot be registered without one and two tests cannot quietly
+    /// share it. Renaming a test changes its id, which is correct: the rerun
+    /// list and the historical timings are about that test, not about a slot.
+    /// </remarks>
+    public string Id { get; } = BuildId(Category, Name);
+
+    public TestCost Cost { get; init; } = TestCost.FromResource(Resource);
+
+    private static string BuildId(string category, string name)
+    {
+        var builder = new System.Text.StringBuilder(category.Length + name.Length + 1);
+        AppendSlug(builder, category);
+        builder.Append('.');
+        AppendSlug(builder, name);
+        return builder.ToString();
+    }
+
+    private static void AppendSlug(System.Text.StringBuilder builder, string value)
+    {
+        bool separatorPending = false;
+        foreach (char c in value)
+        {
+            if (char.IsLetterOrDigit(c))
+            {
+                if (separatorPending && builder.Length > 0)
+                {
+                    builder.Append('-');
+                }
+
+                builder.Append(char.ToLowerInvariant(c));
+                separatorPending = false;
+            }
+            else
+            {
+                separatorPending = true;
+            }
+        }
+    }
+}
 
 internal static class TestRunner
 {
@@ -46,7 +91,13 @@ internal static class TestRunner
         uint? seedOverride = null;
         string? baseRef = null;
         string? dumpKeySheetsDir = null;
+        bool failFast = false;
+        bool rerunFailures = false;
+        bool inProcess = false;
+        bool workerMode = false;
+        string? workerTestId = null;
         string timingsPath = Path.Combine(AppContext.BaseDirectory, ".test-timings.json");
+        string resultsPath = Path.Combine(AppContext.BaseDirectory, ".test-results.json");
 
         for (int i = 0; i < args.Length; i++)
         {
@@ -55,6 +106,28 @@ internal static class TestRunner
             {
                 case "--list":
                     listOnly = true;
+                    break;
+                case "--fail-fast":
+                    failFast = true;
+                    break;
+                case "--rerun-failures":
+                    rerunFailures = true;
+                    fullRequested = true;
+                    noSmokeRequested = true;
+                    break;
+                case "--in-process":
+                    inProcess = true;
+                    break;
+                case "--worker":
+                    workerMode = true;
+                    break;
+                case "--test-id":
+                    if (i + 1 >= args.Length || args[i + 1].StartsWith("--"))
+                    {
+                        Console.Error.WriteLine("Usage error: Missing value for --test-id.");
+                        return 64;
+                    }
+                    workerTestId = args[++i];
                     break;
                 case "--full":
                     fullRequested = true;
@@ -160,6 +233,21 @@ internal static class TestRunner
             }
         }
 
+        // A worker runs exactly one test and reports one machine-readable
+        // line. It must short-circuit before any selection logic: the
+        // coordinator addresses it by id, not by the filters a human would use.
+        if (workerMode)
+        {
+            if (string.IsNullOrEmpty(workerTestId))
+            {
+                Console.Error.WriteLine("Usage error: --worker requires --test-id.");
+                return 64;
+            }
+
+            IReadOnlyList<TestCase> everyTest = [.. smokeTests, .. comprehensiveTests];
+            return await TestCoordinator.RunWorkerModeAsync(everyTest, workerTestId, seedOverride ?? 1u);
+        }
+
         if (listOnly)
         {
             Console.WriteLine("Available Smoke Tests:");
@@ -180,7 +268,21 @@ internal static class TestRunner
         var selectedSmoke = new List<TestCase>();
         var selectedComprehensive = new List<TestCase>();
 
-        if (changedRequested)
+        if (rerunFailures)
+        {
+            IReadOnlyList<string> failedIds = TestCoordinator.ReadFailedIds(resultsPath);
+            if (failedIds.Count == 0)
+            {
+                Console.WriteLine($"No failures recorded in {Path.GetFileName(resultsPath)}; nothing to re-run.");
+                return 0;
+            }
+
+            var failedSet = new HashSet<string>(failedIds, StringComparer.Ordinal);
+            selectedSmoke.AddRange(smokeTests.Where(t => failedSet.Contains(t.Id)));
+            selectedComprehensive.AddRange(comprehensiveTests.Where(t => failedSet.Contains(t.Id)));
+            Console.WriteLine($"Re-running {selectedSmoke.Count + selectedComprehensive.Count} previously failing test(s).");
+        }
+        else if (changedRequested)
         {
             HashSet<string>? affectedNames = DetermineAffectedTestsFromGit(baseRef);
             if (affectedNames == null)
@@ -207,6 +309,8 @@ internal static class TestRunner
                 {
                     "ALL_SMOKE",
                     "ALL_COMPREHENSIVE",
+                    "ALL_CONTAINER_SUITES",
+                    "ALL_RECOVERY_SUITES",
                 };
                 string[] unknown = [.. affectedNames.Where(name => !knownNames.Contains(name)).OrderBy(name => name, StringComparer.Ordinal)];
                 if (unknown.Length > 0)
@@ -219,7 +323,11 @@ internal static class TestRunner
                 }
 
                 selectedSmoke.AddRange(smokeTests.Where(t => affectedNames.Contains(t.Name) || affectedNames.Contains("ALL_SMOKE")));
-                selectedComprehensive.AddRange(comprehensiveTests.Where(t => affectedNames.Contains(t.Name) || affectedNames.Contains("ALL_COMPREHENSIVE")));
+                selectedComprehensive.AddRange(comprehensiveTests.Where(t =>
+                    affectedNames.Contains(t.Name)
+                    || affectedNames.Contains("ALL_COMPREHENSIVE")
+                    || (affectedNames.Contains("ALL_CONTAINER_SUITES") && string.Equals(t.Category, "Containers", StringComparison.Ordinal))
+                    || (affectedNames.Contains("ALL_RECOVERY_SUITES") && string.Equals(t.Category, "Recovery", StringComparison.Ordinal))));
                 if (selectedSmoke.Count == 0 && selectedComprehensive.Count == 0)
                 {
                     selectedSmoke.AddRange(smokeTests);
@@ -303,18 +411,58 @@ internal static class TestRunner
                 Console.WriteLine($"{selectedSmoke.Count} macOS smoke tests passed.");
             }
 
-            // 2. Run Comprehensive Tests in 4 Orchestrated Phases
+            // 2. Run the comprehensive suite under a CPU/memory budget, in
+            //    child processes, collecting every failure rather than
+            //    stopping at the first one.
             if (selectedComprehensive.Count > 0)
             {
-                bool compSuccess = await RunComprehensiveSuiteAsync(
-                    selectedComprehensive,
-                    workerCount,
-                    cachedTimings,
-                    currentRunTimings,
-                    seedOverride);
+                HardwareBudget budget = HardwareBudget.Detect();
+                Console.WriteLine(
+                    $"scheduler: {budget.CpuCount} logical CPUs, {budget.TotalRamBytes / (1024 * 1024 * 1024)} GiB; "
+                    + $"budget {budget.CpuTokens} CPU tokens / {budget.MemoryMiB} MiB, "
+                    + $"{budget.ArgonSlots} Argon slot(s), {budget.ZpaqSlots} ZPAQ slot(s)"
+                    + (inProcess ? ", in-process" : string.Empty));
 
-                if (!compSuccess)
+                IReadOnlyList<TestOutcome> outcomes = await TestCoordinator.RunAsync(
+                    selectedComprehensive,
+                    budget,
+                    cachedTimings,
+                    seedOverride,
+                    failFast,
+                    inProcess,
+                    CancellationToken.None).ConfigureAwait(false);
+
+                foreach (TestOutcome outcome in outcomes.Where(o => o.Status == TestStatus.Pass))
                 {
+                    currentRunTimings[outcome.Name] = outcome.Seconds;
+                }
+
+                TestCoordinator.WriteResults(resultsPath, outcomes, budget);
+
+                int passed = outcomes.Count(o => o.Status == TestStatus.Pass);
+                int failed = outcomes.Count(o => o.Status == TestStatus.Fail);
+                int blocked = outcomes.Count(o => o.Status == TestStatus.Blocked);
+                double sumSeconds = outcomes.Sum(o => o.Seconds);
+                totalTimer.Stop();
+
+                Console.WriteLine();
+                Console.WriteLine(
+                    $"{outcomes.Count} comprehensive macOS groups: {passed} passed, {failed} failed, {blocked} blocked.");
+                Console.WriteLine(
+                    $"wall clock {totalTimer.Elapsed.TotalSeconds:F1}s; sum of test times {sumSeconds:F1}s; "
+                    + $"parallel speedup {(totalTimer.Elapsed.TotalSeconds > 0 ? sumSeconds / totalTimer.Elapsed.TotalSeconds : 0):F2}x");
+                Console.WriteLine($"results written to {resultsPath}");
+
+                if (failed > 0 || blocked > 0)
+                {
+                    Console.WriteLine();
+                    Console.WriteLine("Failing tests:");
+                    foreach (TestOutcome outcome in outcomes.Where(o => o.Status != TestStatus.Pass))
+                    {
+                        Console.WriteLine($"  {outcome.Status.ToString().ToUpperInvariant()} {outcome.Name}");
+                    }
+
+                    SaveTimings(timingsPath, currentRunTimings);
                     return 1;
                 }
 
@@ -348,7 +496,13 @@ internal static class TestRunner
 
         bool allPassed = true;
 
-        foreach (TestCase test in sorted)
+        // Longest first, across the CPU budget. The old loop sorted by duration
+        // and then ran the list serially, so the sort bought nothing and the
+        // "parallel light execution" it claimed never happened.
+        await Parallel.ForEachAsync(
+            sorted,
+            new ParallelOptions { MaxDegreeOfParallelism = Math.Max(1, workerCount) },
+            async (test, _) =>
         {
             Stopwatch sw = Stopwatch.StartNew();
             try
@@ -381,123 +535,9 @@ internal static class TestRunner
                     Console.WriteLine();
                 }
             }
-        }
+        }).ConfigureAwait(false);
 
         return allPassed;
-    }
-
-    private static async Task<bool> RunComprehensiveSuiteAsync(
-        IReadOnlyList<TestCase> tests,
-        int workerCount,
-        Dictionary<string, double> cachedTimings,
-        ConcurrentDictionary<string, double> currentTimings,
-        uint? seedOverride)
-    {
-        // Partition tests into 4 phases
-        var processGlobalTests = tests.Where(t => t.Resource == TestResource.ProcessGlobal).ToList();
-        var parallelTests = tests.Where(t => t.Resource is TestResource.Light or TestResource.CpuHeavy).ToList();
-        var serialResourceTests = tests.Where(t => t.Resource is TestResource.ArgonHeavy or TestResource.ArgonPeakMemory or TestResource.EntropyGlobal or TestResource.ZpaqGlobal).ToList();
-        var guiTests = tests.Where(t => t.Resource == TestResource.Gui).ToList();
-
-        // Phase 1: Process-Global Preflight (Serial)
-        foreach (var test in processGlobalTests)
-        {
-            if (!await RunSingleTestAsync(test, currentTimings, seedOverride)) return false;
-        }
-
-        // Phase 2: Parallel Light & CpuHeavy Tests (LPT Scheduled)
-        if (parallelTests.Count > 0)
-        {
-            var sortedParallel = parallelTests
-                .OrderByDescending(t => cachedTimings.GetValueOrDefault(t.Name, 0.0))
-                .ToList();
-
-            bool parallelPassed = true;
-            await Parallel.ForEachAsync(
-                sortedParallel,
-                new ParallelOptions { MaxDegreeOfParallelism = workerCount },
-                async (test, ct) =>
-                {
-                    if (!await RunSingleTestAsync(test, currentTimings, seedOverride))
-                    {
-                        parallelPassed = false;
-                    }
-                });
-
-            if (!parallelPassed) return false;
-        }
-
-        // Phase 3: Serial Heavy & Global State Tests
-        // Order: ArgonHeavy -> ArgonPeakMemory -> ZpaqGlobal -> EntropyGlobal
-        var orderedSerial = serialResourceTests
-            .OrderBy(t => t.Resource switch
-            {
-                TestResource.ArgonHeavy => 1,
-                TestResource.ArgonPeakMemory => 2,
-                TestResource.ZpaqGlobal => 3,
-                TestResource.EntropyGlobal => 4,
-                _ => 5
-            })
-            .ToList();
-
-        foreach (var test in orderedSerial)
-        {
-            if (!await RunSingleTestAsync(test, currentTimings, seedOverride)) return false;
-        }
-
-        // Phase 4: GUI Tests (Serial on Headless UI worker)
-        foreach (var test in guiTests)
-        {
-            if (!await RunSingleTestAsync(test, currentTimings, seedOverride)) return false;
-        }
-
-        return true;
-    }
-
-    private static async Task<bool> RunSingleTestAsync(
-        TestCase test,
-        ConcurrentDictionary<string, double> currentTimings,
-        uint? seedOverride)
-    {
-        uint seed = seedOverride ?? checked((uint)RandomNumberGenerator.GetInt32(1, int.MaxValue));
-        MacComprehensiveTests.TestSeed = seed;
-        MacComprehensiveTests.SetCurrentPrng(new Random((int)seed));
-
-        Stopwatch sw = Stopwatch.StartNew();
-        try
-        {
-            await test.Run().ConfigureAwait(false);
-            sw.Stop();
-            double seconds = sw.Elapsed.TotalSeconds;
-            currentTimings[test.Name] = seconds;
-
-            lock (ConsoleLock)
-            {
-                Console.WriteLine($"FULL PASS {test.Name} ({seconds:F1}s)");
-            }
-            return true;
-        }
-        catch (Exception ex)
-        {
-            sw.Stop();
-            lock (ConsoleLock)
-            {
-                Console.WriteLine();
-                Console.WriteLine($"FAIL {test.Name}");
-                Console.WriteLine($"  seed=0x{seed:X8}");
-                Console.WriteLine($"  {ex.GetType().Name}: {ex.Message}");
-                if (ex.InnerException != null)
-                {
-                    Console.WriteLine($"  Inner: {ex.InnerException.Message}");
-                }
-                Console.WriteLine(ex.StackTrace);
-                Console.WriteLine();
-                Console.WriteLine("Re-run:");
-                Console.WriteLine($"  dotnet run --no-build --no-restore --project KeepVaultMac.Tests -c Release -- --full --no-smoke --only \"{test.Name}\" --seed 0x{seed:X8}");
-                Console.WriteLine();
-            }
-            return false;
-        }
     }
 
     private static HashSet<string>? DetermineAffectedTestsFromGit(string? baseRef)
@@ -565,7 +605,7 @@ internal static class TestRunner
                     affected.Add("peak memory stays at one Argon2 matrix, and the header leaks nothing");
                     affected.Add("password policy and KEEPVAULT term rejection");
                     affected.Add("creation PIN policy and weak-pattern rejection");
-                    affected.Add("v11 suite roundtrips and manipulation rejection");
+                    affected.Add("ALL_CONTAINER_SUITES");
                     affected.Add("v11 container header, decryption and KPAR2 round trip");
                 }
                 if (file.Contains("ZpaqService") || file.Contains("MacPlatformSecurity") || file.Contains("MacSecureFile") || file.Contains("MacOriginalDeletionService"))
@@ -585,7 +625,7 @@ internal static class TestRunner
                 {
                     matched = true;
                     affected.Add("KPAR2 v4 repair, authentication and transplantation rejection");
-                    affected.Add("KPAR2 v4 accepts every catalogued suite, not just the first two");
+                    affected.Add("ALL_RECOVERY_SUITES");
                 }
                 if (file.Contains("MainWindow") || file.Contains("MacGuiTests") || file.Contains("Avalonia"))
                 {
@@ -600,6 +640,12 @@ internal static class TestRunner
                     affected.Add("GUI secret clearing wipes password, PIN, and factors");
                     affected.Add("GUI KDF and entropy profile description localization");
                     affected.Add("GUI full creation flow with mouse sampling and factor generation");
+                }
+                if (file.EndsWith(".md", StringComparison.OrdinalIgnoreCase))
+                {
+                    matched = true;
+                    affected.Add("documentation matches the normative v11 specification");
+                    affected.Add("no legacy constructions in production source");
                 }
                 if (file.Contains("QrCodeScanner") || file.Contains("QR-Scanner") || file.Contains("Verify-QR-Scanner"))
                 {
@@ -626,6 +672,14 @@ internal static class TestRunner
                     affected.Add("randomised differential testing against every reference library");
                 }
 
+                if (file.EndsWith(".cs", StringComparison.OrdinalIgnoreCase)
+                    || file.EndsWith(".c", StringComparison.OrdinalIgnoreCase)
+                    || file.EndsWith(".h", StringComparison.OrdinalIgnoreCase))
+                {
+                    affected.Add("no legacy constructions in production source");
+                    affected.Add("documentation matches the normative v11 specification");
+                }
+
                 if (!matched && !IsBenignFile(file))
                 {
                     affected.Add("ALL_SMOKE");
@@ -644,22 +698,17 @@ internal static class TestRunner
     {
         string normalized = file.Replace('\\', '/');
 
-        // Explicit root documentation / licensing
-        if (string.Equals(normalized, "README.md", StringComparison.OrdinalIgnoreCase) ||
-            string.Equals(normalized, "LICENSE", StringComparison.OrdinalIgnoreCase) ||
+        // Licensing and repository metadata. README and docs/ are deliberately
+        // absent: they state the normative security architecture, and a README
+        // that contradicts the code is how a later reader "fixes" the working
+        // side. They select the spec-consistency gate instead, which is fast.
+        if (string.Equals(normalized, "LICENSE", StringComparison.OrdinalIgnoreCase) ||
             string.Equals(normalized, "LICENSE.txt", StringComparison.OrdinalIgnoreCase) ||
             string.Equals(normalized, "NOTICE", StringComparison.OrdinalIgnoreCase) ||
             string.Equals(normalized, "NOTICE.txt", StringComparison.OrdinalIgnoreCase) ||
             string.Equals(normalized, ".gitignore", StringComparison.OrdinalIgnoreCase) ||
             string.Equals(normalized, ".gitattributes", StringComparison.OrdinalIgnoreCase) ||
             string.Equals(normalized, ".editorconfig", StringComparison.OrdinalIgnoreCase))
-        {
-            return true;
-        }
-
-        // Dedicated documentation directories
-        if (normalized.StartsWith("docs/", StringComparison.OrdinalIgnoreCase) ||
-            normalized.StartsWith("Documentation/", StringComparison.OrdinalIgnoreCase))
         {
             return true;
         }

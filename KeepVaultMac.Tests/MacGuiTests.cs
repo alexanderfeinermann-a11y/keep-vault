@@ -366,7 +366,7 @@ internal static class MacGuiTests
 
     /// <summary>
     /// The PIN readout has to behave like the password readout: it is a
-    /// credential of equal standing in v10, and an archive cannot be opened
+    /// credential of equal standing, and an archive cannot be opened
     /// without it.
     /// </summary>
     private static void TestPinPolicyFeedback(MainWindow window)
@@ -600,13 +600,13 @@ internal static class MacGuiTests
         string deKdf = kdfProfile.Text ?? string.Empty;
         MacComprehensiveTests.Require(
             deKdf.Contains("1024-Bit-Master", StringComparison.Ordinal) || deKdf.Contains("KDF-Pfade", StringComparison.Ordinal),
-            $"German KDF description is missing v10 master details: {deKdf}");
+            $"German KDF description is missing master details: {deKdf}");
 
         SelectLanguage(language, "en");
         string enKdf = kdfProfile.Text ?? string.Empty;
         MacComprehensiveTests.Require(
             enKdf.Contains("1024-bit master", StringComparison.Ordinal) || enKdf.Contains("KDF paths", StringComparison.Ordinal),
-            $"English KDF description is missing v10 master details: {enKdf}");
+            $"English KDF description is missing master details: {enKdf}");
     }
 
     /// <summary>
@@ -647,7 +647,7 @@ internal static class MacGuiTests
         TextBox pin = Control<TextBox>(window, "CreatePinBox");
         TextBox pinConfirm = Control<TextBox>(window, "CreatePinConfirmBox");
 
-        const string validPass = "Valid#Master%Passphrase2026&v10!";
+        const string validPass = "Valid#Master%Passphrase2026&v11!";
         password.Text = validPass;
         confirm.Text = validPass;
         pin.Text = "84920153";

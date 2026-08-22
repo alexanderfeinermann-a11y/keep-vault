@@ -28,18 +28,18 @@
 #define KZPAQ_ARGON2_ITERATIONS 4U
 #define KZPAQ_ARGON2_PARALLELISM 4U
 
-/* v10 derives the Argon2 memory cost from a secret-dependent 16-bit index, so
- * m is no longer one fixed value but a bounded, quantised range:
+/* v11 derives the Argon2 memory cost from a secret-dependent 16-bit index, so
+ * m is not one fixed value but a bounded, quantised range:
  *     m = 1,048,576 + 16 * PMI KiB,  PMI in [0, 65535]
  * The wrapper validates the range and the 16 KiB step so a caller cannot ask
  * for an arbitrary or degenerate memory cost. */
-#define KZPAQ_ARGON2_V10_MEMORY_MIN_KIB 1048576U
-#define KZPAQ_ARGON2_V10_MEMORY_MAX_KIB 2097136U
-#define KZPAQ_ARGON2_V10_MEMORY_STEP_KIB 16U
-#define KZPAQ_ARGON2_V10_PASSWORD_LEN 128U
-#define KZPAQ_ARGON2_V10_SALT_LEN 64U
-#define KZPAQ_ARGON2_V10_OUTPUT_LEN 64U
-#define KZPAQ_ARGON2_V10_SECRET_LEN 128U
+#define KZPAQ_ARGON2_V11_MEMORY_MIN_KIB 1048576U
+#define KZPAQ_ARGON2_V11_MEMORY_MAX_KIB 2097136U
+#define KZPAQ_ARGON2_V11_MEMORY_STEP_KIB 16U
+#define KZPAQ_ARGON2_V11_PASSWORD_LEN 128U
+#define KZPAQ_ARGON2_V11_SALT_LEN 64U
+#define KZPAQ_ARGON2_V11_OUTPUT_LEN 64U
+#define KZPAQ_ARGON2_V11_SECRET_LEN 128U
 
 #if defined(_WIN32)
 static SRWLOCK argon2_call_lock = SRWLOCK_INIT;
@@ -294,9 +294,9 @@ ARGON2_REF_EXPORT int phc_argon2id_hash_raw(
     return result;
 }
 
-/* The v10 entry point. It differs from the v9 one only by exposing Argon2's
- * optional secret and associated-data inputs, which the PHC structure has
- * always supported, and by accepting the bounded PMI-derived memory range.
+/* The v11 entry point. It exposes Argon2's optional secret and associated-data
+ * inputs, which the PHC structure has always supported, and accepts only the
+ * bounded PMI-derived memory range.
  *
  * Every parameter is validated structurally and the call fails closed: a
  * wrapper that quietly accepted a shorter salt or a non-quantised memory cost
@@ -304,7 +304,7 @@ ARGON2_REF_EXPORT int phc_argon2id_hash_raw(
  * strings themselves are deliberately NOT duplicated here -- the managed side
  * builds and KAT-pins them, and a second copy in C is a second thing to drift.
  */
-ARGON2_REF_EXPORT int keepvault_argon2id_v10(
+ARGON2_REF_EXPORT int keepvault_argon2id_v11(
     uint32_t t_cost,
     uint32_t m_cost,
     uint32_t parallelism,
@@ -338,9 +338,9 @@ ARGON2_REF_EXPORT int keepvault_argon2id_v10(
         return ARGON2_INCORRECT_PARAMETER;
     }
 
-    if (password_len != KZPAQ_ARGON2_V10_PASSWORD_LEN ||
-        salt_len != KZPAQ_ARGON2_V10_SALT_LEN ||
-        output_len != KZPAQ_ARGON2_V10_OUTPUT_LEN ||
+    if (password_len != KZPAQ_ARGON2_V11_PASSWORD_LEN ||
+        salt_len != KZPAQ_ARGON2_V11_SALT_LEN ||
+        output_len != KZPAQ_ARGON2_V11_OUTPUT_LEN ||
         associated_data_len == 0U) {
         return ARGON2_INCORRECT_PARAMETER;
     }
@@ -351,7 +351,7 @@ ARGON2_REF_EXPORT int keepvault_argon2id_v10(
         if (secret != NULL) {
             return ARGON2_INCORRECT_PARAMETER;
         }
-    } else if (secret_len != KZPAQ_ARGON2_V10_SECRET_LEN || secret == NULL) {
+    } else if (secret_len != KZPAQ_ARGON2_V11_SECRET_LEN || secret == NULL) {
         return ARGON2_INCORRECT_PARAMETER;
     }
 
@@ -360,9 +360,9 @@ ARGON2_REF_EXPORT int keepvault_argon2id_v10(
         return ARGON2_INCORRECT_PARAMETER;
     }
 
-    if (m_cost < KZPAQ_ARGON2_V10_MEMORY_MIN_KIB ||
-        m_cost > KZPAQ_ARGON2_V10_MEMORY_MAX_KIB ||
-        ((m_cost - KZPAQ_ARGON2_V10_MEMORY_MIN_KIB) % KZPAQ_ARGON2_V10_MEMORY_STEP_KIB) != 0U) {
+    if (m_cost < KZPAQ_ARGON2_V11_MEMORY_MIN_KIB ||
+        m_cost > KZPAQ_ARGON2_V11_MEMORY_MAX_KIB ||
+        ((m_cost - KZPAQ_ARGON2_V11_MEMORY_MIN_KIB) % KZPAQ_ARGON2_V11_MEMORY_STEP_KIB) != 0U) {
         return ARGON2_INCORRECT_PARAMETER;
     }
 
@@ -414,8 +414,9 @@ ARGON2_REF_EXPORT int keepvault_argon2id_v10(
 
     /* Both clear flags are set deliberately: the caller hands this function
      * one-call copies, never a buffer it still needs. That ownership rule is
-     * what makes the v9 Paranoia defect -- a shared prehash cleared by the
-     * first call -- structurally impossible here. */
+     * what makes a shared prehash cleared by the first call -- which would
+     * silently run the second Paranoia round over zero bytes -- structurally
+     * impossible here. */
     context.flags = ARGON2_FLAG_CLEAR_PASSWORD;
     if (secret_len != 0U) {
         context.flags |= ARGON2_FLAG_CLEAR_SECRET;

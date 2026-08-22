@@ -121,7 +121,7 @@ Each layer gets its own key and its own slice of the nonce. For the standard
 cascade that is 64 bytes of key and 64 bytes of nonce for the inner Kalyna
 layer, 128 and 128 for the outer Threefish layer.
 
-v9 cut those keys out of one flat Argon2id output, so a layer's key was a
+An earlier design cut those keys out of one flat Argon2id output, so a layer's key was a
 function of where it happened to sit in that buffer, and the same cipher in two
 positions could share structure. v11 derives each key separately from a
 canonical context — algorithm, stage index, cipher, purpose and key width — run
@@ -162,12 +162,26 @@ v11 asks for four credentials, and all four are mandatory: a passphrase of 24 to
 256 characters, a PIN of 6 to 16 digits, and the two 1024-bit factors from the
 printed key sheets. There is no reduced mode and no suite that skips one.
 
-Two credential paths are built first, each a different shape of construction:
+Two credential paths are built first, each a different shape of construction.
+The SHA3 path splits each factor into its two 512-bit binary halves and pairs
+them across the two sheets:
 
 ```
-Q_S = SHA3-512(LP(domain_A, pass, pin, A)) || SHA3-512(LP(domain_B, pass, pin, B))
-Q_K = Skein-MAC-1024-1024(key = A || B, pers = domain, msg = LP(pass, pin))
+A1 = A[0..64)   A2 = A[64..128)
+B1 = B[0..64)   B2 = B[64..128)
+
+Q_S1 = SHA3-512(LP(D_S1) || LP(pass) || LP(pin) || LP(A1) || LP(B1))     64 B
+Q_S2 = SHA3-512(LP(D_S2) || LP(pass) || LP(pin) || LP(A2) || LP(B2))     64 B
+Q_S  = Q_S1 || Q_S2                                                     128 B
+
+Q_K  = Skein-MAC-1024-1024(key = A || B, pers = D_SK, msg = LP(pass) || LP(pin))
 ```
+
+The factors enter as raw bytes, not as their hexadecimal transcription, and both
+halves of `Q_S` depend on both key sheets. That is the point of the split: if one
+1024-bit factor is compromised, each 512-bit SHA3 half still rests on 512
+uncompromised bits of the other. The Skein path is not split — it keys the MAC
+with the complete 2048-bit `A || B`.
 
 `LP` is length-prefixed framing, not concatenation: without it a passphrase of
 `"ab"` with PIN `"1"` and a passphrase of `"a"` with PIN `"b1"` would hash the
@@ -223,7 +237,7 @@ Argon2id calls of at least a gibibyte each, not four that can be run in
 parallel. The credentials sit in the same position in both rounds; only the
 secret and the salts change.
 
-This replaces the v9 arrangement, where both rounds shared one 128-byte
+This replaces an earlier arrangement, where both rounds shared one 128-byte
 credential prehash. Because the PHC adapter clears the password it is given,
 4.0.0 and 4.0.1 ran their second round over 128 zero bytes. v11 does not share a
 buffer between rounds at all, and the regression is checked by changing one bit
@@ -240,7 +254,7 @@ the machine that wrote it.
   Skein-1024 MAC tag, then ciphertext
 - Password mode `UserPassword24to256+PIN6to16+GeneratedHex1024x2`
 - KDF input mode `DualBranch-v11: SplitFactorsSHA3-512-1024 || KeyedSkeinMAC-1024-1024`
-- KDF mode `DualArgon2id-SHA3+Skein1024-Sequential-Master1024`
+- KDF mode `DualArgon2id-SplitSHA3+Skein1024-Sequential-Master1024`
 - One 1024-bit salt pair per round; Argon2id 0x13 with `t=4`, `p=4` and a memory
   cost derived from the credentials — `Argon2MemoryKiB` is stored as `0`
 - 1024-bit master, from which every role key is derived separately
@@ -364,7 +378,7 @@ Every intermediate buffer — the encoding targets, the length frames, both
 credential hashes, every one-call Argon2id copy and both round masters — is
 locked against paging before its first write and zeroed while still locked. Each
 Argon2id call receives a fresh copy, because the native side clears what it is
-given; this is what v9 got wrong.
+given; this is what an earlier revision got wrong.
 
 The Skein-MAC is Bouncy Castle's `SkeinMac` with Skein's own key and
 personalisation parameters, not `Skein1024(key || message)`. HKDF-Expand is

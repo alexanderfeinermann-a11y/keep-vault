@@ -14,6 +14,7 @@ var smokeTests = new List<TestCase>
     new("archive-input symlink rejection", TestArchiveInputSymlinkRejectionAsync, TestResource.Light, "Smoke", IsSmoke: true),
     new("container-private archive-input snapshot", TestArchiveInputSnapshotLocationAsync, TestResource.Light, "Smoke", IsSmoke: true),
     new("overlapping archive-input normalization", TestOverlappingArchiveInputsAsync, TestResource.Light, "Smoke", IsSmoke: true),
+    new("folder input with a trailing separator", TestTrailingSeparatorFolderInputAsync, TestResource.Light, "Smoke", IsSmoke: true),
     new("descriptor-bound private snapshot", TestDescriptorBoundPrivateSnapshotAsync, TestResource.Light, "Smoke", IsSmoke: true),
     new("private authenticated-input snapshot", TestPrivateSnapshotAsync, TestResource.Light, "Smoke", IsSmoke: true),
     new("Apple signature framework binding", TestAppleSignatureBindingAsync, TestResource.Light, "Smoke", IsSmoke: true),
@@ -118,18 +119,7 @@ static async Task TestReleaseCompanionVersionPlumbingAsync()
     }
 }
 
-static string FindRepositoryRoot()
-{
-    for (string? path = AppContext.BaseDirectory; path is not null; path = Path.GetDirectoryName(path))
-    {
-        if (Directory.Exists(Path.Combine(path, ".git")))
-        {
-            return path;
-        }
-    }
-
-    throw new DirectoryNotFoundException("The Keep Vault repository root could not be located.");
-}
+static string FindRepositoryRoot() => RepositoryLayout.FindRepositoryRoot();
 
 static void WriteTestInfoPlist(string bundle, string identifier, string version, string build)
 {
@@ -311,6 +301,48 @@ static Task TestOverlappingArchiveInputsAsync()
     }
 
     return Task.CompletedTask;
+}
+
+/// <summary>
+/// A folder chosen through the folder picker arrives as "/path/to/folder/".
+/// </summary>
+/// <remarks>
+/// The trailing separator used to survive normalization, and inside the private
+/// snapshot the destination's own parent then resolved to the destination
+/// itself - so the collision check fired against the directory the snapshot had
+/// just created and archiving any folder failed. Nothing in the suite noticed,
+/// because every test passed paths without the separator the picker adds.
+/// </remarks>
+static async Task TestTrailingSeparatorFolderInputAsync()
+{
+    string root = MacSafeFileSystem.ResolveExistingRealPath(
+        Directory.CreateTempSubdirectory("keep-vault-trailing-separator-").FullName);
+    string folder = Path.Combine(root, "folder");
+    string nested = Path.Combine(folder, "sub");
+    Directory.CreateDirectory(nested);
+    await File.WriteAllTextAsync(Path.Combine(folder, "top.txt"), "top").ConfigureAwait(false);
+    await File.WriteAllTextAsync(Path.Combine(nested, "nested.txt"), "nested").ConfigureAwait(false);
+    string loose = Path.Combine(root, "loose.txt");
+    await File.WriteAllTextAsync(loose, "loose").ConfigureAwait(false);
+
+    try
+    {
+        using var archiveBytes = new MemoryStream();
+        ProcessResult result = await new ZpaqService().AddStreamingAsync(
+            [folder + Path.DirectorySeparatorChar, loose],
+            1,
+            (stream, cancellationToken) => stream.CopyToAsync(archiveBytes, cancellationToken),
+            null,
+            CancellationToken.None).ConfigureAwait(false);
+        Require(
+            result.Succeeded,
+            $"A folder input with a trailing separator was rejected: {result.StandardError}");
+        Require(archiveBytes.Length > 64, "The archive built from a trailing-separator folder input is empty.");
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
 }
 
 static Task TestDescriptorBoundPrivateSnapshotAsync()

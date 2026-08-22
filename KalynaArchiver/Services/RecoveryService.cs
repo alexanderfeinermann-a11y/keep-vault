@@ -355,7 +355,7 @@ public sealed partial class RecoveryService
                     SaltSha3Round2 = kdfInfo is null || kdfInfo.Salt.Length <= 128 ? null : Convert.ToBase64String(kdfInfo.Salt[128..192]),
                     SaltSkeinRound2 = kdfInfo is null || kdfInfo.Salt.Length <= 128 ? null : Convert.ToBase64String(kdfInfo.Salt[192..256]),
                     // Kept at zero in every mode. The fields are v2 leftovers
-                    // and a v10 Argon2id cost is derived from the credentials;
+                    // and the Argon2id cost is derived from the credentials;
                     // publishing it beside the salt would undo that.
                     Argon2MemoryKiB = 0,
                     Argon2Iterations = 0,
@@ -462,8 +462,7 @@ public sealed partial class RecoveryService
                                 firstGeneratedPassword!,
                                 secondGeneratedPassword!,
                                 locator,
-                                cancellationToken,
-                                version: containerVersion).ConfigureAwait(false);
+                                cancellationToken).ConfigureAwait(false);
                         }
 
                         (byte[] certificationSha3, byte[] certificationSkein) =
@@ -525,8 +524,8 @@ public sealed partial class RecoveryService
                     }
                 }
 
-                SecureDeleteRecoverySidecar(fullArchivePath);
-                File.Move(temporaryPath, recoveryPath, overwrite: false);
+                await InstallRecoverySidecarTransactionallyAsync(
+                    temporaryPath, recoveryPath, progress, cancellationToken).ConfigureAwait(false);
                 recoveryInstalled = true;
                 progress?.Report(
                     protectionMode == RecoveryProtectionMode.DualAuthenticatedEncrypted
@@ -553,6 +552,179 @@ public sealed partial class RecoveryService
                     RecoverySidecarDestructionBytes,
                     RecoverySidecarDestructionBytes);
             }
+        }
+    }
+
+    /// <summary>
+    /// Test hooks that fail one step of the sidecar replacement, so the
+    /// transaction boundaries can be checked instead of assumed.
+    /// </summary>
+    internal static Action? SidecarHookAfterQuarantine { get; set; }
+    internal static Action? SidecarHookAfterInstall { get; set; }
+    internal static Action? SidecarHookBeforeBackupDestruction { get; set; }
+
+    /// <summary>
+    /// Replaces the recovery sidecar so that a valid one exists at every point
+    /// in time.
+    /// </summary>
+    /// <remarks>
+    /// The previous code destroyed the existing sidecar first and moved the new
+    /// one into place afterwards. Anything that failed in between - a racing
+    /// creator of the target name, a permission or I/O error - left the archive
+    /// with no recovery data at all, even though the sidecar it already had was
+    /// perfectly good.
+    ///
+    /// The order is now: move the old one aside under a private name in the
+    /// same directory, install the new one, re-open and parse the installed
+    /// file, and only then destroy the old one. A failure before that last step
+    /// puts the old sidecar back. A failure *at* that last step is reported but
+    /// does not roll back: the new sidecar is already installed and verified,
+    /// and undoing it to tidy up a leftover backup would trade a working
+    /// recovery file for a cosmetic one.
+    /// </remarks>
+    private async Task InstallRecoverySidecarTransactionallyAsync(
+        string temporaryPath,
+        string recoveryPath,
+        IProgress<string>? progress,
+        CancellationToken cancellationToken)
+    {
+        string directory = Path.GetDirectoryName(recoveryPath) ?? Environment.CurrentDirectory;
+        string quarantinePath = Path.Combine(
+            directory,
+            $".{Path.GetFileName(recoveryPath)}.{Guid.NewGuid():N}.previous");
+        bool quarantined = false;
+
+        if (File.Exists(recoveryPath))
+        {
+            RequireReplaceableSidecar(recoveryPath);
+            File.Move(recoveryPath, quarantinePath, overwrite: false);
+            quarantined = true;
+        }
+
+        bool installed = false;
+        try
+        {
+            // Everything from here on is inside the rollback scope. The hook
+            // sits inside it deliberately: a failure between the quarantine and
+            // the install has to restore the old sidecar just as much as a
+            // failing install does.
+            SidecarHookAfterQuarantine?.Invoke();
+            File.Move(temporaryPath, recoveryPath, overwrite: false);
+            installed = true;
+            SidecarHookAfterInstall?.Invoke();
+
+            // The installed bytes have to parse as a sidecar before the old one
+            // is destroyed; otherwise a truncated or partially written file
+            // would silently replace working recovery data.
+            await RequireInstalledSidecarReadableAsync(recoveryPath, cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            if (installed)
+            {
+                TryMoveAside(recoveryPath, temporaryPath);
+            }
+
+            if (quarantined && !File.Exists(recoveryPath))
+            {
+                try
+                {
+                    File.Move(quarantinePath, recoveryPath, overwrite: false);
+                }
+                catch (IOException)
+                {
+                    progress?.Report(
+                        $"The previous KPAR2 file could not be restored to its name and is preserved at: {quarantinePath}");
+                }
+                catch (UnauthorizedAccessException)
+                {
+                    progress?.Report(
+                        $"The previous KPAR2 file could not be restored to its name and is preserved at: {quarantinePath}");
+                }
+            }
+
+            throw;
+        }
+
+        if (!quarantined)
+        {
+            return;
+        }
+
+        SidecarHookBeforeBackupDestruction?.Invoke();
+        try
+        {
+            SecureFile.DestroyPrefixAndSuffixAndDelete(
+                quarantinePath,
+                RecoverySidecarDestructionBytes,
+                RecoverySidecarDestructionBytes);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException)
+        {
+            // Committed already. Report the leftover rather than undoing a
+            // verified installation.
+            progress?.Report(
+                $"The new KPAR2 file is installed, but the previous one could not be destroyed and remains at: {quarantinePath}");
+        }
+    }
+
+    /// <summary>
+    /// Refuses to move aside anything that is not a plain, single-link file.
+    /// </summary>
+    private static void RequireReplaceableSidecar(string recoveryPath)
+    {
+        FileAttributes attributes = File.GetAttributes(recoveryPath);
+        if ((attributes & (FileAttributes.Directory | FileAttributes.ReparsePoint)) != 0)
+        {
+            throw new IOException(
+                $"The existing KPAR2 path is a directory or a link and will not be replaced: {recoveryPath}");
+        }
+
+        if (File.ResolveLinkTarget(recoveryPath, returnFinalTarget: false) is not null)
+        {
+            throw new IOException(
+                $"The existing KPAR2 path is a symbolic link and will not be replaced: {recoveryPath}");
+        }
+
+#if KEEPVAULT_MACOS
+        // Opened no-follow and checked through the descriptor: a second hard
+        // link means the bytes survive the destruction under another name.
+        using FileStream existing = MacSafeFileSystem.OpenReadNoSymlinks(recoveryPath);
+        MacSafeFileSystem.ValidateRegularFile(existing.SafeFileHandle, requireSingleLink: true, recoveryPath);
+#endif
+    }
+
+    private async Task RequireInstalledSidecarReadableAsync(
+        string recoveryPath,
+        CancellationToken cancellationToken)
+    {
+#if KEEPVAULT_MACOS
+        using MacPrivateFileSnapshot snapshot = await MacPrivateFileSnapshot
+            .CaptureAsync(recoveryPath, cancellationToken)
+            .ConfigureAwait(false);
+        FileStream recovery = snapshot.Stream;
+#else
+        await using FileStream recovery = OpenRecoveryForRead(recoveryPath);
+#endif
+        _ = await ReadConsensusLocatorAsync(recovery, cancellationToken).ConfigureAwait(false);
+    }
+
+    private static void TryMoveAside(string path, string destination)
+    {
+        try
+        {
+            if (File.Exists(destination))
+            {
+                File.Delete(destination);
+            }
+
+            File.Move(path, destination, overwrite: false);
+        }
+        catch (IOException)
+        {
+        }
+        catch (UnauthorizedAccessException)
+        {
         }
     }
 
@@ -850,8 +1022,7 @@ public sealed partial class RecoveryService
                         firstGeneratedPassword!,
                         secondGeneratedPassword!,
                         locator,
-                        cancellationToken,
-                        version: kdfVersion).ConfigureAwait(false);
+                        cancellationToken).ConfigureAwait(false);
 
                     (byte[] actualSha3, byte[] actualSkein) = ComputeMetadataCertification(
                         locator,
@@ -924,8 +1095,7 @@ public sealed partial class RecoveryService
         string firstGeneratedPassword,
         string secondGeneratedPassword,
         RecoveryLocator locator,
-        CancellationToken cancellationToken,
-        int version = 11)
+        CancellationToken cancellationToken)
     {
         if (locator.ProtectionMode != RecoveryProtectionMode.DualAuthenticatedEncrypted
             || !IsKnownLocatorSuite(locator.EncryptionSuite)
@@ -938,13 +1108,13 @@ public sealed partial class RecoveryService
         var suite = (EncryptionSuite)locator.EncryptionSuite;
         EncryptionSuiteParameters parameters = EncryptionSuiteCatalog.Get(suite);
 
-        // KPAR2 v3 runs the suite's complete key derivation, both rounds
-        // included. KPAR2 v2 ran a single Argon2id round even for the two-round
-        // suite, which handed anyone holding both key-sheet factors a cheaper
-        // offline oracle for the passphrase through the recovery file than
-        // through the container it protects. The certification keys are still
-        // separate from the container's -- they come from their own role
-        // purposes -- but they now cost exactly as much to attack.
+        // KPAR2 runs the suite's complete key derivation, both rounds
+        // included. A single Argon2id round even for the two-round suite would
+        // hand anyone holding both key-sheet factors a cheaper offline oracle
+        // for the passphrase through the recovery file than through the
+        // container it protects. The certification keys are still separate from
+        // the container's -- they come from their own role purposes -- but they
+        // cost exactly as much to attack.
         bool paranoia = parameters.UsesTwoKdfRounds;
         var salts = new KdfSalts(
             locator.SaltSha3Round1,
@@ -961,8 +1131,7 @@ public sealed partial class RecoveryService
                 secondGeneratedPassword,
                 salts,
                 progress: null,
-                cancellationToken,
-                version),
+                cancellationToken),
             cancellationToken).ConfigureAwait(false);
 
         byte[] parentSha3Key = SuiteKeySchedule.DeriveGlobalKey(

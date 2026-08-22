@@ -12,7 +12,7 @@ internal static unsafe partial class NativeArgon2id
     private static nint _libraryHandle;
     private static delegate* unmanaged[Cdecl]<uint, uint, uint, byte*, uint, byte*, uint, byte*, uint, int> _hashRaw;
     private static delegate* unmanaged[Cdecl]<
-        uint, uint, uint, byte*, uint, byte*, uint, byte*, uint, byte*, uint, byte*, uint, int> _hashRawV10;
+        uint, uint, uint, byte*, uint, byte*, uint, byte*, uint, byte*, uint, byte*, uint, int> _hashRawV11;
     private static delegate* unmanaged[Cdecl]<int, nint> _errorMessage;
     private static delegate* unmanaged[Cdecl]<uint> _lastMemoryLockError;
 
@@ -105,7 +105,7 @@ internal static unsafe partial class NativeArgon2id
     }
 
     /// <summary>
-    /// One Argon2id branch, with Argon2's optional secret and
+    /// One v11 Argon2id branch, with Argon2's optional secret and
     /// associated-data inputs.
     /// </summary>
     /// <remarks>
@@ -113,7 +113,7 @@ internal static unsafe partial class NativeArgon2id
     /// native side sets ARGON2_FLAG_CLEAR_PASSWORD, and ARGON2_FLAG_CLEAR_SECRET
     /// when a secret is present, so both are wiped inside the call. Passing a
     /// buffer that a later call still needs is precisely the defect that made
-    /// v9's second Paranoia round run over zero bytes; the caller owns the
+    /// a second Paranoia round run over zero bytes; the caller owns the
     /// masters and copies from them.
     ///
     /// This method stays single-call on purpose. Sequencing the two KDF branches
@@ -136,7 +136,7 @@ internal static unsafe partial class NativeArgon2id
         ArgumentNullException.ThrowIfNull(output);
         if (associatedData.Length == 0)
         {
-            throw new ArgumentException("An Argon2id branch requires associated data.", nameof(associatedData));
+            throw new ArgumentException("A v11 Argon2id branch requires associated data.", nameof(associatedData));
         }
 
         EnsureLoaded();
@@ -150,7 +150,7 @@ internal static unsafe partial class NativeArgon2id
         fixed (byte* associatedDataPtr = associatedData)
         fixed (byte* outputPtr = output)
         {
-            int result = _hashRawV10(
+            int result = _hashRawV11(
                 iterations,
                 memoryKiB,
                 parallelism,
@@ -169,7 +169,7 @@ internal static unsafe partial class NativeArgon2id
             {
                 string lockFailure = DescribeMemoryLockFailure();
                 throw new CryptographicException(
-                    $"Argon2id v10 returned {result}: {GetErrorMessage(result)}.{lockFailure}");
+                    $"Argon2id v11 returned {result}: {GetErrorMessage(result)}.{lockFailure}");
             }
         }
     }
@@ -194,9 +194,9 @@ internal static unsafe partial class NativeArgon2id
             {
                 _hashRaw = (delegate* unmanaged[Cdecl]<uint, uint, uint, byte*, uint, byte*, uint, byte*, uint, int>)
                     NativeLibrary.GetExport(handle, "phc_argon2id_hash_raw");
-                _hashRawV10 = (delegate* unmanaged[Cdecl]<
+                _hashRawV11 = (delegate* unmanaged[Cdecl]<
                     uint, uint, uint, byte*, uint, byte*, uint, byte*, uint, byte*, uint, byte*, uint, int>)
-                    NativeLibrary.GetExport(handle, "keepvault_argon2id_v10");
+                    NativeLibrary.GetExport(handle, "keepvault_argon2id_v11");
                 _errorMessage = (delegate* unmanaged[Cdecl]<int, nint>)
                     NativeLibrary.GetExport(handle, "phc_argon2_error_message");
                 _lastMemoryLockError = (delegate* unmanaged[Cdecl]<uint>)

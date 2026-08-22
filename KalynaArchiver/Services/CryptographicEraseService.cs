@@ -27,8 +27,8 @@ public sealed class CryptographicEraseService
         }
 
         string message = encrypted
-            ? "Encrypted v9 container detected. Cryptographic erase can delete the encrypted container, but hardware per-file secure erase is not guaranteed on SSDs."
-            : "This is not an encrypted v9 container. Plain files cannot be cryptographically erased by deleting a key.";
+            ? "Encrypted container detected. Cryptographic erase can delete the encrypted container, but hardware per-file secure erase is not guaranteed on SSDs."
+            : "This is not an encrypted container. Plain files cannot be cryptographically erased by deleting a key.";
         return new CryptoEraseAnalysis(true, encrypted, message, HardwareEraseNotice(path));
     }
 

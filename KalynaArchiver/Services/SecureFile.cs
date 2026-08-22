@@ -31,33 +31,23 @@ public static partial class SecureFile
 
     public static void DestroyPrefixAndDelete(string? path, int prefixBytes)
     {
-        if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
-        {
-            return;
-        }
-
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(prefixBytes);
-
-        byte[] buffer = new byte[prefixBytes];
-        using IDisposable bufferLock = SecureMemory.TryLock(buffer);
-        RandomNumberGenerator.Fill(buffer);
-
-        try
-        {
-            using FileStream stream = OpenVerifiedSingleLinkFile(path);
-            int count = (int)Math.Min(buffer.Length, stream.Length);
-            stream.Position = 0;
-            stream.Write(buffer, 0, count);
-            stream.Flush(flushToDisk: true);
-        }
-        finally
-        {
-            CryptographicOperations.ZeroMemory(buffer);
-        }
-
-        File.Delete(path);
+        DestroyPrefixAndSuffixAndDelete(path, prefixBytes, prefixBytes);
     }
 
+    /// <summary>
+    /// Overwrites the head and tail of a file and deletes it, with the
+    /// overwrite and the deletion bound to the same verified object.
+    /// </summary>
+    /// <remarks>
+    /// The handle is opened once, with DELETE access and no sharing, and it
+    /// stays open until the deletion has been recorded against it. Closing it
+    /// first and then calling <c>File.Delete(path)</c> would hand the name back
+    /// to whoever can write in that directory: the object this method just
+    /// destroyed could survive under a new name while a substituted one is
+    /// deleted in its place. Delete-on-close names the file record, not the
+    /// path, so no such window exists.
+    /// </remarks>
     public static void DestroyPrefixAndSuffixAndDelete(
         string? path,
         int prefixBytes,
@@ -76,7 +66,7 @@ public static partial class SecureFile
         using IDisposable bufferLock = SecureMemory.TryLock(buffer);
         try
         {
-            using FileStream stream = OpenVerifiedSingleLinkFile(path);
+            using FileStream stream = OpenVerifiedSingleLinkFileForDestruction(path, asynchronous: false);
 
             int prefixCount = (int)Math.Min(prefixBytes, stream.Length);
             RandomNumberGenerator.Fill(buffer.AsSpan(0, prefixCount));
@@ -88,65 +78,39 @@ public static partial class SecureFile
             stream.Position = stream.Length - suffixCount;
             stream.Write(buffer, 0, suffixCount);
             stream.Flush(flushToDisk: true);
+
+            // Same handle, same object: the name is never resolved again.
+            MarkForDeletion(stream);
         }
         finally
         {
             CryptographicOperations.ZeroMemory(buffer);
         }
-
-        File.Delete(path);
     }
 
     [SuppressMessage(
         "Reliability",
         "CA2000:Dispose objects before losing scope",
         Justification = "FileStream takes ownership of the SafeFileHandle on success; the catch path disposes it before rethrowing.")]
-    private static FileStream OpenVerifiedSingleLinkFile(string path)
+    internal static FileStream OpenVerifiedSingleLinkFileForDestruction(string path, bool asynchronous = true)
     {
         string fullPath = Path.GetFullPath(path);
-        FileAttributes attributes = File.GetAttributes(fullPath);
-        if ((attributes & (FileAttributes.Directory | FileAttributes.ReparsePoint)) != 0)
+        uint flags = FileAttributeNormal
+            | FileFlagWriteThrough
+            | FileFlagOpenReparsePoint
+            | FileFlagSequentialScan;
+        if (asynchronous)
         {
-            throw new IOException("Secure deletion refuses directories and reparse-point files.");
+            flags |= FileFlagOverlapped;
         }
 
-        SafeFileHandle handle = File.OpenHandle(
-            fullPath,
-            FileMode.Open,
-            FileAccess.ReadWrite,
-            FileShare.None,
-            FileOptions.WriteThrough);
-        try
-        {
-            ValidateSingleLinkHandle(handle, fullPath);
-
-            return new FileStream(handle, FileAccess.ReadWrite, bufferSize: 4096, isAsync: false);
-        }
-        catch
-        {
-            handle.Dispose();
-            throw;
-        }
-    }
-
-    [SuppressMessage(
-        "Reliability",
-        "CA2000:Dispose objects before losing scope",
-        Justification = "FileStream takes ownership of the SafeFileHandle on success; the catch path disposes it before rethrowing.")]
-    internal static FileStream OpenVerifiedSingleLinkFileForDestruction(string path)
-    {
-        string fullPath = Path.GetFullPath(path);
         SafeFileHandle handle = CreateFileForDestruction(
             fullPath,
             GenericRead | GenericWrite | DeleteAccess,
             0,
             0,
             OpenExisting,
-            FileAttributeNormal
-                | FileFlagWriteThrough
-                | FileFlagOverlapped
-                | FileFlagOpenReparsePoint
-                | FileFlagSequentialScan,
+            flags,
             0);
         if (handle.IsInvalid)
         {
@@ -158,7 +122,7 @@ public static partial class SecureFile
         try
         {
             ValidateSingleLinkHandle(handle, fullPath);
-            return new FileStream(handle, FileAccess.ReadWrite, bufferSize: 4096, isAsync: true);
+            return new FileStream(handle, FileAccess.ReadWrite, bufferSize: 4096, isAsync: asynchronous);
         }
         catch
         {

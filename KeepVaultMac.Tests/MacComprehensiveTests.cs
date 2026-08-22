@@ -63,6 +63,10 @@ internal static partial class MacComprehensiveTests
 
     internal static IReadOnlyList<TestCase> AllTests =>
     [
+        // Source- and documentation-level gates. Cheap enough to run on every
+        // changed-file pass, including documentation-only changes.
+        new("no legacy constructions in production source", SpecLintTests.NoLegacyLintAsync, TestResource.Light, "Spec"),
+        new("documentation matches the normative v11 specification", SpecLintTests.SpecConsistencyAsync, TestResource.Light, "Spec"),
         new("macOS process hardening", TestProcessHardeningAsync, TestResource.ProcessGlobal, "Security"),
         new("signed native trust and tamper rejection", TestNativeTrustAsync, TestResource.Light, "Trust"),
         new("every Mach-O in the release bundle carries a hybrid signature", TestBundleMachOClosureAsync, TestResource.Light, "Packaging"),
@@ -77,7 +81,6 @@ internal static partial class MacComprehensiveTests
         new("randomised differential testing against every reference library", TestReferenceDifferentialAsync, TestResource.CpuHeavy, "Crypto"),
         new("Argon2id fixed 1 GiB profile and independent equivalence", TestArgon2Async, TestResource.ArgonHeavy, "KDF"),
         new("ZPAQ levels, streaming, traversal and malformed corpus", TestZpaqAsync, TestResource.ZpaqGlobal, "ZPAQ"),
-        new("v11 suite roundtrips and manipulation rejection", TestContainersAsync, TestResource.EntropyGlobal, "Containers"),
         new("v11 master KDF and 512/512 factor split mutation isolation", TestV11MasterKdfAsync, TestResource.ArgonHeavy, "KDF"),
         new("v11 container header, decryption and KPAR2 round trip", TestV11ContainersAsync, TestResource.EntropyGlobal, "Containers"),
         new("quarantine rollback object binding and symlink-safe directory traversal", TestQuarantineAndSymlinkSafetyAsync, TestResource.Light, "Deletion"),
@@ -91,10 +94,13 @@ internal static partial class MacComprehensiveTests
         new("salt and nonce for every single-round suite without prepared entropy", TestUnpreparedEncryptionParametersAsync, TestResource.EntropyGlobal, "Crypto"),
         new("per-chunk nonces across a multi-chunk archive", TestPerChunkNoncesAsync, TestResource.CpuHeavy, "Crypto"),
         new("MARS and SHACAL-2 published vectors and CTR behaviour", TestCascadeCipherVectorsAsync, TestResource.Light, "Crypto"),
+        new("secure deletion destroys and deletes the same object", TestSecureFileObjectBoundDeletionAsync, TestResource.Light, "Deletion"),
+        new("KPAR2 sidecar replacement survives a failure at every step", TestRecoverySidecarTransactionAsync, TestResource.Light, "Recovery"),
         new("KPAR2 v4 repair, authentication and transplantation rejection", TestRecoveryAsync, TestResource.EntropyGlobal, "Recovery"),
-        new("KPAR2 v4 accepts every catalogued suite, not just the first two", TestRecoveryAcrossSuitesAsync, TestResource.EntropyGlobal, "Recovery"),
         new("cryptographic erase ordering and hard-link refusal", TestCryptographicEraseAsync, TestResource.EntropyGlobal, "Deletion"),
         new("verified original deletion refuses on any mismatch", TestVerifiedOriginalDeletionAsync, TestResource.Light, "Deletion"),
+        .. ContainerSuiteCases(),
+        .. RecoverySuiteCases(),
         .. MacGuiTests.Tests,
     ];
 
@@ -574,19 +580,19 @@ internal static partial class MacComprehensiveTests
         // --- keyed Skein-MAC-1024-1024 -------------------------------------
         byte[] key = RandomNumberGenerator.GetBytes(256);
         byte[] message = RandomNumberGenerator.GetBytes(77);
-        byte[] mac = KeyedSkein1024.Compute(key, "Keep Vault v10 test domain", message);
+        byte[] mac = KeyedSkein1024.Compute(key, "Keep Vault v11 test domain", message);
         Require(mac.Length == 128, $"Skein-MAC-1024-1024 returned {mac.Length} bytes, not 128.");
 
         byte[] otherKey = [.. key];
         otherKey[0] ^= 0xFF;
         Require(
-            !FixedEqual(mac, KeyedSkein1024.Compute(otherKey, "Keep Vault v10 test domain", message)),
+            !FixedEqual(mac, KeyedSkein1024.Compute(otherKey, "Keep Vault v11 test domain", message)),
             "The Skein MAC ignored a change in its key.");
         Require(
             !FixedEqual(mac, KeyedSkein1024.Compute(key, "a different domain", message)),
             "The Skein MAC ignored its personalisation, so role separation would collapse.");
         Require(
-            !FixedEqual(mac, KeyedSkein1024.Compute(key, "Keep Vault v10 test domain", [.. message, 0x00])),
+            !FixedEqual(mac, KeyedSkein1024.Compute(key, "Keep Vault v11 test domain", [.. message, 0x00])),
             "The Skein MAC ignored a change in its message.");
 
         // An unkeyed digest over key||message must not coincide with the keyed
@@ -872,7 +878,7 @@ internal static partial class MacComprehensiveTests
     /// The credential and PMI checks are cheap. The Argon2id branches are not —
     /// each is at least a gibibyte — so the expensive part runs the smallest
     /// number of real rounds that can still distinguish a correct chaining from
-    /// the v9 defect.
+    /// the earlier chaining defect.
     /// </remarks>
     private static async Task TestKdfPropertiesAsync()
     {
@@ -885,7 +891,7 @@ internal static partial class MacComprehensiveTests
         // --- credential paths ----------------------------------------------
         byte[] qs = V11MasterKdf.DeriveSha3CredentialHash(Algorithm, Password, Pin, factorA, factorB);
         byte[] qk = V11MasterKdf.DeriveSkeinCredentialHash(Algorithm, Password, Pin, factorA, factorB);
-        Require(qs.Length == 128 && qk.Length == 128, "A v10 credential hash is not 1024 bits.");
+        Require(qs.Length == 128 && qk.Length == 128, "A credential hash is not 1024 bits.");
         Require(!FixedEqual(qs, qk), "Both credential paths produced the same value.");
 
         // Each of the four secrets has to reach each path. A path that ignores
@@ -996,9 +1002,9 @@ internal static partial class MacComprehensiveTests
         byte[] round2 = V11MasterKdf.DeriveRoundMaster(
             Algorithm, 2, qs, qk, saltSha3Round2, saltSkeinRound2, secret: round1, memory2);
 
-        // This is the v9 regression, stated the only way that actually proves
+        // This is the round-chaining regression, stated the only way that proves
         // anything: the same round 2 computed with a different secret, and with
-        // no secret at all, must both differ. v9's defect made round 2
+        // no secret at all, must both differ. The old defect made round 2
         // independent of what came before it.
         byte[] wrongSecret = [.. round1];
         wrongSecret[0] ^= 0xFF;
@@ -1530,9 +1536,9 @@ internal static partial class MacComprehensiveTests
             // rather than quietly working around it.
             byte[] passwordCopy = password.ToArray();
             NativeArgon2id.HashRaw(
-                Argon2Profile.DefaultIterations,
-                Argon2Profile.DefaultMemoryKiB,
-                Argon2Profile.DefaultParallelism,
+                Argon2ReferenceProfile.Iterations,
+                Argon2ReferenceProfile.MemoryKiB,
+                Argon2ReferenceProfile.Parallelism,
                 password,
                 salt,
                 native);
@@ -1562,7 +1568,7 @@ internal static partial class MacComprehensiveTests
 
             Require(reducedRejected, "Native Argon2 adapter accepted a reduced profile.");
             RequireThrows<ArgumentOutOfRangeException>(
-                () => PasswordKeyService.ValidateArgon2Profile(new Argon2Profile(8192, 1, 1)),
+                () => PasswordKeyService.ValidateArgon2Profile(new Argon2ExecutionProfile(1, 1)),
                 "Managed KDF accepted a reduced Argon2 profile.");
         }
         finally
@@ -2014,7 +2020,7 @@ internal static partial class MacComprehensiveTests
 
     private static async Task TestHeaderPublishesNoDerivedCostAsync()
     {
-        string root = CreateTempRoot("keep-vault-v10-header-");
+        string root = CreateTempRoot("keep-vault-v11-header-");
         try
         {
             AddMouseSamplesUntilReady();
@@ -2059,7 +2065,7 @@ internal static partial class MacComprehensiveTests
             string[] actual = [.. header.EnumerateObject().Select(property => property.Name)];
             Require(
                 actual.Length == expected.Length && !actual.Except(expected, StringComparer.Ordinal).Any(),
-                $"The v10 header field set changed: {string.Join(", ", actual.Except(expected, StringComparer.Ordinal))}");
+                $"The v11 header field set changed: {string.Join(", ", actual.Except(expected, StringComparer.Ordinal))}");
 
             Require(
                 header.GetProperty("Argon2MemoryKiB").GetInt32() == 0,
@@ -2104,7 +2110,23 @@ internal static partial class MacComprehensiveTests
 
     private static byte[] HexToBytes(string hex) => Convert.FromHexString(hex);
 
-    private static async Task TestContainersAsync()
+    /// <summary>
+    /// One registered case per cipher suite.
+    /// </summary>
+    /// <remarks>
+    /// Every suite is still covered - nothing is skipped - but the scheduler
+    /// can now start the long Paranoia case first and run the cheap ones beside
+    /// it. As one test that walked all ten suites in a loop, the group was a
+    /// single serial block whose length was the sum of its parts.
+    /// </remarks>
+    internal static IEnumerable<TestCase> ContainerSuiteCases() =>
+        Enum.GetValues<EncryptionSuite>().Select(suite => new TestCase(
+            $"v11 container roundtrip and manipulation rejection: {suite}",
+            () => TestContainersAsync(suite),
+            TestResource.EntropyGlobal,
+            "Containers"));
+
+    private static async Task TestContainersAsync(EncryptionSuite? onlySuite = null)
     {
         string root = CreateTempRoot("keep-vault-container-full-");
         try
@@ -2123,7 +2145,10 @@ internal static partial class MacComprehensiveTests
             byte[] payload = zpaqBytes.ToArray();
             try
             {
-                foreach (EncryptionSuite suite in Enum.GetValues<EncryptionSuite>())
+                IEnumerable<EncryptionSuite> suites = onlySuite is { } single
+                    ? [single]
+                    : Enum.GetValues<EncryptionSuite>();
+                foreach (EncryptionSuite suite in suites)
                 {
                     await TestContainerSuiteAsync(root, payload, suite).ConfigureAwait(false);
                 }
@@ -2214,10 +2239,10 @@ internal static partial class MacComprehensiveTests
             () => containers.ReadContainerInfoAsync(nonCanonical, CancellationToken.None),
             $"{suite} accepted noncanonical header JSON.").ConfigureAwait(false);
 
-        // v10 is a clean break. A container claiming any other version must be
+        // v11 is a clean break. A container claiming any other version must be
         // refused outright rather than read on a compatibility path, and the
         // refusal must not depend on the MACs noticing the edit afterwards.
-        foreach (int rejected in new[] { 8, 9, 12 })
+        foreach (int rejected in new[] { 8, 9, 10, 12 })
         {
             string downgraded = CopyContainer(path, root, $"{suite}-version-{rejected}.kzpaq");
             ReplaceHeaderToken(downgraded, "\"Version\":11", $"\"Version\":{rejected}");
@@ -2316,9 +2341,16 @@ internal static partial class MacComprehensiveTests
     /// catalogued suite id. Both go through create and authenticated verify,
     /// which is where the range check sat on either side.
     /// </remarks>
-    private static async Task TestRecoveryAcrossSuitesAsync()
+    internal static IEnumerable<TestCase> RecoverySuiteCases() =>
+        EncryptionSuiteCatalog.DisplayOrder.Select(suite => new TestCase(
+            $"KPAR2 v4 authenticates and rejects wrong credentials: {suite}",
+            () => TestRecoveryAcrossSuitesAsync(suite),
+            TestResource.EntropyGlobal,
+            "Recovery"));
+
+    private static async Task TestRecoveryAcrossSuitesAsync(EncryptionSuite? onlySuite = null)
     {
-        foreach (EncryptionSuite suite in EncryptionSuiteCatalog.DisplayOrder)
+        foreach (EncryptionSuite suite in onlySuite is { } single ? [single] : EncryptionSuiteCatalog.DisplayOrder)
         {
             string root = CreateTempRoot("keep-vault-kpar2-suite-");
             try
@@ -2634,6 +2666,269 @@ internal static partial class MacComprehensiveTests
         }
     }
 
+    /// <summary>
+    /// The KPAR2 sidecar replacement must never leave the archive without a
+    /// valid recovery file.
+    /// </summary>
+    /// <remarks>
+    /// The old order destroyed the existing sidecar and then moved the new one
+    /// into place. Anything that failed in between - a racing creator of the
+    /// target name, a permission or I/O error - left the archive with no
+    /// recovery data at all even though the sidecar it already had was good.
+    /// Every step of the replacement is failed here in turn, and after each one
+    /// a valid sidecar has to be recoverable.
+    ///
+    /// The error-correction profile is used deliberately: the transaction is
+    /// the same code for both profiles, and this one needs no key derivation,
+    /// so the whole matrix runs in well under a second.
+    /// </remarks>
+    private static async Task TestRecoverySidecarTransactionAsync()
+    {
+        string root = CreateTempRoot("keep-vault-kpar2-txn-");
+        try
+        {
+            var recovery = new RecoveryService();
+            string archive = Path.Combine(root, "archive.zpaq");
+            await File.WriteAllBytesAsync(archive, RandomNumberGenerator.GetBytes(300 * 1024)).ConfigureAwait(false);
+
+            string sidecarPath = await recovery.CreateAsync(archive, null, CancellationToken.None).ConfigureAwait(false);
+            Require(File.Exists(sidecarPath), "The initial KPAR2 sidecar was not created.");
+            byte[] original = await File.ReadAllBytesAsync(sidecarPath).ConfigureAwait(false);
+
+            async Task RequireSidecarUsableAsync(string because)
+            {
+                Require(File.Exists(sidecarPath), $"{because}: no sidecar is present at all.");
+                Require(
+                    await recovery.TryReadProtectionModeAsync(archive, CancellationToken.None).ConfigureAwait(false)
+                        == RecoveryProtectionMode.ErrorCorrectionOnly,
+                    $"{because}: the sidecar present is not readable.");
+            }
+
+            async Task<int> CountSidecarLeftoversAsync()
+            {
+                await Task.CompletedTask.ConfigureAwait(false);
+                return Directory.GetFiles(root, ".*.previous", SearchOption.TopDirectoryOnly).Length;
+            }
+
+            // 1. A failure right after the old sidecar was moved aside must put
+            //    it back under its own name.
+            RecoveryService.SidecarHookAfterQuarantine = () => throw new IOException("injected: after quarantine");
+            try
+            {
+                await RequireThrowsAsync<IOException>(
+                    () => recovery.CreateAsync(archive, null, CancellationToken.None),
+                    "The injected post-quarantine failure was swallowed.").ConfigureAwait(false);
+            }
+            finally
+            {
+                RecoveryService.SidecarHookAfterQuarantine = null;
+            }
+
+            await RequireSidecarUsableAsync("after a post-quarantine failure").ConfigureAwait(false);
+            byte[] afterQuarantineFailure = await File.ReadAllBytesAsync(sidecarPath).ConfigureAwait(false);
+            Require(
+                FixedEqual(original, afterQuarantineFailure),
+                "A post-quarantine failure did not restore the original sidecar bytes.");
+            Require(await CountSidecarLeftoversAsync().ConfigureAwait(false) == 0, "A post-quarantine failure left a stray backup behind.");
+
+            // 2. A failure after the new sidecar was installed but before it was
+            //    validated must roll back to the old one.
+            RecoveryService.SidecarHookAfterInstall = () => throw new IOException("injected: after install");
+            try
+            {
+                await RequireThrowsAsync<IOException>(
+                    () => recovery.CreateAsync(archive, null, CancellationToken.None),
+                    "The injected post-install failure was swallowed.").ConfigureAwait(false);
+            }
+            finally
+            {
+                RecoveryService.SidecarHookAfterInstall = null;
+            }
+
+            await RequireSidecarUsableAsync("after a post-install failure").ConfigureAwait(false);
+            byte[] afterInstallFailure = await File.ReadAllBytesAsync(sidecarPath).ConfigureAwait(false);
+            Require(
+                FixedEqual(original, afterInstallFailure),
+                "A post-install failure did not roll back to the original sidecar.");
+            Require(await CountSidecarLeftoversAsync().ConfigureAwait(false) == 0, "A post-install failure left a stray backup behind.");
+
+            // 3. A racing process that occupies the target name between the
+            //    quarantine and the install must not cost the old sidecar: it
+            //    stays recoverable under the quarantine name.
+            RecoveryService.SidecarHookAfterQuarantine = () => File.WriteAllBytes(sidecarPath, [0x00]);
+            try
+            {
+                await RequireThrowsAsync<IOException>(
+                    () => recovery.CreateAsync(archive, null, CancellationToken.None),
+                    "An occupied KPAR2 target name was accepted.").ConfigureAwait(false);
+            }
+            finally
+            {
+                RecoveryService.SidecarHookAfterQuarantine = null;
+            }
+
+            string[] preserved = Directory.GetFiles(root, ".*.previous", SearchOption.TopDirectoryOnly);
+            Require(preserved.Length == 1, $"The previous sidecar was not preserved after a name collision ({preserved.Length} candidates).");
+            byte[] preservedBytes = await File.ReadAllBytesAsync(preserved[0]).ConfigureAwait(false);
+            Require(
+                FixedEqual(original, preservedBytes),
+                "The preserved sidecar is not the original one.");
+            File.Delete(sidecarPath);
+            File.Move(preserved[0], sidecarPath);
+            await RequireSidecarUsableAsync("after restoring the preserved sidecar").ConfigureAwait(false);
+
+            // 4. A failure while destroying the old backup happens after the
+            //    commit point. The new sidecar must stay installed.
+            RecoveryService.SidecarHookBeforeBackupDestruction = () => throw new IOException("injected: before backup destruction");
+            try
+            {
+                await RequireThrowsAsync<IOException>(
+                    () => recovery.CreateAsync(archive, null, CancellationToken.None),
+                    "The injected backup-destruction failure was swallowed.").ConfigureAwait(false);
+            }
+            finally
+            {
+                RecoveryService.SidecarHookBeforeBackupDestruction = null;
+            }
+
+            await RequireSidecarUsableAsync("after a post-commit backup-destruction failure").ConfigureAwait(false);
+            byte[] afterCommitFailure = await File.ReadAllBytesAsync(sidecarPath).ConfigureAwait(false);
+            Require(
+                !FixedEqual(original, afterCommitFailure),
+                "A post-commit failure rolled back the verified new sidecar.");
+            foreach (string leftover in Directory.GetFiles(root, ".*.previous", SearchOption.TopDirectoryOnly))
+            {
+                File.Delete(leftover);
+            }
+
+            // 5. A sidecar that is a symbolic link is not something to move
+            //    aside and destroy; it is refused.
+            byte[] current = await File.ReadAllBytesAsync(sidecarPath).ConfigureAwait(false);
+            string realSidecar = Path.Combine(root, "elsewhere.kpar2");
+            await File.WriteAllBytesAsync(realSidecar, current).ConfigureAwait(false);
+            File.Delete(sidecarPath);
+            File.CreateSymbolicLink(sidecarPath, realSidecar);
+            await RequireThrowsAsync<IOException>(
+                () => recovery.CreateAsync(archive, null, CancellationToken.None),
+                "A symbolic-link KPAR2 sidecar was replaced instead of refused.").ConfigureAwait(false);
+            Require(File.Exists(realSidecar), "Refusing a symlinked sidecar destroyed its target.");
+            File.Delete(sidecarPath);
+
+            // 6. Neither is one with a second hard link: the bytes would survive
+            //    the destruction under the other name.
+            File.Copy(realSidecar, sidecarPath);
+            string secondLink = Path.Combine(root, "second-link.kpar2");
+            Require(CreateHardLinkForTests(sidecarPath, secondLink), "Could not create a second hard link for the test.");
+            await RequireThrowsAsync<IOException>(
+                () => recovery.CreateAsync(archive, null, CancellationToken.None),
+                "A multiply-linked KPAR2 sidecar was replaced instead of refused.").ConfigureAwait(false);
+            File.Delete(secondLink);
+
+            Zero(original, current, afterQuarantineFailure, afterInstallFailure, preservedBytes, afterCommitFailure);
+        }
+        finally
+        {
+            RecoveryService.SidecarHookAfterQuarantine = null;
+            RecoveryService.SidecarHookAfterInstall = null;
+            RecoveryService.SidecarHookBeforeBackupDestruction = null;
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    private static bool CreateHardLinkForTests(string existingPath, string newLinkPath)
+    {
+        using var process = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+        {
+            FileName = "/bin/ln",
+            ArgumentList = { existingPath, newLinkPath },
+            UseShellExecute = false,
+            RedirectStandardError = true,
+        });
+        if (process is null)
+        {
+            return false;
+        }
+
+        process.WaitForExit();
+        return process.ExitCode == 0 && File.Exists(newLinkPath);
+    }
+
+    /// <summary>
+    /// Secure deletion must destroy and delete the same verified object.
+    /// </summary>
+    /// <remarks>
+    /// The dangerous shape is: verify a handle, overwrite through it, close it,
+    /// then delete by path. Between the close and the delete the name can point
+    /// somewhere else, so the object that was destroyed survives under a new
+    /// name while a substituted one is deleted in its place. Both platforms now
+    /// record the deletion against the open handle instead - macOS through the
+    /// descriptor-relative quarantine, Windows through delete-on-close.
+    /// </remarks>
+    private static Task TestSecureFileObjectBoundDeletionAsync()
+    {
+        string root = CreateTempRoot("keep-vault-securefile-");
+        try
+        {
+            // 1. The ordinary case still works: the file is gone and its
+            //    neighbours are untouched.
+            string victim = Path.Combine(root, "victim.bin");
+            string neighbour = Path.Combine(root, "neighbour.bin");
+            byte[] neighbourBytes = RandomNumberGenerator.GetBytes(4096);
+            File.WriteAllBytes(victim, RandomNumberGenerator.GetBytes(64 * 1024));
+            File.WriteAllBytes(neighbour, neighbourBytes);
+            SecureFile.DestroyPrefixAndSuffixAndDelete(victim, 4096, 4096);
+            Require(!File.Exists(victim), "Secure deletion left the target in place.");
+            Require(
+                FixedEqual(neighbourBytes, File.ReadAllBytes(neighbour)),
+                "Secure deletion altered a neighbouring file.");
+
+            // 2. A second hard link means the bytes survive the destruction
+            //    under the other name, so the whole operation is refused before
+            //    anything is overwritten.
+            string linked = Path.Combine(root, "linked.bin");
+            string secondName = Path.Combine(root, "second-name.bin");
+            byte[] linkedBytes = RandomNumberGenerator.GetBytes(32 * 1024);
+            File.WriteAllBytes(linked, linkedBytes);
+            Require(CreateHardLinkForTests(linked, secondName), "Could not create a second hard link for the test.");
+            RequireThrows<IOException>(
+                () => SecureFile.DestroyPrefixAndSuffixAndDelete(linked, 4096, 4096),
+                "Secure deletion accepted a file with two hard links.");
+            Require(
+                FixedEqual(linkedBytes, File.ReadAllBytes(linked)),
+                "A refused secure deletion still overwrote the multiply-linked file.");
+            File.Delete(secondName);
+            File.Delete(linked);
+
+            // 3. A symbolic link is not the object it names.
+            string realFile = Path.Combine(root, "real.bin");
+            string symlink = Path.Combine(root, "symlink.bin");
+            byte[] realBytes = RandomNumberGenerator.GetBytes(16 * 1024);
+            File.WriteAllBytes(realFile, realBytes);
+            File.CreateSymbolicLink(symlink, realFile);
+            RequireThrows<IOException>(
+                () => SecureFile.DestroyPrefixAndSuffixAndDelete(symlink, 4096, 4096),
+                "Secure deletion followed a symbolic link.");
+            Require(
+                FixedEqual(realBytes, File.ReadAllBytes(realFile)),
+                "A refused secure deletion still overwrote a symlink target.");
+            Require(File.Exists(symlink), "A refused secure deletion removed the symbolic link.");
+
+            // 4. A directory is never a secure-deletion target.
+            string directory = Path.Combine(root, "a-directory");
+            Directory.CreateDirectory(directory);
+            SecureFile.DestroyPrefixAndSuffixAndDelete(directory, 4096, 4096);
+            Require(Directory.Exists(directory), "Secure deletion removed a directory.");
+
+            Zero(neighbourBytes, linkedBytes, realBytes);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+
+        return Task.CompletedTask;
+    }
+
     private static async Task TestCryptographicEraseAsync()
     {
         string root = CreateTempRoot("keep-vault-erase-full-");
@@ -2943,7 +3238,7 @@ internal static partial class MacComprehensiveTests
             JsonElement header = document.RootElement;
             EncryptionSuiteParameters parameters = EncryptionSuiteCatalog.Get(suite);
             int version = header.GetProperty("Version").GetInt32();
-            Require(version is 10 or 11, "Container version is not v10 or v11.");
+            Require(version == 11, "Container version is not v11.");
 
             // The second-round fields are always present. Present-and-null is
             // not cosmetic: the reader compares the header against its own
@@ -3000,7 +3295,7 @@ internal static partial class MacComprehensiveTests
             }
             Require(header.GetProperty("Algorithm").GetString() == parameters.Algorithm, "Container algorithm label mismatch.");
             Require(header.GetProperty("CounterEndian").GetString() == EncryptionSuiteCatalog.CounterEndian, "Container counter endian mismatch.");
-            // Zero, and asserted as zero. v10 derives the memory cost from the
+            // Zero, and asserted as zero. v11 derives the memory cost from the
             // credentials; a header that published it would give away the one
             // KDF parameter that is deliberately secret.
             Require(header.GetProperty("Argon2MemoryKiB").GetInt32() == 0, "Container header published the Argon2id memory cost.");
@@ -3008,8 +3303,8 @@ internal static partial class MacComprehensiveTests
                 ? "DualArgon2id-SHA3+Skein1024-Sequential-Master1024"
                 : "DualArgon2id-SplitSHA3+Skein1024-Sequential-Master1024";
             Require(header.GetProperty("KdfMode").GetString() == expectedKdfMode, "Container KDF mode mismatch.");
-            Require(header.GetProperty("Argon2Iterations").GetInt32() == Argon2Profile.DefaultIterations, "Container Argon2 iterations mismatch.");
-            Require(header.GetProperty("Argon2Parallelism").GetInt32() == Argon2Profile.DefaultParallelism, "Container Argon2 parallelism mismatch.");
+            Require(header.GetProperty("Argon2Iterations").GetInt32() == Argon2ExecutionProfile.DefaultIterations, "Container Argon2 iterations mismatch.");
+            Require(header.GetProperty("Argon2Parallelism").GetInt32() == Argon2ExecutionProfile.DefaultParallelism, "Container Argon2 parallelism mismatch.");
             Require(header.GetProperty("GeneratedPasswordFactorCount").GetInt32() == 2, "Container factor count mismatch.");
             Require(header.GetProperty("GeneratedPasswordBits").GetInt32() == 1024, "Container generated-factor bits mismatch.");
             Require(
@@ -3045,7 +3340,7 @@ internal static partial class MacComprehensiveTests
             if (suite == EncryptionSuite.ParanoiaCascade)
             {
                 // Six layers: 32+56+64+64+128+32 key bytes and 16+16+32+64+128+12
-                // nonce bytes. In v10 the key length no longer follows from an
+                // nonce bytes. The key length no longer follows from an
                 // Argon2id output length: every stage key is cut from its own
                 // 1024-bit role value, so the cascade could be any width.
                 Require(header.GetProperty("EncryptionKeyBits").GetInt32() == 376 * 8, "Paranoia key is not 376 bytes.");
@@ -3117,9 +3412,9 @@ internal static partial class MacComprehensiveTests
     {
         var parameters = new Argon2Parameters.Builder(Argon2Parameters.Argon2id)
             .WithVersion(Argon2Parameters.Version13)
-            .WithMemoryAsKB(Argon2Profile.DefaultMemoryKiB)
-            .WithIterations(Argon2Profile.DefaultIterations)
-            .WithParallelism(Argon2Profile.DefaultParallelism)
+            .WithMemoryAsKB(Argon2ReferenceProfile.MemoryKiB)
+            .WithIterations(Argon2ReferenceProfile.Iterations)
+            .WithParallelism(Argon2ReferenceProfile.Parallelism)
             .WithSalt(salt.ToArray())
             .Build();
         var generator = new Argon2BytesGenerator();
@@ -3209,7 +3504,7 @@ internal static partial class MacComprehensiveTests
     }
 
     /// <summary>
-    /// Proves the v9 second Argon2id round is real, independent, and costs no
+    /// Proves the second Argon2id round is real, independent, and costs no
     /// extra mouse entropy.
     /// </summary>
     /// <remarks>
@@ -3706,10 +4001,10 @@ internal static partial class MacComprehensiveTests
             !EntropyMixer.HasRequiredSamples(EntropyPurpose.SaltSha3),
             "The two-round derivation did not consume the salt pool exactly once.");
 
-        // The v9 regression test that lived here proved round two no longer ran
-        // over a zeroed prehash. v10 does not share a prehash between rounds at
+        // The regression test that lived here proved round two no longer ran
+        // over a zeroed prehash. v11 does not share a prehash between rounds at
         // all: round two takes round one's complete master as Argon2id's secret
-        // input, which the v10 master-KDF group verifies directly by changing a
+        // input, which the KDF-properties group verifies directly by changing a
         // single bit of round one and observing round two change with it.
     }
 

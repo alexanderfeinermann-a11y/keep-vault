@@ -22,18 +22,21 @@ half through its own item. Two prompts per release, which is already the
 accepted behaviour. Better still, two different holders — a smartcard or HSM
 for at least the RSA half — so that no single machine ever has both.
 
-## 2. ZPAQ still runs in-process
+## 2. The ZPAQ child process is not separately sandboxed
 
-The ZPAQ parser is a large native C++ codebase and the largest remaining attack
-surface in the program. It is fenced in — path validation, no symlinks, private
-snapshots, no JIT, size limits, a malformed-input corpus — but a memory-safety
-bug in the parser would still execute with the full rights of the Keep Vault
-process, which include the user's files and the Keychain items above.
+ZPAQ already runs as an external process, not in-process: `ZpaqService` starts a
+trust-verified executable and talks to it over pipes. What it does not have is a
+sandbox profile of its own. The parser is a large native C++ codebase and the
+largest remaining attack surface in the program, and it is fenced in — path
+validation, no symlinks, private input snapshots, size limits, a malformed-input
+corpus, bounded output, cancellation that kills the whole process tree — but a
+memory-safety bug in it would still execute with the same rights as the app that
+launched it, which include the user's files and the Keychain items above.
 
-**To close it:** move extraction and listing into a separate helper process
-under a restrictive sandbox profile, with file access limited to the archive
-and one output directory, and no network. The container layer already streams,
-so the interface is a pipe rather than a rewrite.
+**To close it:** launch the child under a restrictive sandbox profile, with file
+access limited to the private snapshot and one output directory, and no network.
+The interface is already a pipe, so this is a launch change rather than a
+rewrite.
 
 ## 3. Not notarized, signed with an Apple Development identity
 

@@ -7,7 +7,7 @@ namespace KalynaArchiver.Signing;
 /// SHA-512, computed twice by two independent implementations that must agree.
 /// </summary>
 /// <remarks>
-/// Container v9 derives its second Argon2id round from the same entropy pools
+/// The container derives its second Argon2id round from the same entropy pools
 /// as the first, separated only by using SHA-512 where the first round uses
 /// SHA3-512. That makes this hash load-bearing for key material: a SHA-512 that
 /// is subtly wrong would not fail, it would silently produce a different key,

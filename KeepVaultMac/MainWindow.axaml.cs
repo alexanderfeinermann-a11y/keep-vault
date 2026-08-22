@@ -1511,7 +1511,7 @@ public sealed partial class MainWindow : Window, IDisposable
     /// the passphrase.
     /// </summary>
     /// <remarks>
-    /// The PIN is a full credential in v10, not a convenience: an archive
+    /// The PIN is a full credential, not a convenience: an archive
     /// cannot be opened without it. Showing its state only when archiving fails
     /// would be the wrong moment to find out.
     /// </remarks>

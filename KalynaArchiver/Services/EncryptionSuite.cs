@@ -66,7 +66,7 @@ public enum EncryptionSuite
 /// </summary>
 /// <remarks>
 /// Cascades are described as an ordered list of these rather than as named
-/// inner and outer halves, because v9 has one with six layers. The order is
+/// inner and outer halves, because one suite has six layers. The order is
 /// the order the plaintext travels: index 0 is applied first and is therefore
 /// the innermost, and the last entry is what an attacker meets first.
 /// </remarks>
@@ -141,7 +141,6 @@ internal static class EncryptionSuiteCatalog
     public const string ChaChaAlgorithm = "ChaCha20-Poly1305+HMAC-SHA3-512+Skein-MAC-1024";
     public const string MixedAlgorithm =
         "ChaCha20-Poly1305(Threefish-1024-CTR(AES-256-CTR))+HMAC-SHA3-512+Skein-MAC-1024";
-    public const string KdfInputMode = "SHA3-512-LP(UserPassword,FactorA)||SHA3-512-LP(UserPassword,FactorB)";
     public const string CounterEndian = "BigEndian";
     public const string ThreefishTweakMode = "SHA3-512-LP(Domain,Nonce)[0..15]";
 

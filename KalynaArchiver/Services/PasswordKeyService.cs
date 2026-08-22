@@ -34,15 +34,15 @@ public sealed class PasswordKeyService
         "QWERTY", "ASDF", "ZXCV", "KALYNA", "ZPAQ", "KEEPVAULT", "MASTERKEY",
     ];
 
-    public static void ValidateArgon2Profile(Argon2Profile profile)
+    public static void ValidateArgon2Profile(Argon2ExecutionProfile profile)
     {
         ArgumentNullException.ThrowIfNull(profile);
-        if (profile != Argon2Profile.Default)
+        if (profile != Argon2ExecutionProfile.Default)
         {
             throw new ArgumentOutOfRangeException(
                 nameof(profile),
-                $"Argon2id must use the fixed profile: {Argon2Profile.DefaultMemoryKiB} KiB, "
-                + $"{Argon2Profile.DefaultIterations} iterations, parallelism {Argon2Profile.DefaultParallelism}.");
+                $"Argon2id must use the fixed execution profile: "
+                + $"{Argon2ExecutionProfile.DefaultIterations} iterations, parallelism {Argon2ExecutionProfile.DefaultParallelism}.");
         }
     }
 
@@ -478,17 +478,40 @@ public sealed class PasswordPolicyException : ArgumentException
     public PasswordPolicyAnalysis Analysis { get; }
 }
 
-public sealed record Argon2Profile(int MemoryKiB, int Iterations, int Parallelism)
+/// <summary>
+/// The Argon2id cost parameters this build fixes at compile time.
+/// </summary>
+/// <remarks>
+/// Memory is deliberately not part of this record. v11 derives the memory cost
+/// from the credentials themselves - <c>m = 1 GiB + 16 KiB * PMI16</c>, see
+/// <see cref="V11MasterKdf.DerivePmi"/> - so there is no single productive
+/// memory value to state here. A record that carried a "fixed 1 GiB" alongside
+/// the real iteration and parallelism counts would read like the whole profile
+/// and would be exactly the wrong thing for later code to reuse.
+/// </remarks>
+public sealed record Argon2ExecutionProfile(int Iterations, int Parallelism)
 {
-    public const int DefaultMemoryKiB = 1024 * 1024;
     public const int DefaultIterations = 4;
     public const int DefaultParallelism = 4;
-    public const int MinMemoryKiB = DefaultMemoryKiB;
-    public const int MaxMemoryKiB = DefaultMemoryKiB;
     public const int MinIterations = DefaultIterations;
     public const int MaxIterations = DefaultIterations;
     public const int MinParallelism = DefaultParallelism;
     public const int MaxParallelism = DefaultParallelism;
 
-    public static Argon2Profile Default => new(DefaultMemoryKiB, DefaultIterations, DefaultParallelism);
+    public static Argon2ExecutionProfile Default => new(DefaultIterations, DefaultParallelism);
+}
+
+/// <summary>
+/// The fixed 1 GiB cost used only by the differential tests that compare the
+/// native adapter against an independent Argon2id implementation.
+/// </summary>
+/// <remarks>
+/// This is a test reference point, not the v11 production profile: production
+/// memory comes from PMI16 and is never this exact value except by chance.
+/// </remarks>
+public static class Argon2ReferenceProfile
+{
+    public const int MemoryKiB = 1024 * 1024;
+    public const int Iterations = Argon2ExecutionProfile.DefaultIterations;
+    public const int Parallelism = Argon2ExecutionProfile.DefaultParallelism;
 }
