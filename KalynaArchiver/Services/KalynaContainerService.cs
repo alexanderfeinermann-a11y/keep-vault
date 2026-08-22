@@ -22,9 +22,9 @@ public sealed partial class KalynaContainerService
     /// </remarks>
     internal static readonly byte[] ThreefishTweakDomain = "Kalyna-ZPAQ/v11/Threefish-1024/CTR-Tweak"u8.ToArray();
     // Version 11 is the only container generation this build reads or writes.
-    // There is deliberately no reader for v7: a format this app writes once and
-    // reads years later is safer with one shape than with a compatibility path
-    // that is exercised rarely and audited less.
+    // There is deliberately no reader for anything older: a format this app
+    // writes once and reads years later is safer with one shape than with a
+    // compatibility path that is exercised rarely and audited less.
     private const int CurrentVersion = 11;
 
     /// <summary>

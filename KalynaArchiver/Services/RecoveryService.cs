@@ -345,7 +345,7 @@ public sealed partial class RecoveryService
                     SaltSkeinRound1 = kdfInfo is null ? null : Convert.ToBase64String(kdfInfo.Salt[64..128]),
                     SaltSha3Round2 = kdfInfo is null || kdfInfo.Salt.Length <= 128 ? null : Convert.ToBase64String(kdfInfo.Salt[128..192]),
                     SaltSkeinRound2 = kdfInfo is null || kdfInfo.Salt.Length <= 128 ? null : Convert.ToBase64String(kdfInfo.Salt[192..256]),
-                    // Kept at zero in every mode. The fields are v2 leftovers
+                    // Kept at zero in every mode. The fields are leftovers
                     // and the Argon2id cost is derived from the credentials;
                     // publishing it beside the salt would undo that.
                     Argon2MemoryKiB = 0,
@@ -1776,7 +1776,7 @@ public sealed partial class RecoveryService
         if (recovery.Length < PrefixLocatorBytes + SuffixLocatorBytes
             + ((DataShardCount + ParityShardCount) * LocatorBlockSize))
         {
-            throw new InvalidDataException("KPAR2 file is too short for the v2 redundant layout.");
+            throw new InvalidDataException("KPAR2 file is too short for the redundant locator layout.");
         }
 
         var validBlocks = new List<byte[]>();

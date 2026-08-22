@@ -3789,7 +3789,7 @@ static async Task RunCryptographicEraseTestsAsync()
         string magicOnly = Path.Combine(root, "magic-only.kzpaq");
         await File.WriteAllBytesAsync(magicOnly, [.. "KZPAQ1\0"u8, 0, 0, 0, 0]);
         CryptoEraseAnalysis magicOnlyAnalysis = await erase.AnalyzeAsync(magicOnly, CancellationToken.None);
-        Assert(magicOnlyAnalysis.Exists && !magicOnlyAnalysis.IsEncryptedContainer, "magic bytes without a valid v8 header are not cryptographically erasable");
+        Assert(magicOnlyAnalysis.Exists && !magicOnlyAnalysis.IsEncryptedContainer, "magic bytes without a valid container header are not cryptographically erasable");
 
         string malformedHeader = Path.Combine(root, "malformed-header.kzpaq");
         byte[] malformedBytes = [.. "KZPAQ1\0"u8, 1, 0, 0, 0, (byte)'{'];
