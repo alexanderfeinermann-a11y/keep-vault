@@ -322,6 +322,26 @@ APPLESCRIPT
 
 cleanup() {
   execute_rollback
+
+  # The staged bundles live inside the applications folder while the install
+  # runs, which is long enough for LaunchServices to index them. Removing the
+  # directory does not remove the database entry, so without this every install
+  # left another launchable Keep Vault behind - pointing at a path that no
+  # longer exists.
+  local launch_services_cleanup='/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister'
+  if [[ -x ${launch_services_cleanup} && -n ${install_root:-} && ${install_root} == ${applications_dir}/.keep-vault-install.* ]]; then
+    # By name, not by glob: a successful install has already moved the staged
+    # bundle to its destination, so nothing matches here any more while the
+    # database still holds the staging path it was indexed under.
+    for staged_bundle in \
+      ${install_root}/Keep\ Vault.app \
+      ${install_root}/QR-Scanner.app \
+      ${install_root}/*.app(N) \
+      ${install_root}/backup/*.app(N); do
+      ${launch_services_cleanup} -u ${staged_bundle} 2>/dev/null || true
+    done
+  fi
+
   if (( ! ${rollback_failed:-0} && ! ${preserve_install_root:-0} )); then
     if [[ -n ${install_root:-} && -d ${install_root} && ${install_root} == ${applications_dir}/.keep-vault-install.* ]]; then
       rm -rf -- ${install_root}
